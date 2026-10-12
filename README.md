@@ -10,7 +10,7 @@ This is being built in phases. **Phases 1–6 are complete, Phase 7 is partially
 
 | Phase | What | Status |
 |---|---|---|
-| 1 | Project structure, config, logging, Discord client, `/pulsenotify status`, `/pulsenotify toggle`, `pn!sync`, Supabase connection | ✅ Done |
+| 1 | Project structure, config, logging, Discord client, `/pulsenotify status`, `/pulsenotify toggle`, `!sync`, Supabase connection | ✅ Done |
 | 2 | Full database schema (accounts, channels, alert config, events, live state, platform health) | ✅ Done |
 | 3 | Monitoring framework (scheduler, workers, rate limiting, retries, dedup, API usage manager) | ✅ Done — framework only, zero adapters registered |
 | 4 | YouTube adapter, `/pulsenotify account-add\|account-remove\|account-list`, notification embeds + sender | ✅ Done |
@@ -90,10 +90,10 @@ Before any platform integration is built: verify that platform's *current* offic
 
    Slash commands aren't visible in Discord until synced. In any server the bot is in (as the bot owner), run:
 
-   - `pn!sync` — syncs to that server only, visible immediately (use while developing)
-   - `pn!sync global` — syncs everywhere, can take up to an hour to propagate (use for production releases)
+   - `!sync` — syncs to that server only, visible immediately (use while developing)
+   - `!sync global` — syncs everywhere, can take up to an hour to propagate (use for production releases)
 
-   (`pn!` is the default prefix, set by `DISCORD_COMMAND_PREFIX` in `.env`.)
+   (`!` is the default prefix, set by `DISCORD_COMMAND_PREFIX` in `.env`.)
 
 ## Commands
 
@@ -104,22 +104,22 @@ Every slash command lives under one top-level `/pulsenotify` group (`commands/pu
 | `/pulsenotify status` | Bot health: uptime, latency, server count, database connection, this server's enabled state, per-platform monitoring health/request counts | Anyone |
 | `/pulsenotify help` | Lists every command and what it does — built by introspecting the command group itself, so it can't drift out of sync with what's actually registered | Anyone |
 | `/pulsenotify toggle state:<on\|off>` | Enable/disable PulseNotify for this server. Everything else is blocked while disabled — `toggle` itself always still works. | Manage Server |
-| `/pulsenotify account-add platform identifier channel` | Start monitoring a platform account; posts alerts to the given channel | Manage Server |
-| `/pulsenotify account-remove account` | Stop monitoring an account (autocompletes from this server's configured accounts) | Manage Server |
+| `/pulsenotify account-add platform` | Start monitoring a YouTube/Kick/Instagram account. Opens a form: the account (handle/URL/ID), a channel picker for where alerts post, and an optional role to mention. Refuses a channel the bot can't post in | Manage Server |
+| `/pulsenotify account-remove account` | Stop monitoring an account (autocompletes from this server's configured accounts). Asks for confirmation first — Remove/Cancel buttons only the person who ran it can press, expiring after 60s with nothing deleted | Manage Server |
 | `/pulsenotify account-list` | List accounts monitored in this server, with status | Anyone |
-| `/pulsenotify account-set-message account message [event_type]` | Set a custom notification message template for an account (or `clear` to remove it); see below | Manage Server |
-| `/pulsenotify account-set-mention account [role] [event_type]` | Set the role to mention when an account posts/goes live (omit `role` to clear it) | Manage Server |
-| `/pulsenotify alerts account event_type [enabled] [embed]` | View an event type's current alert/embed setting (omit both `enabled` and `embed`), or change one/both | Manage Server |
+| `/pulsenotify account-set-message account` | Opens a form with a multi-line message box (pre-filled with the current message) and which alert type it applies to (all, or one). Leave the box empty to go back to the default message; see below | Manage Server |
+| `/pulsenotify account-set-mention account` | Opens a form: who to mention (a role, @everyone, or nobody), a role picker, and which alert type it applies to — pre-filled with the current setting | Manage Server |
+| `/pulsenotify alerts account` | Opens a form with two multi-select lists covering every alert type the account has: which ones send alerts, and which ones show the embed/link preview — pre-filled with the current settings | Manage Server |
 | `/pulsenotify account-info account` | Show an account's full alert configuration — every event type's enabled/embed/mention state, plus its custom message if one is set | Anyone |
-| `pn!sync [global]` | Sync slash commands to this server, or globally. A text command, not a slash command — if the command tree is out of sync, `/pulsenotify` itself might not be registered yet, so syncing can't depend on it. | Bot owner only |
+| `!sync [global]` | Sync slash commands to this server, or globally. A text command, not a slash command — if the command tree is out of sync, `/pulsenotify` itself might not be registered yet, so syncing can't depend on it. | Bot owner only |
 
-Per-account alert preferences (which event types notify, mentions, embed on/off) are seeded with sensible defaults when an account is added — new posts/videos/Shorts/live-start on, stream-ended off, matching the spec's own example. All of them are now viewable and changeable via slash commands (Phase 8): `/pulsenotify alerts` turns an event type's notifications and/or embed on or off (and shows the current setting if you omit both), `/pulsenotify account-set-mention` sets or clears the role pinged for an account, and `/pulsenotify account-info` shows everything for an account at a glance — including the custom message, which previously could only be *set* (`account-set-message`), never viewed back.
+Per-account alert preferences (which event types notify, mentions, embed on/off) are seeded with sensible defaults when an account is added — new posts/videos/Shorts/live-start on, stream-ended off, matching the spec's own example. All of them are viewable and changeable via slash commands (Phase 8). Since 2026-10-12, commands that need more than one choice open a modal form (`commands/accounts/modals.py`) pre-filled with the current settings, rather than taking everything as slash-command options; the slash command itself only picks the platform or the account (an account dropdown inside a form is capped at 25 options, so accounts stay on autocomplete). `/pulsenotify alerts` turns every event type's notifications and embeds on or off in one form, `/pulsenotify account-set-mention` sets or clears who is pinged for an account (Discord's role picker doesn't offer @everyone, so it's a separate choice in the form), and `/pulsenotify account-info` shows everything for an account at a glance — including the custom message, which previously could only be *set* (`account-set-message`), never viewed back.
 
 Deliberately **not** built in Phase 8, at the user's explicit choice: analytics (event-count/history stats) and general admin tooling (e.g. wiring up `pulsenotify_audit_logs`, which still exists but nothing writes to it). Revisit if wanted later.
 
 ### Custom notification messages
 
-`/pulsenotify account-set-message` lets an admin replace the default embed/text with their own template, e.g.:
+`/pulsenotify account-set-message` lets an admin replace the default message text with their own template — typed into a multi-line box in its form, which a slash-command option can't do — e.g.:
 
 ```
 Hey @everyone, {creator} just posted a new post! Go check it out!
@@ -130,11 +130,16 @@ Placeholders (`notifications/templates.py`): `{creator}` `{title}` `{description
 
 Two different trust levels are handled on purpose: the **template** is admin-authored (the command requires Manage Server) and may contain literal `@everyone`, `@here`, or role mentions — that's explicit configuration, matching the example above. The **values substituted into it** (video title, post description, ...) come from external platform content and are always mention-escaped first (`discord.utils.escape_mentions`), so a stream title containing the literal text "@everyone" can never inject a mention the admin didn't type themselves. `AllowedMentions.everyone` is only set `True` when the *rendered* content actually contains a literal `@everyone`/`@here` — which, given the escaping above, can only happen if the admin put it in the template.
 
-By default a custom message replaces the standard notification text entirely; the account's `embed_enabled` setting still independently controls whether Discord's own native preview of the `{url}` link is allowed to render alongside it (see "Notifications never build their own embed" below).
+By default a custom message replaces the text line above the alert card; the card itself still follows the account's `embed_enabled` setting (see below).
 
-### Notifications never build their own embed
+### Messages are Components V2 cards
 
-**YouTube** alerts carry a rich embed (since 2026-10-12): channel name + avatar, the video's real title (linked) and description, the full-size thumbnail, and a "YouTube" / "YouTube Shorts" / "YouTube Live" footer with the time. The message text above it wraps the link in `<...>` so Discord doesn't add its own preview underneath; a custom message's `{url}` is wrapped the same way. Other platforms send plain text with the raw link and rely on Discord's own link preview — a hand-built embed with little real data looked worse than that preview (2026-09-18), so `notifications/embeds.py`'s `build_embed()` only covers platforms with the data to fill one. `embed_enabled` (`/pulsenotify alerts`) off means plain text with the preview suppressed, for every platform. Platform-sourced text (titles, channel names) is mention-escaped before it goes into the message text, so a video titled "@everyone" can't ping a server.
+Every message the bot sends — alerts and command replies alike — is a Components V2 layout (`discord.ui.LayoutView`), never plain message content or a legacy embed (since 2026-10-12).
+
+- **Alerts** (`notifications/cards.py`): a text line on top (the headline, e.g. "🔴 **Vector Games** is live now!", with the mention role in front — or the admin's custom message), then an accent-coloured container with the channel name + avatar, the linked title, a "… is now live on YouTube!" line, the description (trimmed to 350 characters), the full-size thumbnail, a "Watch on YouTube" link button, and a small footer with the platform and time (rendered in each viewer's timezone). YouTube, Kick and Instagram each have their own colour and labels; pieces the platform didn't provide are left out. Turning `embed_enabled` off for an alert type (`/pulsenotify alerts`) sends just the text line with the link.
+- **Command replies** (`ui/cards.py`): one card helper used for every confirmation, list, status and error, so they look consistent. Replies never ping by default — a custom message preview or account-info showing "@everyone" displays it without triggering it.
+- **Mention safety:** unlike legacy embeds, text inside a V2 message *does* ping. Only the alert's top line is meant to carry a mention; every piece of platform-sourced text (titles, descriptions, channel names) is mention-escaped before it goes anywhere in the message, so a video titled "@everyone" can't ping a server.
+- A V2 message gets no automatic link preview from Discord, which is why every platform's alert is built as a card from the event's own data.
 
 ## Testing
 
@@ -174,8 +179,10 @@ monitoring/
 events/
   models.py             NormalizedEvent, EventType — the common event shape every adapter produces
   processor.py            queue + consumer: dedup against `pulsenotify_events`, then hands new events to a sink
+ui/
+  cards.py               the shared Components V2 card every command reply uses (never pings by default)
 notifications/
-  embeds.py              NormalizedEvent -> plain notification text (no custom discord.Embed — Discord's own link preview handles that, see README)
+  cards.py               NormalizedEvent -> Components V2 alert layout (text line + card); see "Messages are Components V2 cards"
   templates.py             safe {placeholder} substitution for admin-authored custom messages, with mention-escaping on substituted values
   sender.py                the real EventProcessor sink: alert-config gating, mention scoping, marks a channel invalid instead of retrying forever
 database/
@@ -241,7 +248,7 @@ What's real and tested:
 - **API usage tracking** — `PlatformHealthTracker` batches request counts in memory and flushes to the (not guild-scoped) `pulsenotify_platform_health` table once per scheduler tick; surfaced in `/pulsenotify status`.
 - **Live-transition detection** — the worker, not the adapter, compares a `LiveStatus` snapshot against the persisted `pulsenotify_live_states` row to decide whether to fire `STREAM_STARTED`/`STREAM_ENDED` — this is what makes "don't re-announce a stream that was already live before a restart" (section 8) work for every platform for free, rather than every adapter reimplementing it.
 - **Deduplication** — `EventProcessor` is the one place that checks `pulsenotify_events` and decides "new" vs "already seen," so that guarantee holds regardless of which worker or platform produced the event.
-- **Notification delivery** — `EventProcessor`'s sink is `NotificationSender.handle` ([notifications/sender.py](notifications/sender.py)): checks the account's alert config for that event type, builds the plain notification text (never a custom embed — see "Notifications never build their own embed" above), scopes mentions to just the configured role (`AllowedMentions`, never `@everyone`/arbitrary users — section 36), and sends to every channel linked to that account. A channel Discord says is gone (`Forbidden`/`NotFound`) gets marked `is_valid=false` instead of retried forever (section 23); other Discord errors are logged and skipped, not treated as fatal.
+- **Notification delivery** — `EventProcessor`'s sink is `NotificationSender.handle` ([notifications/sender.py](notifications/sender.py)): checks the account's alert config for that event type, builds the Components V2 alert layout (see "Messages are Components V2 cards" above), scopes mentions to just the configured role, or @everyone when that's the configured mention (`AllowedMentions`, never arbitrary users — section 36), and sends to every channel linked to that account. A channel Discord says is gone (`Forbidden`/`NotFound`) gets marked `is_valid=false` instead of retried forever (section 23); other Discord errors are logged and skipped, not treated as fatal.
 - **Delivery is via a per-channel webhook, not the bot's own user.** `/pulsenotify account-add` creates the channel's webhook right away (not waiting for the first alert), specifically so the admin can rename it / give it a custom avatar in Discord's own channel-integrations UI before anything is ever sent through it — and, as of 2026-09-18, every send actually respects that customization: `webhook.send()` never passes a per-message `username`/`avatar_url` override, so the webhook keeps displaying whatever name/avatar it's actually configured with (the "PulseNotify" default from creation, or the admin's own rebrand) instead of being silently stomped back to the raw platform account name on every single notification — a real bug (confirmed via a live screenshot showing an admin-customized webhook reverting to the raw `@handle` name) fixed the same day. Its URL is persisted on the channel row (`webhook_url`, migration 0004) and reused after that — never a new webhook per message, and never a second one for a channel that already has one, even across multiple accounts/multiple sends. Before trusting a stored URL, `NotificationSender.get_or_create_webhook()` actually verifies with Discord that the webhook still exists (`webhook.fetch()`) — found necessary in practice: a webhook can be deleted out from under the bot by a server admin or some unrelated automation/integration, and without this check a stale URL would just get handed back forever, silently, with nothing ever getting (re)created. If the bot lacks "Manage Webhooks" in a channel, or webhook delivery fails outright, it falls back to sending as the bot itself rather than dropping the alert.
 
 **Known architectural gap:** this framework is polling-shaped — `PlatformScheduler` calls `fetch_updates()`/`get_live_status()` on an interval. The platform-API policy above prefers webhooks (Twitch EventSub, YouTube WebSub) where a platform offers them and the cost of polling is too high; a webhook-based platform will need its own inbound HTTP receiver feeding events into the same `EventProcessor.submit()`, bypassing the polling scheduler rather than being forced through it. Not designed yet.

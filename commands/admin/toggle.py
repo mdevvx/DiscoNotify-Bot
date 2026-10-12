@@ -14,6 +14,7 @@ from discord.ext import commands
 
 from commands.pulsenotify_group import pulsenotify_group
 from config import constants
+from ui import cards
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -45,13 +46,20 @@ async def toggle(interaction: discord.Interaction, state: app_commands.Choice[st
     )
 
     if enabled:
-        message = f"🟢 {constants.BOT_NAME} has been **enabled** for this server."
-    else:
-        message = (
-            f"🔴 {constants.BOT_NAME} has been **disabled** for this server. "
-            "All monitoring and notifications are paused. Run `/pulsenotify toggle` again to re-enable."
+        await cards.reply(
+            interaction,
+            f"{constants.BOT_NAME} has been **enabled** for this server.",
+            title="🟢 Enabled",
+            tone=cards.SUCCESS,
         )
-    await interaction.response.send_message(message)
+    else:
+        await cards.reply(
+            interaction,
+            f"{constants.BOT_NAME} has been **disabled** for this server. All monitoring and notifications are "
+            "paused. Run `/pulsenotify toggle` again to re-enable.",
+            title="🔴 Disabled",
+            tone=cards.ERROR,
+        )
 
 
 async def setup(bot: commands.Bot) -> None:

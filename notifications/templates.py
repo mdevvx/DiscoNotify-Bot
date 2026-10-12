@@ -45,14 +45,8 @@ def format_role_mention(role_id: int, guild_id: Optional[int]) -> str:
     return f"<@&{role_id}>"
 
 
-def render_custom_message(
-    template: str, event: NormalizedEvent, *, mention_role_id: Optional[int] = None, suppress_link_preview: bool = False
-) -> str:
-    """`suppress_link_preview` wraps {url} in <...> — used when the message
-    carries its own embed, so Discord doesn't add a second preview."""
+def render_custom_message(template: str, event: NormalizedEvent, *, mention_role_id: Optional[int] = None) -> str:
     values = _template_values(event, mention_role_id)
-    if suppress_link_preview and values["url"]:
-        values["url"] = f"<{values['url']}>"
 
     def _replace(match: "re.Match[str]") -> str:
         # An unrecognized {placeholder} is left as literal text rather

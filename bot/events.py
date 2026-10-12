@@ -14,6 +14,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from config import constants
+from ui import cards
 from utils.logger import get_logger
 
 if TYPE_CHECKING:
@@ -83,9 +84,6 @@ async def handle_app_command_error(interaction: discord.Interaction, error: app_
         message = "Something went wrong while running that command. The issue has been logged."
 
     try:
-        if interaction.response.is_done():
-            await interaction.followup.send(message, ephemeral=True)
-        else:
-            await interaction.response.send_message(message, ephemeral=True)
+        await cards.error(interaction, message)
     except discord.HTTPException:
         logger.warning("Failed to deliver error message to interaction.", exc_info=True)

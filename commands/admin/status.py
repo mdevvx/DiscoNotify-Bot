@@ -14,6 +14,7 @@ from discord.ext import commands
 
 from commands.pulsenotify_group import pulsenotify_group
 from config import constants
+from ui import cards
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -29,23 +30,26 @@ async def status(interaction: discord.Interaction) -> None:
     db_connected = bot.database.is_connected  # type: ignore[attr-defined]
     guild_enabled = await bot.guilds_repo.is_enabled(interaction.guild.id)  # type: ignore[attr-defined]
 
-    embed = discord.Embed(
-        title=f"{constants.BOT_NAME} Status",
-        color=discord.Color(constants.COLOR_INFO),
+    overview = " · ".join(
+        [
+            "🟢 Online",
+            f"Uptime **{uptime}**",
+            f"Latency **{latency_ms}ms**",
+            f"**{len(bot.guilds)}** server(s)",
+        ]
     )
-    embed.add_field(name="Bot", value="🟢 Online", inline=True)
-    embed.add_field(name="Uptime", value=uptime, inline=True)
-    embed.add_field(name="Latency", value=f"{latency_ms}ms", inline=True)
-    embed.add_field(name="Servers", value=str(len(bot.guilds)), inline=True)
-    embed.add_field(name="Database", value="🟢 Connected" if db_connected else "🔴 Disconnected", inline=True)
-    embed.add_field(name="This Server", value="🟢 Enabled" if guild_enabled else "🔴 Disabled", inline=True)
-
     platform_status = await _format_platform_health(bot)
-    embed.add_field(name="Platform Monitoring", value=platform_status, inline=False)
-
-    embed.set_footer(text=f"{constants.BOT_NAME} v{constants.BOT_VERSION}")
-
-    await interaction.response.send_message(embed=embed)
+    await cards.reply(
+        interaction,
+        overview,
+        title=f"{constants.BOT_NAME} Status",
+        fields=[
+            ("Database", "🟢 Connected" if db_connected else "🔴 Disconnected"),
+            ("This Server", "🟢 Enabled" if guild_enabled else "🔴 Disabled"),
+            ("Platform Monitoring", platform_status),
+        ],
+        footer=f"{constants.BOT_NAME} v{constants.BOT_VERSION}",
+    )
 
 
 _HEALTH_ICONS = {"healthy": "🟢", "degraded": "🟡", "error": "🔴", "disabled": "⚪"}

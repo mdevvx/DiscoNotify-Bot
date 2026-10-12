@@ -1,8 +1,7 @@
-"""Phase 8's per-account alert configuration commands:
-account-set-mention (role mentions), alerts (per-event-type enabled/embed
-toggles, and viewing them), and account-info (full config, including
-seeing a previously-set custom message — there was no way to do that
-before this phase)."""
+"""Per-account alert configuration: the account-set-mention,
+account-set-message and alerts commands (each opens a modal form —
+commands/accounts/modals.py), and account-info (full config, including
+seeing a previously-set custom message)."""
 
 from __future__ import annotations
 
@@ -10,23 +9,13 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 
-from commands.accounts.account_commands import account_info, account_set_mention, alerts
+from commands.accounts.account_commands import account_info, account_set_mention, account_set_message, alerts
+from commands.accounts.modals import AlertsModal, CustomMessageModal, MentionModal
 from database.repositories.accounts import PlatformAccountRepository
 from database.repositories.alert_configs import AlertConfigurationRepository
 from platforms.base import event_types_for_capabilities, Capability
+from tests.unit.fake_interactions import FakeFollowup, FakeResponse, FakeUser
 from tests.unit.fakes import FakeDatabase
-
-
-class FakeResponse:
-    def __init__(self) -> None:
-        self.messages: List[Dict[str, Any]] = []
-
-    async def send_message(
-        self, content: Optional[str] = None, *, embed=None, ephemeral: bool = False, allowed_mentions=None
-    ) -> None:
-        self.messages.append(
-            {"content": content, "embed": embed, "ephemeral": ephemeral, "allowed_mentions": allowed_mentions}
-        )
 
 
 class FakeGuild:
@@ -45,18 +34,8 @@ class FakeInteraction:
         self.guild = FakeGuild(guild_id)
         self.client = FakeClient(db)
         self.response = FakeResponse()
-
-
-class FakeRole:
-    def __init__(self, role_id: int) -> None:
-        self.id = role_id
-        self.mention = f"<@&{role_id}>"
-
-
-class FakeChoice:
-    def __init__(self, name: str, value: str) -> None:
-        self.name = name
-        self.value = value
+        self.followup = FakeFollowup()
+        self.user = FakeUser(100)
 
 
 @pytest.fixture
@@ -72,121 +51,200 @@ async def _seed_account_with_alerts(interaction: FakeInteraction, guild_id: int 
     return row["id"]
 
 
+async def _open_modal(command: Any, db: FakeDatabase, **seed: Any) -> "tuple[FakeInteraction, str, Any]":
+    interaction = FakeInteraction(1, db)
+    account_id = await _seed_account_with_alerts(interaction)
+    for event_type, role_id in seed.get("roles", {}).items():
+        await interaction.client.alert_configs_repo.set_mention_role(account_id, role_id, event_type=event_type)
+    await command.callback(interaction, account_id)  # type: ignore[arg-type]
+    modal = interaction.response.modals[0]
+    # Submitting the form is a new interaction in Discord, with its own response.
+    interaction.response = FakeResponse()
+    return interaction, account_id, modal
+
+
+def _default_options(select: Any) -> List[str]:
+    return [option.value for option in select.options if option.default]
+
+
+async def _config(interaction: FakeInteraction, account_id: str, event_type: str) -> Dict[str, Any]:
+    config = await interaction.client.alert_configs_repo.get(account_id, event_type)
+    assert config is not None
+    return config
+
+
+def _field(interaction: FakeInteraction, name: str) -> str:
+    """One field's value from a card reply — fields are text blocks
+    rendered as "**name**" over the value (ui/cards.py)."""
+    import discord
+
+    heading = f"**{name}**\n"
+    for item in interaction.response.messages[0]["view"].walk_children():
+        if isinstance(item, discord.ui.TextDisplay) and item.content.startswith(heading):
+            return item.content[len(heading):]
+    raise AssertionError(f"no {name!r} field")
+
+
+# ── shared command behavior ─────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("command", [account_set_mention, account_set_message, alerts])
+async def test_a_display_label_instead_of_an_id_does_not_crash(command: Any, db: FakeDatabase) -> None:
+    interaction = FakeInteraction(1, db)
+
+    await command.callback(interaction, "Youtube: @vectorgames_")  # type: ignore[arg-type]
+
+    assert "valid account" in interaction.response.messages[0]["content"].lower()
+    assert interaction.response.modals == []
+
+
+@pytest.mark.parametrize("command", [account_set_mention, account_set_message, alerts])
+async def test_an_unknown_account_does_not_open_a_form(command: Any, db: FakeDatabase) -> None:
+    interaction = FakeInteraction(1, db)
+
+    await command.callback(interaction, "f95a0f01-b36c-4e5c-b755-376619ffd81a")  # type: ignore[arg-type]
+
+    assert "isn't configured" in interaction.response.messages[0]["content"]
+    assert interaction.response.modals == []
+
+
 # ── account-set-mention ────────────────────────────────────────────────
 
 
-async def test_set_mention_sets_the_role_for_every_configured_event_type(db: FakeDatabase) -> None:
-    interaction = FakeInteraction(1, db)
-    account_id = await _seed_account_with_alerts(interaction)
+async def test_set_mention_opens_a_form_prefilled_with_the_current_role(db: FakeDatabase) -> None:
+    _, _, modal = await _open_modal(
+        account_set_mention, db, roles={"video_published": 555, "short_published": 555}
+    )
 
-    await account_set_mention.callback(interaction, account_id, FakeRole(555), None)  # type: ignore[arg-type]
-
-    config = await interaction.client.alert_configs_repo.get(account_id, "video_published")
-    assert config is not None and config["mention_role_id"] == 555
-    assert "will now mention" in interaction.response.messages[0]["content"]
-    # The confirmation must never ping the role it's describing.
-    allowed = interaction.response.messages[0]["allowed_mentions"]
-    assert allowed.everyone is False and allowed.roles is False
+    assert isinstance(modal, MentionModal)
+    assert _default_options(modal.mode) == ["role"]
+    assert [value.id for value in modal.role.default_values] == [555]
 
 
-async def test_set_mention_with_no_role_clears_it(db: FakeDatabase) -> None:
-    interaction = FakeInteraction(1, db)
-    account_id = await _seed_account_with_alerts(interaction)
-    await account_set_mention.callback(interaction, account_id, FakeRole(555), None)  # type: ignore[arg-type]
+async def test_set_mention_form_shows_everyone_as_its_own_choice(db: FakeDatabase) -> None:
+    _, _, modal = await _open_modal(account_set_mention, db, roles={"video_published": 1, "short_published": 1})
 
-    await account_set_mention.callback(interaction, account_id, None, None)  # type: ignore[arg-type]
+    assert _default_options(modal.mode) == ["everyone"]
 
-    config = await interaction.client.alert_configs_repo.get(account_id, "video_published")
-    assert config is not None and config["mention_role_id"] is None
-    assert "cleared" in interaction.response.messages[-1]["content"].lower()
+
+async def test_set_mention_applies_a_role_to_every_alert_type(db: FakeDatabase) -> None:
+    interaction, account_id, modal = await _open_modal(account_set_mention, db)
+
+    await modal.apply(interaction, mode="role", role_id=555, event_type="__all__")
+
+    assert (await _config(interaction, account_id, "video_published"))["mention_role_id"] == 555
+    assert (await _config(interaction, account_id, "short_published"))["mention_role_id"] == 555
+    assert "<@&555>" in interaction.response.messages[0]["content"]
+
+
+async def test_set_mention_everyone_confirms_with_a_single_at_sign(db: FakeDatabase) -> None:
+    """Regression test: the confirmation used Role.mention, which renders
+    the @everyone role as `<@&guild_id>` — shown in Discord as a dead
+    "@@everyone"."""
+    interaction, account_id, modal = await _open_modal(account_set_mention, db)
+
+    await modal.apply(interaction, mode="everyone", role_id=None, event_type="__all__")
+
+    assert (await _config(interaction, account_id, "video_published"))["mention_role_id"] == 1  # the guild's ID
+    confirmation = interaction.response.messages[0]
+    assert "@everyone" in confirmation["content"]
+    assert "<@&1>" not in confirmation["content"]
+    assert confirmation["allowed_mentions"].everyone is False  # the confirmation itself never pings
+
+
+async def test_set_mention_nobody_clears_it(db: FakeDatabase) -> None:
+    interaction, account_id, modal = await _open_modal(account_set_mention, db, roles={"video_published": 555})
+
+    await modal.apply(interaction, mode="none", role_id=555, event_type="__all__")
+
+    assert (await _config(interaction, account_id, "video_published"))["mention_role_id"] is None
 
 
 async def test_set_mention_can_target_one_event_type(db: FakeDatabase) -> None:
+    interaction, account_id, modal = await _open_modal(account_set_mention, db)
+
+    await modal.apply(interaction, mode="role", role_id=555, event_type="short_published")
+
+    assert (await _config(interaction, account_id, "video_published"))["mention_role_id"] is None
+    assert (await _config(interaction, account_id, "short_published"))["mention_role_id"] == 555
+
+
+async def test_set_mention_role_mode_without_a_role_asks_for_one(db: FakeDatabase) -> None:
+    interaction, account_id, modal = await _open_modal(account_set_mention, db)
+
+    await modal.apply(interaction, mode="role", role_id=None, event_type="__all__")
+
+    assert interaction.response.messages[0]["ephemeral"] is True
+    assert (await _config(interaction, account_id, "video_published"))["mention_role_id"] is None
+
+
+# ── account-set-message ────────────────────────────────────────────────
+
+
+async def test_set_message_form_prefills_the_current_message(db: FakeDatabase) -> None:
     interaction = FakeInteraction(1, db)
     account_id = await _seed_account_with_alerts(interaction)
+    await interaction.client.alert_configs_repo.set_custom_message(account_id, "Hi {creator}\n{url}")
 
-    await account_set_mention.callback(  # type: ignore[arg-type]
-        interaction, account_id, FakeRole(555), FakeChoice("New Video", "video_published")
-    )
+    await account_set_message.callback(interaction, account_id)  # type: ignore[arg-type]
 
-    video = await interaction.client.alert_configs_repo.get(account_id, "video_published")
-    short = await interaction.client.alert_configs_repo.get(account_id, "short_published")
-    assert video is not None and video["mention_role_id"] == 555
-    assert short is not None and short["mention_role_id"] is None
+    modal = interaction.response.modals[0]
+    assert isinstance(modal, CustomMessageModal)
+    assert modal.message.default == "Hi {creator}\n{url}"
 
 
-async def test_set_mention_for_unconfigured_account_reports_not_found(db: FakeDatabase) -> None:
-    interaction = FakeInteraction(1, db)
+async def test_set_message_supports_multiple_lines_and_shows_a_preview(db: FakeDatabase) -> None:
+    interaction, account_id, modal = await _open_modal(account_set_message, db)
 
-    await account_set_mention.callback(  # type: ignore[arg-type]
-        interaction, "f95a0f01-b36c-4e5c-b755-376619ffd81a", FakeRole(555), None
-    )
+    await modal.apply(interaction, message="New from {creator}!\n{url}", event_type="__all__")
 
-    assert "isn't configured" in interaction.response.messages[0]["content"]
-
-
-async def test_set_mention_with_a_display_label_instead_of_an_id_does_not_crash(db: FakeDatabase) -> None:
-    interaction = FakeInteraction(1, db)
-
-    await account_set_mention.callback(interaction, "Youtube: @vectorgames_", FakeRole(555), None)  # type: ignore[arg-type]
-
-    assert "valid account" in interaction.response.messages[0]["content"].lower()
+    assert (await _config(interaction, account_id, "video_published"))["custom_message"] == "New from {creator}!\n{url}"
+    assert "New from SomeCreator!\nhttps://example.com/preview-link" in interaction.response.messages[0]["content"]
 
 
-# ── alerts (view + toggle) ──────────────────────────────────────────────
+async def test_set_message_left_empty_restores_the_default(db: FakeDatabase) -> None:
+    interaction, account_id, modal = await _open_modal(account_set_message, db)
+    await modal.apply(interaction, message="custom", event_type="__all__")
+
+    await modal.apply(interaction, message="   ", event_type="__all__")
+
+    assert (await _config(interaction, account_id, "video_published"))["custom_message"] is None
 
 
-async def test_alerts_with_no_params_shows_current_state(db: FakeDatabase) -> None:
-    interaction = FakeInteraction(1, db)
-    account_id = await _seed_account_with_alerts(interaction)
+async def test_set_message_can_target_one_event_type(db: FakeDatabase) -> None:
+    interaction, account_id, modal = await _open_modal(account_set_message, db)
 
-    await alerts.callback(interaction, account_id, FakeChoice("New Video", "video_published"), None, None)  # type: ignore[arg-type]
+    await modal.apply(interaction, message="Short!", event_type="short_published")
 
-    content = interaction.response.messages[0]["content"]
-    assert "On" in content  # default enabled=True, embed_enabled=True
-
-
-async def test_alerts_toggles_enabled_only(db: FakeDatabase) -> None:
-    interaction = FakeInteraction(1, db)
-    account_id = await _seed_account_with_alerts(interaction)
-
-    await alerts.callback(interaction, account_id, FakeChoice("New Video", "video_published"), False, None)  # type: ignore[arg-type]
-
-    config = await interaction.client.alert_configs_repo.get(account_id, "video_published")
-    assert config is not None
-    assert config["enabled"] is False
-    assert config["embed_enabled"] is True  # untouched
+    assert (await _config(interaction, account_id, "video_published"))["custom_message"] is None
+    assert (await _config(interaction, account_id, "short_published"))["custom_message"] == "Short!"
 
 
-async def test_alerts_toggles_embed_only(db: FakeDatabase) -> None:
-    interaction = FakeInteraction(1, db)
-    account_id = await _seed_account_with_alerts(interaction)
-
-    await alerts.callback(interaction, account_id, FakeChoice("New Video", "video_published"), None, False)  # type: ignore[arg-type]
-
-    config = await interaction.client.alert_configs_repo.get(account_id, "video_published")
-    assert config is not None
-    assert config["enabled"] is True  # untouched
-    assert config["embed_enabled"] is False
+# ── alerts ─────────────────────────────────────────────────────────────
 
 
-async def test_alerts_for_unknown_event_type_configuration_reports_not_found(db: FakeDatabase) -> None:
-    interaction = FakeInteraction(1, db)
-    account_id = await _seed_account_with_alerts(interaction)
+async def test_alerts_form_lists_the_accounts_alert_types_prefilled(db: FakeDatabase) -> None:
+    interaction, account_id, _ = await _open_modal(alerts, db)
+    await interaction.client.alert_configs_repo.set_alert_toggle(account_id, "short_published", enabled=False)
+    await alerts.callback(interaction, account_id)  # type: ignore[arg-type]
+    modal = interaction.response.modals[-1]
 
-    await alerts.callback(interaction, account_id, FakeChoice("New Post", "post_created"), False, None)  # type: ignore[arg-type]
+    assert isinstance(modal, AlertsModal)
+    assert {option.value for option in modal.enabled.options} == {"video_published", "short_published"}
+    assert _default_options(modal.enabled) == ["video_published"]
+    assert set(_default_options(modal.embeds)) == {"video_published", "short_published"}
 
-    assert "doesn't have an alert configuration" in interaction.response.messages[0]["content"]
 
+async def test_alerts_applies_every_toggle_at_once(db: FakeDatabase) -> None:
+    interaction, account_id, modal = await _open_modal(alerts, db)
 
-async def test_alerts_with_a_display_label_instead_of_an_id_does_not_crash(db: FakeDatabase) -> None:
-    interaction = FakeInteraction(1, db)
+    await modal.apply(interaction, enabled=["short_published"], embeds=["video_published"])
 
-    await alerts.callback(  # type: ignore[arg-type]
-        interaction, "Youtube: @vectorgames_", FakeChoice("New Video", "video_published"), False, None
-    )
-
-    assert "valid account" in interaction.response.messages[0]["content"].lower()
+    video = await _config(interaction, account_id, "video_published")
+    short = await _config(interaction, account_id, "short_published")
+    assert (video["enabled"], video["embed_enabled"]) == (False, True)
+    assert (short["enabled"], short["embed_enabled"]) == (True, False)
+    assert "New Short** — ✅ On · embed off" in interaction.response.messages[0]["content"]
 
 
 # ── account-info ────────────────────────────────────────────────────────
@@ -198,10 +256,9 @@ async def test_account_info_shows_every_configured_event_type(db: FakeDatabase) 
 
     await account_info.callback(interaction, account_id)  # type: ignore[arg-type]
 
-    embed = interaction.response.messages[0]["embed"]
-    field_names = {field.name for field in embed.fields}
-    assert "New Video" in field_names
-    assert "New Short" in field_names
+    text = interaction.response.messages[0]["content"]
+    assert "**New Video**" in text
+    assert "**New Short**" in text
 
 
 async def test_account_info_surfaces_the_custom_message(db: FakeDatabase) -> None:
@@ -215,9 +272,8 @@ async def test_account_info_surfaces_the_custom_message(db: FakeDatabase) -> Non
 
     await account_info.callback(interaction, account_id)  # type: ignore[arg-type]
 
-    embed = interaction.response.messages[0]["embed"]
-    video_field = next(f for f in embed.fields if f.name == "New Video")
-    assert "Hey @everyone, {creator} just posted!" in video_field.value
+    video_field = _field(interaction, "New Video")
+    assert "Hey @everyone, {creator} just posted!" in video_field
 
 
 async def test_account_info_shows_the_mention_role(db: FakeDatabase) -> None:
@@ -227,9 +283,8 @@ async def test_account_info_shows_the_mention_role(db: FakeDatabase) -> None:
 
     await account_info.callback(interaction, account_id)  # type: ignore[arg-type]
 
-    embed = interaction.response.messages[0]["embed"]
-    video_field = next(f for f in embed.fields if f.name == "New Video")
-    assert "<@&555>" in video_field.value
+    video_field = _field(interaction, "New Video")
+    assert "<@&555>" in video_field
 
 
 async def test_account_info_shows_the_everyone_role_as_everyone(db: FakeDatabase) -> None:
@@ -239,10 +294,9 @@ async def test_account_info_shows_the_everyone_role_as_everyone(db: FakeDatabase
 
     await account_info.callback(interaction, account_id)  # type: ignore[arg-type]
 
-    embed = interaction.response.messages[0]["embed"]
-    video_field = next(f for f in embed.fields if f.name == "New Video")
-    assert "@everyone" in video_field.value
-    assert "<@&1>" not in video_field.value
+    video_field = _field(interaction, "New Video")
+    assert "@everyone" in video_field
+    assert "<@&1>" not in video_field
 
 
 async def test_account_info_for_unconfigured_account_reports_not_found(db: FakeDatabase) -> None:

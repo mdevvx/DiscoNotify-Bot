@@ -14,11 +14,33 @@ from database.repositories.channels import NotificationChannelRepository
 from events.models import EventType, NormalizedEvent
 from notifications.sender import NotificationSender
 from tests.unit.fakes import FakeDatabase
+from ui import cards
 
 
 def _fake_http_exception(cls, status: int = 404, reason: str = "Not Found") -> discord.HTTPException:
     response = type("_FakeResponse", (), {"status": status, "reason": reason})()
     return cls(response, "")
+
+
+def _record(view: Any, allowed_mentions: Any, *, username: Optional[str]) -> Dict[str, Any]:
+    """What reached the channel: the alert layout, its text line on top,
+    its card (None when embeds are off), and all its text flattened."""
+    children = list(view.children)
+    card = next((child for child in children if isinstance(child, discord.ui.Container)), None)
+    return {
+        "view": view,
+        "top": children[0].content,
+        "card": card,
+        "content": cards.plain_text(view),
+        "allowed_mentions": allowed_mentions,
+        "username": username,
+    }
+
+
+def _card_only(card: Any) -> Any:
+    view = discord.ui.LayoutView()
+    view.add_item(card)
+    return view
 
 
 class FakeWebhook:
@@ -30,21 +52,13 @@ class FakeWebhook:
         self.url = url
         self._channel = channel
 
-    async def send(self, *, content=None, embed=None, allowed_mentions=None, suppress_embeds=False, username=None):
+    async def send(self, *, view=None, allowed_mentions=None, username=None):
         self._channel.webhook_send_calls += 1
         if self.url in self._channel.deleted_webhook_urls:
             raise _fake_http_exception(discord.NotFound, status=404)
         if self._channel.raise_on_webhook_send:
             raise self._channel.raise_on_webhook_send
-        self._channel.sent.append(
-            {
-                "content": content,
-                "embed": embed,
-                "allowed_mentions": allowed_mentions,
-                "suppress_embeds": suppress_embeds,
-                "username": username,
-            }
-        )
+        self._channel.sent.append(_record(view, allowed_mentions, username=username))
 
     async def fetch(self):
         self._channel.webhook_fetch_calls += 1
@@ -81,18 +95,10 @@ class FakeDiscordChannel:
         """Simulates a server admin deleting every existing webhook."""
         self.deleted_webhook_urls.update(self._created_webhook_urls)
 
-    async def send(self, *, content=None, embed=None, allowed_mentions=None, suppress_embeds=False):
+    async def send(self, *, view=None, allowed_mentions=None):
         if self.raise_on_send:
             raise self.raise_on_send
-        self.sent.append(
-            {
-                "content": content,
-                "embed": embed,
-                "allowed_mentions": allowed_mentions,
-                "suppress_embeds": suppress_embeds,
-                "username": None,
-            }
-        )
+        self.sent.append(_record(view, allowed_mentions, username=None))
 
     async def create_webhook(self, *, name: str):
         self.create_webhook_calls += 1
@@ -173,22 +179,33 @@ def harness() -> Harness:
     return Harness()
 
 
-async def test_youtube_alert_gets_a_rich_embed_by_default(harness: Harness) -> None:
+async def test_youtube_alert_is_a_v2_card_with_the_videos_details(harness: Harness) -> None:
     channel = await harness.add_channel(1, "acc-1", 555)
 
-    await harness.sender.handle(_event(description="Watch this", author="Example Channel"))
+    await harness.sender.handle(
+        _event(
+            description="Watch this",
+            author="Example Channel",
+            author_avatar_url="https://yt3.example/a.jpg",
+            thumbnail_url="https://i.ytimg.com/vi/vid-1/maxresdefault.jpg",
+        )
+    )
 
     sent = channel.sent[0]
-    assert sent["embed"] is not None
-    assert sent["embed"].title == "A video"
-    assert sent["embed"].fields[0].value == "Watch this"
-    # The link is wrapped so Discord doesn't add its own preview under the embed.
-    assert "<https://youtube.com/watch?v=vid-1>" in sent["content"]
-    assert "Example Channel" in sent["content"]
-    assert sent["suppress_embeds"] is False
+    assert sent["top"] == "🆕 **Example Channel** uploaded a new video!"
+    card = sent["card"]
+    assert card is not None and card.accent_colour == 0xFF0000
+    text = sent["content"]
+    assert "### [A video](https://youtube.com/watch?v=vid-1)" in text
+    assert "**Description**\nWatch this" in text
+    items = list(sent["view"].walk_children())
+    assert any(isinstance(item, discord.ui.Thumbnail) for item in items)
+    assert any(isinstance(item, discord.ui.MediaGallery) for item in items)
+    buttons = [item for item in items if isinstance(item, discord.ui.Button)]
+    assert [(b.label, b.url) for b in buttons] == [("Watch on YouTube", "https://youtube.com/watch?v=vid-1")]
 
 
-async def test_embed_disabled_sends_plain_text_with_no_preview(harness: Harness) -> None:
+async def test_embed_disabled_sends_only_the_text_line_with_the_link(harness: Harness) -> None:
     channel = await harness.add_channel(1, "acc-1", 555)
     await harness.alert_repo.seed_defaults(1, "acc-1", ["video_published"])
     harness.db.tables["pulsenotify_alert_configurations"].rows[0]["embed_enabled"] = False
@@ -196,27 +213,24 @@ async def test_embed_disabled_sends_plain_text_with_no_preview(harness: Harness)
     await harness.sender.handle(_event())
 
     sent = channel.sent[0]
-    assert sent["embed"] is None
+    assert sent["card"] is None
+    assert "A video" in sent["content"]
     assert "https://youtube.com/watch?v=vid-1" in sent["content"]
-    assert sent["suppress_embeds"] is True
 
 
-async def test_platform_without_a_rich_embed_sends_plain_text_with_link_preview(harness: Harness) -> None:
-    """Platforms whose events lack the data for a full embed rely on
-    Discord's own link preview instead (see notifications/embeds.py)."""
+async def test_kick_and_instagram_alerts_get_a_card_too(harness: Harness) -> None:
+    """V2 messages get no link preview from Discord, so every platform's
+    alert is built as a card from the event's own data."""
     channel = await harness.add_channel(1, "acc-1", 555)
 
     await harness.sender.handle(
-        _event(platform="kick", event_type=EventType.STREAM_STARTED, url="https://kick.com/example", title="A video")
+        _event(platform="kick", event_type=EventType.STREAM_STARTED, url="https://kick.com/example", title="A stream")
     )
 
-    assert len(channel.sent) == 1
     sent = channel.sent[0]
-    assert sent["embed"] is None
-    assert "A video" in sent["content"]
-    assert "https://kick.com/example" in sent["content"]
-    assert "<https://kick.com/example>" not in sent["content"]
-    assert sent["suppress_embeds"] is False  # embed_enabled=True -> allow the native preview
+    assert sent["card"] is not None
+    assert "### [A stream](https://kick.com/example)" in sent["content"]
+    assert "Example is now live on Kick!" in sent["content"]
 
 
 async def test_disabled_event_type_sends_nothing(harness: Harness) -> None:
@@ -230,19 +244,6 @@ async def test_disabled_event_type_sends_nothing(harness: Harness) -> None:
     assert channel.sent == []
 
 
-async def test_embed_disabled_suppresses_the_native_link_preview(harness: Harness) -> None:
-    channel = await harness.add_channel(1, "acc-1", 555)
-    await harness.alert_repo.seed_defaults(1, "acc-1", ["video_published"])
-    harness.db.tables["pulsenotify_alert_configurations"].rows[0]["embed_enabled"] = False
-
-    await harness.sender.handle(_event())
-
-    sent = channel.sent[0]
-    assert sent["embed"] is None
-    assert "A video" in sent["content"]
-    assert sent["suppress_embeds"] is True
-
-
 async def test_mention_role_is_included_and_scoped_to_that_role_only(harness: Harness) -> None:
     channel = await harness.add_channel(1, "acc-1", 555)
     await harness.alert_repo.seed_defaults(1, "acc-1", ["video_published"])
@@ -251,10 +252,11 @@ async def test_mention_role_is_included_and_scoped_to_that_role_only(harness: Ha
     await harness.sender.handle(_event())
 
     sent = channel.sent[0]
-    assert "<@&999>" in sent["content"]
+    assert sent["top"].startswith("<@&999> ")
     allowed = sent["allowed_mentions"]
     assert allowed.everyone is False
     assert allowed.users is False
+    assert allowed.roles == [discord.Object(id=999)]
 
 
 async def test_everyone_role_is_sent_as_a_real_everyone_ping(harness: Harness) -> None:
@@ -267,16 +269,34 @@ async def test_everyone_role_is_sent_as_a_real_everyone_ping(harness: Harness) -
     await harness.sender.handle(_event())
 
     sent = channel.sent[0]
-    assert sent["content"].startswith("@everyone ")
+    assert sent["top"].startswith("@everyone ")
     assert "<@&1>" not in sent["content"]
     assert sent["allowed_mentions"].everyone is True
     assert sent["allowed_mentions"].roles is False
 
 
+async def test_a_title_inside_the_card_cannot_ping_when_everyone_is_allowed(harness: Harness) -> None:
+    """Unlike legacy embeds, text inside a V2 message pings — so with
+    @everyone allowed for this alert, an unescaped "@here" title would
+    ping too."""
+    channel = await harness.add_channel(1, "acc-1", 555)
+    await harness.alert_repo.seed_defaults(1, "acc-1", ["video_published"])
+    harness.db.tables["pulsenotify_alert_configurations"].rows[0]["mention_role_id"] = 1
+
+    await harness.sender.handle(_event(title="@here watch", description="@everyone hi", author="@everyone TV"))
+
+    sent = channel.sent[0]
+    card_text = cards.plain_text(_card_only(sent["card"]))
+    # escape_mentions inserts a zero-width space after "@", which stops the ping.
+    assert "@here" not in card_text
+    assert "@everyone" not in card_text
+    assert f"@{chr(0x200B)}here" in card_text
+
+
 # ── custom_message (section 35) ────────────────────────────────────────
 
 
-async def test_custom_message_replaces_the_default_content(harness: Harness) -> None:
+async def test_custom_message_replaces_the_text_line_and_keeps_the_card(harness: Harness) -> None:
     channel = await harness.add_channel(1, "acc-1", 555)
     await harness.alert_repo.seed_defaults(1, "acc-1", ["video_published"])
     harness.db.tables["pulsenotify_alert_configurations"].rows[0]["custom_message"] = (
@@ -286,29 +306,13 @@ async def test_custom_message_replaces_the_default_content(harness: Harness) -> 
     await harness.sender.handle(_event())
 
     sent = channel.sent[0]
-    assert sent["content"] == (
-        "Hey @everyone, Example just posted a new post! Go check it out!\n"
-        "<https://youtube.com/watch?v=vid-1>"
+    assert sent["top"] == (
+        "Hey @everyone, Example just posted a new post! Go check it out!\n" "https://youtube.com/watch?v=vid-1"
     )
+    assert sent["card"] is not None
 
 
-async def test_custom_message_keeps_the_rich_embed_without_a_duplicate_preview(harness: Harness) -> None:
-    """The template's {url} is wrapped in <...> when the message carries
-    its own embed, so Discord doesn't add a second preview under it."""
-    channel = await harness.add_channel(1, "acc-1", 555)
-    await harness.alert_repo.seed_defaults(1, "acc-1", ["video_published"])
-    harness.db.tables["pulsenotify_alert_configurations"].rows[0]["custom_message"] = "Check this out!\n{url}"
-    harness.db.tables["pulsenotify_alert_configurations"].rows[0]["embed_enabled"] = True
-
-    await harness.sender.handle(_event())
-
-    sent = channel.sent[0]
-    assert sent["content"] == "Check this out!\n<https://youtube.com/watch?v=vid-1>"
-    assert sent["embed"] is not None
-    assert sent["suppress_embeds"] is False
-
-
-async def test_custom_message_with_embed_disabled_suppresses_the_native_link_preview(harness: Harness) -> None:
+async def test_custom_message_with_embed_disabled_sends_only_the_message(harness: Harness) -> None:
     channel = await harness.add_channel(1, "acc-1", 555)
     await harness.alert_repo.seed_defaults(1, "acc-1", ["video_published"])
     harness.db.tables["pulsenotify_alert_configurations"].rows[0]["custom_message"] = "Check this out!\n{url}"
@@ -317,8 +321,8 @@ async def test_custom_message_with_embed_disabled_suppresses_the_native_link_pre
     await harness.sender.handle(_event())
 
     sent = channel.sent[0]
-    assert sent["embed"] is None
-    assert sent["suppress_embeds"] is True
+    assert sent["card"] is None
+    assert sent["content"] == "Check this out!\nhttps://youtube.com/watch?v=vid-1"
 
 
 async def test_custom_messages_literal_everyone_actually_allows_the_mention(harness: Harness) -> None:

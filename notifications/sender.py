@@ -35,7 +35,7 @@ from config import constants
 from database.repositories.alert_configs import AlertConfigurationRepository
 from database.repositories.channels import NotificationChannelRepository
 from events.models import NormalizedEvent
-from notifications.embeds import build_embed, build_embed_headline, build_plain_text
+from notifications.cards import build_alert, build_headline, build_plain_text
 from notifications.templates import format_role_mention, render_custom_message
 from utils.logger import get_logger
 
@@ -81,48 +81,35 @@ class NotificationSender:
         embed_enabled = config["embed_enabled"] if config else True
         mention_role_id = config["mention_role_id"] if config else None
         custom_message = config["custom_message"] if config else None
-        content, embed, suppress_embeds = self._build_message(
+        top_line = self._top_line(
             event, embed_enabled=embed_enabled, mention_role_id=mention_role_id, custom_message=custom_message
         )
-        allowed_mentions = self._allowed_mentions_for(content, mention_role_id, event.guild_id)
+        layout = build_alert(event, top_line=top_line, rich=embed_enabled)
+        # Computed from the top line only: that's the one place a mention
+        # is meant to be; the card's platform text is mention-escaped.
+        allowed_mentions = self._allowed_mentions_for(top_line, mention_role_id, event.guild_id)
 
         for channel_row in channels:
-            await self._send_to_channel(
-                channel_row,
-                content=content,
-                embed=embed,
-                allowed_mentions=allowed_mentions,
-                suppress_embeds=suppress_embeds,
-            )
+            await self._send_to_channel(channel_row, layout=layout, allowed_mentions=allowed_mentions)
 
-    def _build_message(
+    def _top_line(
         self,
         event: NormalizedEvent,
         *,
         embed_enabled: bool,
         mention_role_id: Optional[int],
         custom_message: Optional[str],
-    ) -> tuple:
-        # A rich embed where the platform has the data for one (see
-        # notifications/embeds.py); otherwise plain text with the raw link,
-        # letting Discord's own link preview do the visual work.
-        # embed_enabled=False means neither: plain text, preview suppressed.
-        embed = build_embed(event) if embed_enabled else None
-
+    ) -> str:
+        """The text above the alert card (see notifications/cards.py) — the
+        whole alert when embeds are off for this alert type."""
         if custom_message:
-            content = render_custom_message(
-                custom_message, event, mention_role_id=mention_role_id, suppress_link_preview=embed is not None
-            )
-            return content, embed, not embed_enabled
+            return render_custom_message(custom_message, event, mention_role_id=mention_role_id)
 
         mention_text = format_role_mention(mention_role_id, event.guild_id) if mention_role_id else None
-        if embed is not None:
-            headline = build_embed_headline(event)
-            return (f"{mention_text} {headline}" if mention_text else headline), embed, False
-
-        fallback = build_plain_text(event)
-        content = f"{mention_text}\n{fallback}" if mention_text else fallback
-        return content, None, not embed_enabled
+        text = build_headline(event) if embed_enabled else build_plain_text(event)
+        if mention_text is None:
+            return text
+        return f"{mention_text} {text}" if embed_enabled else f"{mention_text}\n{text}"
 
     def _allowed_mentions_for(
         self, content: Optional[str], mention_role_id: Optional[int], guild_id: Optional[int]
@@ -146,10 +133,8 @@ class NotificationSender:
         self,
         channel_row: Dict[str, Any],
         *,
-        content: Optional[str],
-        embed: Optional[discord.Embed],
+        layout: discord.ui.LayoutView,
         allowed_mentions: discord.AllowedMentions,
-        suppress_embeds: bool = False,
     ) -> None:
         discord_channel_id = channel_row["channel_id"]
         discord_channel = self._bot.get_channel(discord_channel_id)
@@ -175,12 +160,7 @@ class NotificationSender:
                 # No username/avatar_url override here on purpose — see this
                 # module's docstring for why: it would stomp any branding an
                 # admin has customized on this webhook in Discord's own UI.
-                await webhook.send(
-                    content=content,
-                    embed=embed,
-                    allowed_mentions=allowed_mentions,
-                    suppress_embeds=suppress_embeds,
-                )
+                await webhook.send(view=layout, allowed_mentions=allowed_mentions)
                 return
             except discord.NotFound:
                 # The webhook itself was deleted from Discord's side (e.g.
@@ -195,9 +175,7 @@ class NotificationSender:
                 break
 
         try:
-            await discord_channel.send(
-                content=content, embed=embed, allowed_mentions=allowed_mentions, suppress_embeds=suppress_embeds
-            )
+            await discord_channel.send(view=layout, allowed_mentions=allowed_mentions)
         except discord.Forbidden:
             await self._mark_invalid(channel_row, "missing permission to send messages")
         except discord.NotFound:

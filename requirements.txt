@@ -1,4 +1,4 @@
-discord.py>=2.4.0
+discord.py>=2.6.0  # modals with Label, select menus and channel/role pickers
 # 2.16.0+ specifically: earlier versions reject Supabase's newer
 # sb_secret_.../sb_publishable_... API keys with "Invalid API key" (they
 # validate against a JWT-shaped regex that only matches the legacy

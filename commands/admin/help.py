@@ -14,16 +14,12 @@ from discord.ext import commands
 
 from commands.pulsenotify_group import pulsenotify_group
 from config import constants
+from ui import cards
 
 
 @pulsenotify_group.command(name="help", description="Show all PulseNotify commands and what they do.")
 async def help_command(interaction: discord.Interaction) -> None:
-    embed = discord.Embed(
-        title=f"{constants.BOT_NAME} Commands",
-        description="Every command below is a subcommand of `/pulsenotify`.",
-        color=discord.Color(constants.COLOR_INFO),
-    )
-
+    fields = []
     for command in sorted(pulsenotify_group.commands, key=lambda c: c.name):
         if command.name == "help":
             continue
@@ -31,10 +27,21 @@ async def help_command(interaction: discord.Interaction) -> None:
         value = command.description or "No description."
         if usage:
             value += f"\n`{usage}`"
-        embed.add_field(name=f"/pulsenotify {command.name}", value=value, inline=False)
+        fields.append((f"/pulsenotify {command.name}", value))
 
-    embed.set_footer(text=f"{constants.BOT_NAME} v{constants.BOT_VERSION} · pn!sync is a text command, not shown above")
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    # The text-command prefix is configurable (DISCORD_COMMAND_PREFIX), so
+    # the hint shows whatever this bot actually answers to.
+    prefix = getattr(interaction.client, "command_prefix", constants.DEFAULT_COMMAND_PREFIX)
+    if not isinstance(prefix, str):
+        prefix = constants.DEFAULT_COMMAND_PREFIX
+    await cards.reply(
+        interaction,
+        "Every command below is a subcommand of `/pulsenotify`.",
+        title=f"{constants.BOT_NAME} Commands",
+        fields=fields,
+        footer=f"{constants.BOT_NAME} v{constants.BOT_VERSION} · {prefix}sync is a text command, not shown above",
+        ephemeral=True,
+    )
 
 
 def _format_usage(command: app_commands.Command) -> str:

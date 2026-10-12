@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     log_dir: str = Field(default="logs", alias="LOG_DIR")
 
     discord_token: str = Field(..., min_length=1, alias="DISCORD_TOKEN")
-    discord_command_prefix: str = Field(default="pn!", alias="DISCORD_COMMAND_PREFIX")
+    discord_command_prefix: str = Field(default="!", alias="DISCORD_COMMAND_PREFIX")
     discord_owner_ids_raw: str = Field(default="", alias="DISCORD_OWNER_IDS")
     discord_dev_guild_id: Optional[int] = Field(default=None, alias="DEV_GUILD_ID")
 

@@ -31,6 +31,7 @@ from platforms.kick.adapter import KickAdapter
 from platforms.kick.client import KickClient
 from platforms.youtube.adapter import YouTubeAdapter
 from platforms.youtube.client import YouTubeClient
+from ui import cards
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -67,14 +68,11 @@ class PulseNotifyCommandTree(app_commands.CommandTree):
         bot = cast("PulseNotifyBot", self.client)
         enabled = await bot.guilds_repo.is_enabled(interaction.guild.id)
         if not enabled:
-            message = (
+            await cards.error(
+                interaction,
                 "PulseNotify is currently disabled in this server. "
-                "An administrator can run `/pulsenotify toggle` to re-enable it."
+                "An administrator can run `/pulsenotify toggle` to re-enable it.",
             )
-            if interaction.response.is_done():
-                await interaction.followup.send(message, ephemeral=True)
-            else:
-                await interaction.response.send_message(message, ephemeral=True)
             return False
 
         return True
