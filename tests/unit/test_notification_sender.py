@@ -31,6 +31,9 @@ class FakeWebhook:
         self._channel = channel
 
     async def send(self, *, content=None, embed=None, allowed_mentions=None, suppress_embeds=False, username=None):
+        self._channel.webhook_send_calls += 1
+        if self.url in self._channel.deleted_webhook_urls:
+            raise _fake_http_exception(discord.NotFound, status=404)
         if self._channel.raise_on_webhook_send:
             raise self._channel.raise_on_webhook_send
         self._channel.sent.append(
@@ -45,6 +48,8 @@ class FakeWebhook:
 
     async def fetch(self):
         self._channel.webhook_fetch_calls += 1
+        if self.url in self._channel.deleted_webhook_urls:
+            raise _fake_http_exception(discord.NotFound, status=404)
         if self._channel.raise_on_webhook_fetch:
             raise self._channel.raise_on_webhook_fetch
         return self
@@ -68,6 +73,13 @@ class FakeDiscordChannel:
         self.sent: List[Dict[str, Any]] = []
         self.create_webhook_calls = 0
         self.webhook_fetch_calls = 0
+        self.webhook_send_calls = 0
+        self.deleted_webhook_urls: set = set()
+        self._created_webhook_urls: List[str] = []
+
+    def delete_webhooks(self) -> None:
+        """Simulates a server admin deleting every existing webhook."""
+        self.deleted_webhook_urls.update(self._created_webhook_urls)
 
     async def send(self, *, content=None, embed=None, allowed_mentions=None, suppress_embeds=False):
         if self.raise_on_send:
@@ -86,7 +98,10 @@ class FakeDiscordChannel:
         self.create_webhook_calls += 1
         if self.raise_on_create_webhook:
             raise self.raise_on_create_webhook
-        return FakeWebhook(f"https://discord.com/api/webhooks/{self.id}/faketoken", self)
+        suffix = "" if self.create_webhook_calls == 1 else str(self.create_webhook_calls)
+        url = f"https://discord.com/api/webhooks/{self.id}/faketoken{suffix}"
+        self._created_webhook_urls.append(url)
+        return FakeWebhook(url, self)
 
 
 class FakeBot:
@@ -158,19 +173,49 @@ def harness() -> Harness:
     return Harness()
 
 
-async def test_sends_plain_text_with_link_preview_allowed_when_no_config_exists_yet(harness: Harness) -> None:
-    """No manually-built embed by default — content carries the raw link so
-    Discord's own link-unfurling renders a richer, platform-branded preview
-    than a hand-built embed would (see notifications/embeds.py)."""
+async def test_youtube_alert_gets_a_rich_embed_by_default(harness: Harness) -> None:
     channel = await harness.add_channel(1, "acc-1", 555)
 
+    await harness.sender.handle(_event(description="Watch this", author="Example Channel"))
+
+    sent = channel.sent[0]
+    assert sent["embed"] is not None
+    assert sent["embed"].title == "A video"
+    assert sent["embed"].fields[0].value == "Watch this"
+    # The link is wrapped so Discord doesn't add its own preview under the embed.
+    assert "<https://youtube.com/watch?v=vid-1>" in sent["content"]
+    assert "Example Channel" in sent["content"]
+    assert sent["suppress_embeds"] is False
+
+
+async def test_embed_disabled_sends_plain_text_with_no_preview(harness: Harness) -> None:
+    channel = await harness.add_channel(1, "acc-1", 555)
+    await harness.alert_repo.seed_defaults(1, "acc-1", ["video_published"])
+    harness.db.tables["pulsenotify_alert_configurations"].rows[0]["embed_enabled"] = False
+
     await harness.sender.handle(_event())
+
+    sent = channel.sent[0]
+    assert sent["embed"] is None
+    assert "https://youtube.com/watch?v=vid-1" in sent["content"]
+    assert sent["suppress_embeds"] is True
+
+
+async def test_platform_without_a_rich_embed_sends_plain_text_with_link_preview(harness: Harness) -> None:
+    """Platforms whose events lack the data for a full embed rely on
+    Discord's own link preview instead (see notifications/embeds.py)."""
+    channel = await harness.add_channel(1, "acc-1", 555)
+
+    await harness.sender.handle(
+        _event(platform="kick", event_type=EventType.STREAM_STARTED, url="https://kick.com/example", title="A video")
+    )
 
     assert len(channel.sent) == 1
     sent = channel.sent[0]
     assert sent["embed"] is None
     assert "A video" in sent["content"]
-    assert "https://youtube.com/watch?v=vid-1" in sent["content"]
+    assert "https://kick.com/example" in sent["content"]
+    assert "<https://kick.com/example>" not in sent["content"]
     assert sent["suppress_embeds"] is False  # embed_enabled=True -> allow the native preview
 
 
@@ -212,6 +257,22 @@ async def test_mention_role_is_included_and_scoped_to_that_role_only(harness: Ha
     assert allowed.users is False
 
 
+async def test_everyone_role_is_sent_as_a_real_everyone_ping(harness: Harness) -> None:
+    """The @everyone role's ID is the guild's ID; `<@&guild_id>` renders as
+    a dead "@@everyone", so it must go out as literal @everyone instead."""
+    channel = await harness.add_channel(1, "acc-1", 555)
+    await harness.alert_repo.seed_defaults(1, "acc-1", ["video_published"])
+    harness.db.tables["pulsenotify_alert_configurations"].rows[0]["mention_role_id"] = 1
+
+    await harness.sender.handle(_event())
+
+    sent = channel.sent[0]
+    assert sent["content"].startswith("@everyone ")
+    assert "<@&1>" not in sent["content"]
+    assert sent["allowed_mentions"].everyone is True
+    assert sent["allowed_mentions"].roles is False
+
+
 # ── custom_message (section 35) ────────────────────────────────────────
 
 
@@ -227,15 +288,13 @@ async def test_custom_message_replaces_the_default_content(harness: Harness) -> 
     sent = channel.sent[0]
     assert sent["content"] == (
         "Hey @everyone, Example just posted a new post! Go check it out!\n"
-        "https://youtube.com/watch?v=vid-1"
+        "<https://youtube.com/watch?v=vid-1>"
     )
 
 
-async def test_custom_message_never_gets_a_manually_built_embed(harness: Harness) -> None:
-    """A custom message's template typically already includes {url} as
-    plain text, which Discord auto-previews on its own — a hand-built
-    embed on top of that would just duplicate it, so custom messages never
-    get one regardless of embed_enabled (section 35 revision)."""
+async def test_custom_message_keeps_the_rich_embed_without_a_duplicate_preview(harness: Harness) -> None:
+    """The template's {url} is wrapped in <...> when the message carries
+    its own embed, so Discord doesn't add a second preview under it."""
     channel = await harness.add_channel(1, "acc-1", 555)
     await harness.alert_repo.seed_defaults(1, "acc-1", ["video_published"])
     harness.db.tables["pulsenotify_alert_configurations"].rows[0]["custom_message"] = "Check this out!\n{url}"
@@ -244,9 +303,9 @@ async def test_custom_message_never_gets_a_manually_built_embed(harness: Harness
     await harness.sender.handle(_event())
 
     sent = channel.sent[0]
-    assert sent["content"] == "Check this out!\nhttps://youtube.com/watch?v=vid-1"
-    assert sent["embed"] is None
-    assert sent["suppress_embeds"] is False  # embed_enabled=True -> allow Discord's own link preview
+    assert sent["content"] == "Check this out!\n<https://youtube.com/watch?v=vid-1>"
+    assert sent["embed"] is not None
+    assert sent["suppress_embeds"] is False
 
 
 async def test_custom_message_with_embed_disabled_suppresses_the_native_link_preview(harness: Harness) -> None:
@@ -447,28 +506,66 @@ async def test_webhook_deleted_externally_before_any_send_is_recreated(harness: 
     assert channel.create_webhook_calls == 1
 
     # Simulate external deletion: the stored URL now points at nothing.
-    channel.raise_on_webhook_fetch = _fake_http_exception(discord.NotFound, status=404)
+    channel.delete_webhooks()
 
     await harness.sender.handle(_event())
 
     assert channel.create_webhook_calls == 2  # a fresh webhook was actually created
     assert len(channel.sent) == 1  # and the notification still went out through it
+    updated = await harness.channel_repo.get_by_discord_channel(1, 555)
+    assert updated is not None and updated["webhook_url"].endswith("faketoken2")
 
 
-async def test_deleted_webhook_is_cleared_and_falls_back_for_that_send(harness: Harness) -> None:
+async def test_account_add_style_lookup_verifies_a_stored_webhook(harness: Harness) -> None:
+    channel = await harness.add_channel(1, "acc-1", 555)
+    row = await harness.channel_repo.get_by_discord_channel(1, 555)
+    await harness.sender.get_or_create_webhook(row, channel)
+    channel.delete_webhooks()
+
+    await harness.sender.get_or_create_webhook(await harness.channel_repo.get_by_discord_channel(1, 555), channel)
+
+    assert channel.create_webhook_calls == 2
+
+
+async def test_sending_does_not_spend_a_round_trip_verifying_the_webhook(harness: Harness) -> None:
+    """Every alert used to call webhook.fetch() before sending — an extra
+    Discord API round trip on the delivery path, for something the send
+    itself already reports."""
+    channel = await harness.add_channel(1, "acc-1", 555)
+
+    await harness.sender.handle(_event())
+    await harness.sender.handle(_event(platform_event_id="vid-2"))
+
+    assert channel.webhook_fetch_calls == 0
+    assert len(channel.sent) == 2
+
+
+async def test_deleted_webhook_is_replaced_and_the_alert_goes_through_the_new_one(harness: Harness) -> None:
     """Simulates a server admin deleting the webhook from Discord's side
     sometime after PulseNotify created and persisted it."""
     channel = await harness.add_channel(1, "acc-1", 555)
     await harness.sender.handle(_event())  # creates + persists the webhook normally
     assert channel.create_webhook_calls == 1
 
-    channel.raise_on_webhook_send = _fake_http_exception(discord.NotFound, status=404)
+    channel.delete_webhooks()
     await harness.sender.handle(_event(platform_event_id="vid-2"))  # must not raise or drop the notification
 
-    assert len(channel.sent) == 2  # first via the webhook, second via the direct-send fallback
+    assert len(channel.sent) == 2
+    assert channel.create_webhook_calls == 2
     updated = await harness.channel_repo.get_by_discord_channel(1, 555)
-    assert updated is not None
-    assert updated["webhook_url"] is None  # cleared so the next notification recreates one
+    assert updated is not None and updated["webhook_url"].endswith("faketoken2")
+
+
+async def test_webhook_not_found_twice_falls_back_to_sending_as_the_bot(harness: Harness) -> None:
+    channel = await harness.add_channel(1, "acc-1", 555)
+    await harness.sender.handle(_event())
+
+    channel.raise_on_webhook_send = _fake_http_exception(discord.NotFound, status=404)
+    await harness.sender.handle(_event(platform_event_id="vid-2"))
+
+    assert len(channel.sent) == 2  # second one via the direct-send fallback
+    updated = await harness.channel_repo.get_by_discord_channel(1, 555)
+    assert updated is not None and updated["webhook_url"] is None  # the next alert recreates one
 
 
 async def test_channel_not_in_cache_falls_back_to_fetch(harness: Harness) -> None:

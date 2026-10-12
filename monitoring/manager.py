@@ -71,11 +71,6 @@ class MonitoringManager:
             if adapter.supports(Capability.LIVE_STATUS)
             else self._settings.monitoring_content_poll_interval_seconds
         )
-        if adapter.min_poll_interval_seconds is not None:
-            # A quota-limited live check (e.g. YouTube's search.list) needs
-            # a slower cadence than the generic LIVE_STATUS interval would
-            # give it — see platforms/base.py's docstring for why.
-            poll_interval = max(poll_interval, adapter.min_poll_interval_seconds)
         health_tracker = PlatformHealthTracker(
             adapter.platform,
             self._health_repo,
@@ -84,6 +79,8 @@ class MonitoringManager:
         )
         self._schedulers[adapter.platform] = PlatformScheduler(
             adapter,
+            # Only a default — an adapter with its own quota math overrides
+            # it per cycle (PlatformAdapter.poll_interval_seconds()).
             poll_interval_seconds=poll_interval,
             account_repo=self._account_repo,
             live_state_repo=self._live_state_repo,

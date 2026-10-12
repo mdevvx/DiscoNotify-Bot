@@ -66,6 +66,10 @@ class AccountWorker:
         # skipping whatever was published during the downtime.
         self._cursor: Optional[str] = initial_cursor
 
+    @property
+    def platform_account_id(self) -> str:
+        return self._account_ref.platform_account_id
+
     async def poll_once(self) -> None:
         try:
             if self._adapter.capabilities & CONTENT_CAPABILITIES:
@@ -126,8 +130,11 @@ class AccountWorker:
                     platform_event_id=status.stream_id
                     or f"live-{self._account_id}-{(status.started_at or _utcnow()).isoformat()}",
                     title=status.title,
+                    description=status.description,
                     url=status.url,
                     thumbnail_url=status.thumbnail_url,
+                    author=status.author,
+                    author_avatar_url=status.author_avatar_url,
                     started_at=status.started_at,
                     metadata={"category": status.category, "viewer_count": status.viewer_count},
                 )

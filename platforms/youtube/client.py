@@ -21,6 +21,11 @@ logger = get_logger(__name__)
 
 _BASE_URL = "https://www.googleapis.com/youtube/v3"
 
+# videos.list only returns player.embedWidth/embedHeight when a maxHeight
+# or maxWidth is passed. Only the aspect ratio matters (it's how the parser
+# tells a vertical Short from a landscape video), so any valid value works.
+_EMBED_MAX_HEIGHT = 1000
+
 # A quota-exhaustion response doesn't carry a Retry-After header (it isn't
 # a per-request rate limit), and the daily reset is at midnight Pacific —
 # rather than do timezone arithmetic, just back off for a fixed, generous
@@ -80,16 +85,12 @@ class YouTubeClient:
         """Accepts up to 50 IDs per call (still costs 1 unit total)."""
         if not video_ids:
             return []
-        params = {"part": "snippet,contentDetails,liveStreamingDetails", "id": ",".join(video_ids[:50])}
+        params = {
+            "part": "snippet,contentDetails,liveStreamingDetails,player",
+            "id": ",".join(video_ids[:50]),
+            "maxHeight": _EMBED_MAX_HEIGHT,
+        }
         data = await self._get("/videos", params)
-        return data.get("items", [])
-
-    async def search_live(self, channel_id: str) -> List[Dict[str, Any]]:
-        """The only documented way to find a live broadcast on a channel
-        this bot doesn't own. Costs 100 units — callers are responsible for
-        budgeting this themselves (see platforms/youtube/adapter.py)."""
-        params = {"part": "snippet", "channelId": channel_id, "eventType": "live", "type": "video"}
-        data = await self._get("/search", params)
         return data.get("items", [])
 
     async def _get(self, path: str, params: Dict[str, Any]) -> Dict[str, Any]:

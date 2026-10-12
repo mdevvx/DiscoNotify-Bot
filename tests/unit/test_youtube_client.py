@@ -130,6 +130,10 @@ async def test_get_videos_sends_comma_joined_ids() -> None:
     await client.get_videos(["a", "b", "c"])
 
     assert seen_params["id"] == "a,b,c"
+    # player + maxHeight are what return the embed dimensions the Shorts
+    # heuristic needs.
+    assert "player" in seen_params["part"].split(",")
+    assert seen_params["maxHeight"]
 
 
 async def test_get_videos_with_no_ids_does_not_make_a_request() -> None:

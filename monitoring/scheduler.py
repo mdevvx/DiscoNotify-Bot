@@ -1,6 +1,8 @@
 """Runs polling for every enabled account of ONE platform, on a shared
 interval and a shared RateLimiter (the limit is against that platform's API
-as a whole, not per-account).
+as a whole, not per-account). The interval is the adapter's own choice when
+it has one (PlatformAdapter.poll_interval_seconds()), re-evaluated every
+cycle as accounts come and go.
 
 Re-reads the enabled-account list from the database at the start of every
 cycle, so accounts added/removed/toggled between cycles are picked up
@@ -39,6 +41,7 @@ class PlatformScheduler:
         submit_event: Callable[[NormalizedEvent], Awaitable[None]],
     ) -> None:
         self._adapter = adapter
+        self._default_poll_interval = poll_interval_seconds
         self._poll_interval = poll_interval_seconds
         self._account_repo = account_repo
         self._live_state_repo = live_state_repo
@@ -61,6 +64,7 @@ class PlatformScheduler:
 
     async def start(self) -> None:
         await self._sync_workers()
+        self._update_poll_interval()
         self._task = asyncio.create_task(self._run_loop(), name=f"scheduler-{self._adapter.platform}")
         logger.info("Started %s scheduler (%d account(s), every %.0fs).", self._adapter.platform, self.worker_count, self._poll_interval)
 
@@ -74,6 +78,7 @@ class PlatformScheduler:
         while not self._stop_event.is_set():
             await self._poll_all()
             await self._health_tracker.flush()
+            self._update_poll_interval()
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=self._poll_interval)
             except asyncio.TimeoutError:
@@ -103,6 +108,19 @@ class PlatformScheduler:
                 # genuinely unexpected slipped through, so it's logged but
                 # still must not stop the other accounts from being polled.
                 logger.error("Unexpected error polling account %s: %s", account_id, result, exc_info=result)
+
+    def _update_poll_interval(self) -> None:
+        distinct_accounts = len({worker.platform_account_id for worker in self._workers.values()})
+        interval = self._adapter.poll_interval_seconds(distinct_accounts)
+        interval = interval if interval is not None else self._default_poll_interval
+        if interval != self._poll_interval:
+            logger.info(
+                "%s poll interval is now %.0fs (%d distinct account(s)).",
+                self._adapter.platform,
+                interval,
+                distinct_accounts,
+            )
+            self._poll_interval = interval
 
     async def _sync_workers(self) -> None:
         rows = await self._account_repo.list_enabled_by_platform(self._adapter.platform)

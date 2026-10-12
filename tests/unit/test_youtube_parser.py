@@ -88,8 +88,29 @@ def test_normalize_video_boundary_at_exactly_60_seconds_is_a_short() -> None:
     assert event.event_type == EventType.SHORT_PUBLISHED
 
 
-def test_normalize_video_61_seconds_is_not_a_short() -> None:
+def test_normalize_video_61_seconds_without_dimensions_is_not_a_short() -> None:
     event = parser.normalize_video(_ACCOUNT, _video(duration="PT1M1S"))
+    assert event.event_type == EventType.VIDEO_PUBLISHED
+
+
+_VERTICAL = {"embedWidth": "563", "embedHeight": "1000"}
+_LANDSCAPE = {"embedWidth": "1778", "embedHeight": "1000"}
+
+
+def test_normalize_video_vertical_video_up_to_3_minutes_is_a_short() -> None:
+    """Regression test: Shorts can be up to 3 minutes since Oct 2024; the
+    old <=60s rule announced real 1-3 minute Shorts as regular videos."""
+    event = parser.normalize_video(_ACCOUNT, _video(duration="PT2M31S", player=_VERTICAL))
+    assert event.event_type == EventType.SHORT_PUBLISHED
+
+
+def test_normalize_video_vertical_video_over_3_minutes_is_not_a_short() -> None:
+    event = parser.normalize_video(_ACCOUNT, _video(duration="PT3M1S", player=_VERTICAL))
+    assert event.event_type == EventType.VIDEO_PUBLISHED
+
+
+def test_normalize_video_short_landscape_video_is_not_a_short() -> None:
+    event = parser.normalize_video(_ACCOUNT, _video(duration="PT45S", player=_LANDSCAPE))
     assert event.event_type == EventType.VIDEO_PUBLISHED
 
 
@@ -125,6 +146,18 @@ def test_video_to_live_status_detects_currently_live() -> None:
     assert status.is_live is True
     assert status.viewer_count == 1234
     assert status.started_at is not None
+
+
+def test_video_to_live_status_carries_description_channel_name_and_avatar() -> None:
+    video = {
+        "id": "vid-live",
+        "snippet": {"liveBroadcastContent": "live", "description": "Join us", "channelTitle": "Vector Games"},
+        "liveStreamingDetails": {},
+    }
+    status = parser.video_to_live_status(video, channel_avatar_url="https://yt3.example/a.jpg")
+    assert status.description == "Join us"
+    assert status.author == "Vector Games"
+    assert status.author_avatar_url == "https://yt3.example/a.jpg"
 
 
 def test_video_to_live_status_upcoming_is_not_live() -> None:
@@ -164,6 +197,14 @@ def test_duration_parses_seconds_only() -> None:
 
 def test_duration_parses_minutes_only() -> None:
     assert parser._parse_iso8601_duration("PT5M") == 300
+
+
+def test_duration_parses_a_live_streams_zero_duration() -> None:
+    assert parser._parse_iso8601_duration("P0D") == 0
+
+
+def test_duration_parses_videos_over_a_day() -> None:
+    assert parser._parse_iso8601_duration("P1DT2H") == 93600
 
 
 def test_duration_returns_none_for_missing_value() -> None:
@@ -212,3 +253,33 @@ def test_channel_to_account_ref_prefers_custom_url_then_title() -> None:
     channel_no_custom_url = {"id": "UCabc", "snippet": {"title": "Display Name"}}
     ref2 = parser.channel_to_account_ref(channel_no_custom_url)
     assert ref2.username == "Display Name"
+
+
+# ── is_premiere / is_live_stream ─────────────────────────────────────────
+
+
+def _broadcast(state: str, duration: str) -> dict:
+    return {
+        "id": "b-1",
+        "snippet": {"liveBroadcastContent": state},
+        "contentDetails": {"duration": duration},
+        "liveStreamingDetails": {"scheduledStartTime": "2026-09-15T10:00:00Z"},
+    }
+
+
+def test_a_live_stream_reports_zero_duration_and_is_not_a_premiere() -> None:
+    video = _broadcast("live", "P0D")
+    assert parser.is_premiere(video) is False
+    assert parser.is_live_stream(video) is True
+
+
+def test_a_broadcast_with_a_real_duration_is_a_premiere_not_a_stream() -> None:
+    video = _broadcast("live", "PT12M30S")
+    assert parser.is_premiere(video) is True
+    assert parser.is_live_stream(video) is False
+
+
+def test_a_regular_video_is_neither() -> None:
+    video = {"id": "v", "snippet": {"liveBroadcastContent": "none"}, "contentDetails": {"duration": "PT5M"}}
+    assert parser.is_premiere(video) is False
+    assert parser.is_live_stream(video) is False

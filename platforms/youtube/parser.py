@@ -14,15 +14,20 @@ from platforms.base import AccountRef, LiveStatus
 
 # No official "is this a Short" field exists on the Data API (verified
 # 2026-09-15 against current Google documentation and community reports —
-# there is no isShort/shortsEligible field on the Video resource). This is
-# a best-effort heuristic using the official contentDetails.duration field:
-# it will misclassify a short *regular* video (<=60s) as a Short. Treat
-# EventType.SHORT_PUBLISHED as "probably a Short," not a guarantee.
-_SHORT_MAX_SECONDS = 60
+# there is no isShort/shortsEligible field on the Video resource). Shorts
+# can be up to 3 minutes (since Oct 2024) and are vertical or square, so the
+# heuristic is "<= 3 min AND not landscape", using the embed dimensions
+# videos.list returns for part=player when maxHeight is passed (verified
+# 2026-10-12 against real uploads: every Short reported 563x1000, landscape
+# videos 1778x1000). When the dimensions are missing it falls back to the
+# older duration-only "<= 60s" rule. Treat EventType.SHORT_PUBLISHED as
+# "probably a Short," not a guarantee.
+_SHORT_MAX_SECONDS = 180
+_SHORT_MAX_SECONDS_WITHOUT_DIMENSIONS = 60
 
 _CHANNEL_ID_RE = re.compile(r"^UC[A-Za-z0-9_-]{22}$")
 _YOUTUBE_URL_RE = re.compile(r"^https?://(www\.)?youtube\.com/(?P<path>.+)$", re.IGNORECASE)
-_DURATION_RE = re.compile(r"^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$")
+_DURATION_RE = re.compile(r"^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$")
 
 
 def parse_identifier(identifier: str) -> Tuple[str, str]:
@@ -57,6 +62,10 @@ def channel_to_account_ref(channel: Dict[str, Any]) -> AccountRef:
     )
 
 
+def channel_avatar_url(channel: Dict[str, Any]) -> Optional[str]:
+    return _best_thumbnail(channel.get("snippet", {}).get("thumbnails"))
+
+
 def uploads_playlist_id(channel: Dict[str, Any]) -> Optional[str]:
     return channel.get("contentDetails", {}).get("relatedPlaylists", {}).get("uploads")
 
@@ -79,14 +88,38 @@ def is_live_broadcast(video: Dict[str, Any]) -> bool:
     return bool(video.get("liveStreamingDetails"))
 
 
-def normalize_video(account: AccountRef, video: Dict[str, Any]) -> NormalizedEvent:
-    """`video` is a videos.list resource (part=snippet,contentDetails)."""
+def broadcast_state(video: Dict[str, Any]) -> str:
+    """snippet.liveBroadcastContent: "upcoming", "live", or "none"."""
+    return video.get("snippet", {}).get("liveBroadcastContent") or "none"
+
+
+def is_premiere(video: Dict[str, Any]) -> bool:
+    """A Premiere is a pre-recorded upload that plays out like a broadcast,
+    so it carries liveStreamingDetails just like a real stream. The
+    difference is its duration: a real live/upcoming stream reports
+    "P0D" (verified 2026-10-12 against currently-live streams), while a
+    Premiere already has the uploaded video's real length."""
+    if not is_live_broadcast(video):
+        return False
+    duration = _parse_iso8601_duration(video.get("contentDetails", {}).get("duration"))
+    return bool(duration)
+
+
+def is_live_stream(video: Dict[str, Any]) -> bool:
+    """A real stream (not a Premiere) that is live right now."""
+    return broadcast_state(video) == "live" and is_live_broadcast(video) and not is_premiere(video)
+
+
+def normalize_video(
+    account: AccountRef, video: Dict[str, Any], *, channel_avatar_url: Optional[str] = None
+) -> NormalizedEvent:
+    """`video` is a videos.list resource (part=snippet,contentDetails,player)."""
     snippet = video.get("snippet", {})
     content_details = video.get("contentDetails", {})
     video_id = video["id"]
 
     duration_seconds = _parse_iso8601_duration(content_details.get("duration"))
-    is_probably_short = duration_seconds is not None and duration_seconds <= _SHORT_MAX_SECONDS
+    is_probably_short = _is_probably_short(duration_seconds, video.get("player"))
 
     return NormalizedEvent(
         platform=account.platform,
@@ -99,12 +132,17 @@ def normalize_video(account: AccountRef, video: Dict[str, Any]) -> NormalizedEve
         url=f"https://www.youtube.com/watch?v={video_id}",
         thumbnail_url=_best_thumbnail(snippet.get("thumbnails")),
         author=snippet.get("channelTitle"),
-        published_at=_parse_timestamp(snippet.get("publishedAt")),
+        author_avatar_url=channel_avatar_url,
+        # A Premiere's publishedAt is when it was scheduled; when it
+        # actually started is the moment it was released.
+        published_at=_parse_timestamp(
+            video.get("liveStreamingDetails", {}).get("actualStartTime") or snippet.get("publishedAt")
+        ),
         metadata={"duration_seconds": duration_seconds, "is_short_heuristic": is_probably_short},
     )
 
 
-def video_to_live_status(video: Dict[str, Any]) -> LiveStatus:
+def video_to_live_status(video: Dict[str, Any], *, channel_avatar_url: Optional[str] = None) -> LiveStatus:
     """`video` is a videos.list resource (part=snippet,liveStreamingDetails)."""
     snippet = video.get("snippet", {})
     live_details = video.get("liveStreamingDetails", {})
@@ -119,7 +157,20 @@ def video_to_live_status(video: Dict[str, Any]) -> LiveStatus:
         started_at=_parse_timestamp(live_details.get("actualStartTime")),
         thumbnail_url=_best_thumbnail(snippet.get("thumbnails")),
         url=f"https://www.youtube.com/watch?v={video_id}" if video_id else None,
+        description=snippet.get("description"),
+        author=snippet.get("channelTitle"),
+        author_avatar_url=channel_avatar_url,
     )
+
+
+def _is_probably_short(duration_seconds: Optional[int], player: Optional[Dict[str, Any]]) -> bool:
+    if duration_seconds is None:
+        return False
+    width = _safe_int((player or {}).get("embedWidth"))
+    height = _safe_int((player or {}).get("embedHeight"))
+    if not width or not height:
+        return duration_seconds <= _SHORT_MAX_SECONDS_WITHOUT_DIMENSIONS
+    return duration_seconds <= _SHORT_MAX_SECONDS and width <= height
 
 
 def _best_thumbnail(thumbnails: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -148,14 +199,13 @@ def _parse_timestamp(value: Optional[str]) -> Optional[datetime.datetime]:
 
 
 def _parse_iso8601_duration(value: Optional[str]) -> Optional[int]:
-    """Parses 'PT1M30S'-style durations into total seconds. Only covers the
-    hour/minute/second components YouTube actually emits for videos (not
-    days/weeks/months/years, which ISO 8601 allows but video durations
-    never use)."""
+    """Parses 'PT1M30S'-style durations into total seconds. Covers the
+    day/hour/minute/second components YouTube actually emits: "P0D" for a
+    live or upcoming stream, and "P1DT2H..." for a video over 24 hours."""
     if not value:
         return None
     match = _DURATION_RE.match(value)
     if not match:
         return None
-    hours, minutes, seconds = (int(group) if group else 0 for group in match.groups())
-    return hours * 3600 + minutes * 60 + seconds
+    days, hours, minutes, seconds = (int(group) if group else 0 for group in match.groups())
+    return days * 86400 + hours * 3600 + minutes * 60 + seconds

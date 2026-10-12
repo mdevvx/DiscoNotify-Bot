@@ -71,6 +71,11 @@ def test_mention_placeholder_resolves_to_the_configured_role() -> None:
     assert rendered == "Ping: <@&555>"
 
 
+def test_mention_placeholder_for_the_everyone_role_is_literal_everyone() -> None:
+    rendered = render_custom_message("Ping: {mention}", _event(guild_id=42), mention_role_id=42)
+    assert rendered == "Ping: @everyone"
+
+
 def test_mention_placeholder_is_empty_when_no_role_configured() -> None:
     rendered = render_custom_message("Ping: {mention}", _event(), mention_role_id=None)
     assert rendered == "Ping: "

@@ -36,8 +36,23 @@ MAX_TEMPLATE_LENGTH = 1500
 _MAX_RENDERED_LENGTH = 2000
 
 
-def render_custom_message(template: str, event: NormalizedEvent, *, mention_role_id: Optional[int] = None) -> str:
+def format_role_mention(role_id: int, guild_id: Optional[int]) -> str:
+    """Discord's @everyone role shares its ID with the guild, and `<@&id>`
+    for it renders as a dead "@@everyone" that pings nobody — it has to be
+    sent as the literal text instead."""
+    if role_id == guild_id:
+        return "@everyone"
+    return f"<@&{role_id}>"
+
+
+def render_custom_message(
+    template: str, event: NormalizedEvent, *, mention_role_id: Optional[int] = None, suppress_link_preview: bool = False
+) -> str:
+    """`suppress_link_preview` wraps {url} in <...> — used when the message
+    carries its own embed, so Discord doesn't add a second preview."""
     values = _template_values(event, mention_role_id)
+    if suppress_link_preview and values["url"]:
+        values["url"] = f"<{values['url']}>"
 
     def _replace(match: "re.Match[str]") -> str:
         # An unrecognized {placeholder} is left as literal text rather
@@ -59,5 +74,5 @@ def _template_values(event: NormalizedEvent, mention_role_id: Optional[int]) -> 
         "platform": event.platform.title(),
         "category": discord.utils.escape_mentions(str(event.metadata.get("category") or "")),
         "viewers": str(event.metadata.get("viewer_count") or ""),
-        "mention": f"<@&{mention_role_id}>" if mention_role_id else "",
+        "mention": format_role_mention(mention_role_id, event.guild_id) if mention_role_id else "",
     }

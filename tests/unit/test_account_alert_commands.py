@@ -21,8 +21,12 @@ class FakeResponse:
     def __init__(self) -> None:
         self.messages: List[Dict[str, Any]] = []
 
-    async def send_message(self, content: Optional[str] = None, *, embed=None, ephemeral: bool = False) -> None:
-        self.messages.append({"content": content, "embed": embed, "ephemeral": ephemeral})
+    async def send_message(
+        self, content: Optional[str] = None, *, embed=None, ephemeral: bool = False, allowed_mentions=None
+    ) -> None:
+        self.messages.append(
+            {"content": content, "embed": embed, "ephemeral": ephemeral, "allowed_mentions": allowed_mentions}
+        )
 
 
 class FakeGuild:
@@ -80,6 +84,9 @@ async def test_set_mention_sets_the_role_for_every_configured_event_type(db: Fak
     config = await interaction.client.alert_configs_repo.get(account_id, "video_published")
     assert config is not None and config["mention_role_id"] == 555
     assert "will now mention" in interaction.response.messages[0]["content"]
+    # The confirmation must never ping the role it's describing.
+    allowed = interaction.response.messages[0]["allowed_mentions"]
+    assert allowed.everyone is False and allowed.roles is False
 
 
 async def test_set_mention_with_no_role_clears_it(db: FakeDatabase) -> None:
@@ -223,6 +230,19 @@ async def test_account_info_shows_the_mention_role(db: FakeDatabase) -> None:
     embed = interaction.response.messages[0]["embed"]
     video_field = next(f for f in embed.fields if f.name == "New Video")
     assert "<@&555>" in video_field.value
+
+
+async def test_account_info_shows_the_everyone_role_as_everyone(db: FakeDatabase) -> None:
+    interaction = FakeInteraction(1, db)
+    account_id = await _seed_account_with_alerts(interaction)
+    await interaction.client.alert_configs_repo.set_mention_role(account_id, 1, event_type="video_published")
+
+    await account_info.callback(interaction, account_id)  # type: ignore[arg-type]
+
+    embed = interaction.response.messages[0]["embed"]
+    video_field = next(f for f in embed.fields if f.name == "New Video")
+    assert "@everyone" in video_field.value
+    assert "<@&1>" not in video_field.value
 
 
 async def test_account_info_for_unconfigured_account_reports_not_found(db: FakeDatabase) -> None:

@@ -35,8 +35,8 @@ from config import constants
 from database.repositories.alert_configs import AlertConfigurationRepository
 from database.repositories.channels import NotificationChannelRepository
 from events.models import NormalizedEvent
-from notifications.embeds import build_plain_text
-from notifications.templates import render_custom_message
+from notifications.embeds import build_embed, build_embed_headline, build_plain_text
+from notifications.templates import format_role_mention, render_custom_message
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -84,7 +84,7 @@ class NotificationSender:
         content, embed, suppress_embeds = self._build_message(
             event, embed_enabled=embed_enabled, mention_role_id=mention_role_id, custom_message=custom_message
         )
-        allowed_mentions = self._allowed_mentions_for(content, mention_role_id)
+        allowed_mentions = self._allowed_mentions_for(content, mention_role_id, event.guild_id)
 
         for channel_row in channels:
             await self._send_to_channel(
@@ -103,38 +103,43 @@ class NotificationSender:
         mention_role_id: Optional[int],
         custom_message: Optional[str],
     ) -> tuple:
-        if custom_message:
-            # Never attach a manually-built embed alongside a custom
-            # message — the admin's template typically already includes
-            # {url} as plain text, and Discord auto-generates its own
-            # preview from that raw link, so a hand-built embed on top
-            # just duplicates it. embed_enabled instead controls whether
-            # that native preview is allowed to show at all.
-            content = render_custom_message(custom_message, event, mention_role_id=mention_role_id)
-            return content, None, not embed_enabled
+        # A rich embed where the platform has the data for one (see
+        # notifications/embeds.py); otherwise plain text with the raw link,
+        # letting Discord's own link preview do the visual work.
+        # embed_enabled=False means neither: plain text, preview suppressed.
+        embed = build_embed(event) if embed_enabled else None
 
-        # Same reasoning as the custom-message branch above: never build our
-        # own embed here either. A hand-built embed looks noticeably worse
-        # than the rich, platform-branded preview Discord generates on its
-        # own from the raw link (e.g. YouTube's real title/description/
-        # thumbnail with its own "YouTube" footer) — so always send plain
-        # text containing the link and let that native preview do the work.
-        # embed_enabled controls whether it's allowed to render at all.
-        mention_text = f"<@&{mention_role_id}>" if mention_role_id else None
+        if custom_message:
+            content = render_custom_message(
+                custom_message, event, mention_role_id=mention_role_id, suppress_link_preview=embed is not None
+            )
+            return content, embed, not embed_enabled
+
+        mention_text = format_role_mention(mention_role_id, event.guild_id) if mention_role_id else None
+        if embed is not None:
+            headline = build_embed_headline(event)
+            return (f"{mention_text} {headline}" if mention_text else headline), embed, False
+
         fallback = build_plain_text(event)
         content = f"{mention_text}\n{fallback}" if mention_text else fallback
         return content, None, not embed_enabled
 
-    def _allowed_mentions_for(self, content: Optional[str], mention_role_id: Optional[int]) -> discord.AllowedMentions:
+    def _allowed_mentions_for(
+        self, content: Optional[str], mention_role_id: Optional[int], guild_id: Optional[int]
+    ) -> discord.AllowedMentions:
         text = content or ""
+        # The @everyone role is sent as literal "@everyone" text (see
+        # format_role_mention), which the `everyone` check below covers —
+        # it isn't a real role to allow-list.
+        is_real_role = mention_role_id is not None and mention_role_id != guild_id
         return discord.AllowedMentions(
-            # @everyone/@here can only appear here if the admin typed it
-            # literally into their own custom_message template — platform
+            # @everyone/@here can only appear here if the admin picked the
+            # @everyone role or typed it into their own template — platform
             # content substituted into placeholders is always
             # mention-escaped first (see notifications/templates.py).
             everyone="@everyone" in text or "@here" in text,
             users=False,
-            roles=[discord.Object(id=mention_role_id)] if mention_role_id else False,
+            roles=[discord.Object(id=mention_role_id)] if is_real_role else False,
         )
 
     async def _send_to_channel(
@@ -159,8 +164,13 @@ class NotificationSender:
                 logger.exception("Failed to look up notification channel %s.", discord_channel_id)
                 return
 
-        webhook = await self.get_or_create_webhook(channel_row, discord_channel)
-        if webhook is not None:
+        # Not verified up front (that would cost a Discord round trip on
+        # every alert) — a deleted webhook surfaces as NotFound on send,
+        # and is replaced right there.
+        webhook = await self.get_or_create_webhook(channel_row, discord_channel, verify=False)
+        for attempt in range(2):
+            if webhook is None:
+                break
             try:
                 # No username/avatar_url override here on purpose — see this
                 # module's docstring for why: it would stomp any branding an
@@ -174,12 +184,15 @@ class NotificationSender:
                 return
             except discord.NotFound:
                 # The webhook itself was deleted from Discord's side (e.g.
-                # a server admin removed it manually) — clear it so the
-                # next notification recreates one, and fall through to
-                # send this one as the bot instead of dropping it.
+                # a server admin removed it manually) — forget it and send
+                # this alert through a fresh one; if that fails too, fall
+                # through to sending as the bot instead of dropping it.
                 await self._channel_repo.set_webhook_url(channel_row["id"], None)
+                channel_row = {**channel_row, "webhook_url": None}
+                webhook = await self.get_or_create_webhook(channel_row, discord_channel) if attempt == 0 else None
             except discord.HTTPException:
                 logger.exception("Failed to send via webhook in channel %s; falling back.", discord_channel_id)
+                break
 
         try:
             await discord_channel.send(
@@ -193,17 +206,20 @@ class NotificationSender:
             logger.exception("Failed to send notification to channel %s.", discord_channel_id)
 
     async def get_or_create_webhook(
-        self, channel_row: Dict[str, Any], discord_channel: Any
+        self, channel_row: Dict[str, Any], discord_channel: Any, *, verify: bool = True
     ) -> Optional[discord.Webhook]:
         """Public (not just an internal `_send_to_channel()` helper) since
         `/pulsenotify account-add` also calls this proactively — right when
         a channel is first linked, rather than waiting for the first
         notification — so the admin can go rename/re-avatar the webhook in
-        Discord's own UI before any alert ever uses it."""
+        Discord's own UI before any alert ever uses it.
+
+        `verify` checks with Discord that a stored webhook still exists.
+        The send path skips it: the send itself reports a deleted webhook."""
         webhook_url = channel_row.get("webhook_url")
         if webhook_url:
             webhook = self._webhook_from_url(webhook_url, client=self._bot)
-            if await self._webhook_still_exists(webhook):
+            if not verify or await self._webhook_still_exists(webhook):
                 return webhook
             # Deleted from Discord's side (manually, or by some other
             # automation/integration in the server) since we created it —

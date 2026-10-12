@@ -49,7 +49,8 @@ class NormalizedEvent:
     description: Optional[str] = None
     url: Optional[str] = None
     thumbnail_url: Optional[str] = None
-    author: Optional[str] = None
+    author: Optional[str] = None  # the account's display name, when the platform provides one
+    author_avatar_url: Optional[str] = None
     published_at: Optional[datetime] = None
     started_at: Optional[datetime] = None
     metadata: Dict[str, Any] = field(default_factory=dict)

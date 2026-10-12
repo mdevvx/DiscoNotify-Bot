@@ -168,6 +168,26 @@ async def test_offline_to_live_fires_exactly_one_stream_started(harness: Harness
     assert started[0].platform_event_id == "s1"
 
 
+async def test_stream_started_carries_the_details_a_rich_embed_needs(harness: Harness) -> None:
+    harness.adapter.live_queue = [
+        LiveStatus(
+            is_live=True,
+            stream_id="s1",
+            title="Live now",
+            description="Join us",
+            author="Vector Games",
+            author_avatar_url="https://yt3.example/a.jpg",
+        )
+    ]
+
+    await harness.worker.poll_once()
+
+    started = next(e for e in harness.submitted if e.event_type == EventType.STREAM_STARTED)
+    assert started.description == "Join us"
+    assert started.author == "Vector Games"
+    assert started.author_avatar_url == "https://yt3.example/a.jpg"
+
+
 async def test_still_live_on_next_poll_does_not_fire_again(harness: Harness) -> None:
     harness.adapter.live_queue = [
         LiveStatus(is_live=True, stream_id="s1"),

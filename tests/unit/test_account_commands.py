@@ -35,8 +35,12 @@ class FakeResponse:
     def __init__(self) -> None:
         self.messages: List[Dict[str, Any]] = []
 
-    async def send_message(self, content: Optional[str] = None, *, embed=None, ephemeral: bool = False) -> None:
-        self.messages.append({"content": content, "embed": embed, "ephemeral": ephemeral})
+    async def send_message(
+        self, content: Optional[str] = None, *, embed=None, ephemeral: bool = False, allowed_mentions=None
+    ) -> None:
+        self.messages.append(
+            {"content": content, "embed": embed, "ephemeral": ephemeral, "allowed_mentions": allowed_mentions}
+        )
 
 
 class FakeGuild:

@@ -1,7 +1,8 @@
-"""YouTubeAdapter's own logic: the cursor/baseline behavior for
-fetch_updates, caching the uploads playlist ID, and the live-search daily
-budget gate — driven through a fake YouTubeClient (not real HTTP; that's
-covered separately in test_youtube_client.py)."""
+"""YouTubeAdapter's own logic: cursor/baseline behavior, live and Premiere
+detection from the uploads playlist, per-channel snapshot sharing, the
+daily quota gate, and the quota-driven poll interval — driven through a
+fake YouTubeClient (not real HTTP; that's covered separately in
+test_youtube_client.py)."""
 
 from __future__ import annotations
 
@@ -21,15 +22,28 @@ _CHANNEL = {
 }
 
 
-def _playlist_item(video_id: str) -> Dict[str, Any]:
-    return {"snippet": {"resourceId": {"videoId": video_id}, "publishedAt": "2026-09-15T00:00:00Z"}}
+def _playlist_item(video_id: str, added_at: str = "2026-09-15T00:00:00Z") -> Dict[str, Any]:
+    return {"snippet": {"resourceId": {"videoId": video_id}, "publishedAt": added_at}}
 
 
 def _video(video_id: str, duration: str = "PT10M0S") -> Dict[str, Any]:
     return {
         "id": video_id,
-        "snippet": {"title": video_id, "thumbnails": {}},
+        "snippet": {"title": video_id, "thumbnails": {}, "liveBroadcastContent": "none"},
         "contentDetails": {"duration": duration},
+    }
+
+
+def _stream(video_id: str, state: str, *, duration: str = "P0D", started: Optional[str] = None) -> Dict[str, Any]:
+    """A real stream reports P0D; a Premiere passes its real duration."""
+    details: Dict[str, Any] = {"scheduledStartTime": "2026-09-15T10:00:00Z"}
+    if started:
+        details["actualStartTime"] = started
+    return {
+        "id": video_id,
+        "snippet": {"title": video_id, "liveBroadcastContent": state},
+        "contentDetails": {"duration": duration},
+        "liveStreamingDetails": details,
     }
 
 
@@ -38,10 +52,9 @@ class FakeYouTubeClient:
         self.channel: Optional[Dict[str, Any]] = _CHANNEL
         self.uploads: List[Dict[str, Any]] = []
         self.videos_by_id: Dict[str, Dict[str, Any]] = {}
-        self.live_search_results: List[Dict[str, Any]] = []
         self.get_channel_calls = 0
         self.list_uploads_calls = 0
-        self.search_live_calls = 0
+        self.get_videos_requests: List[List[str]] = []
 
     async def get_channel(self, *, channel_id=None, handle=None, username=None):
         self.get_channel_calls += 1
@@ -52,75 +65,127 @@ class FakeYouTubeClient:
         return self.uploads[:max_results]
 
     async def get_videos(self, video_ids: List[str]):
+        self.get_videos_requests.append(list(video_ids))
         return [self.videos_by_id[vid] for vid in video_ids if vid in self.videos_by_id]
 
-    async def search_live(self, channel_id: str):
-        self.search_live_calls += 1
-        return self.live_search_results
+
+class Clock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def next_tick(self, adapter: YouTubeAdapter) -> None:
+        self.now += adapter._poll_interval
 
 
-def _make_adapter(client: FakeYouTubeClient, **kwargs) -> YouTubeAdapter:
-    defaults = {"daily_quota_units": 10_000, "live_search_daily_budget_units": 8_000}
+def _make_adapter(client: FakeYouTubeClient, clock: Optional[Clock] = None, **kwargs) -> YouTubeAdapter:
+    defaults: Dict[str, Any] = {"daily_quota_units": 10_000}
     defaults.update(kwargs)
-    return YouTubeAdapter(client, **defaults)  # type: ignore[arg-type]
+    return YouTubeAdapter(client, clock=clock or Clock(), **defaults)  # type: ignore[arg-type]
+
+
+# ── new uploads ─────────────────────────────────────────────────────────
 
 
 async def test_first_poll_establishes_a_baseline_without_emitting_events() -> None:
     client = FakeYouTubeClient()
-    client.uploads = [_playlist_item("vid-3"), _playlist_item("vid-2"), _playlist_item("vid-1")]
+    client.uploads = [_playlist_item("vid-3", "2026-09-15T03:00:00Z"), _playlist_item("vid-2")]
     adapter = _make_adapter(client)
 
     result = await adapter.fetch_updates(_ACCOUNT, cursor=None)
 
     assert result.items == []
-    assert result.next_cursor == "vid-3"
+    assert result.next_cursor == "vid-3|2026-09-15T03:00:00Z"
 
 
-async def test_subsequent_poll_returns_only_items_newer_than_the_cursor() -> None:
+async def test_subsequent_poll_returns_only_items_newer_than_the_cursor_oldest_first() -> None:
     client = FakeYouTubeClient()
     client.uploads = [_playlist_item("vid-3"), _playlist_item("vid-2"), _playlist_item("vid-1")]
-    client.videos_by_id = {"vid-3": _video("vid-3"), "vid-2": _video("vid-2")}
+    client.videos_by_id = {vid: _video(vid) for vid in ("vid-1", "vid-2", "vid-3")}
     adapter = _make_adapter(client)
 
-    result = await adapter.fetch_updates(_ACCOUNT, cursor="vid-1")
+    result = await adapter.fetch_updates(_ACCOUNT, cursor="vid-1")  # pre-2026-10-12 bare-ID cursor
 
-    assert {v["id"] for v in result.items} == {"vid-2", "vid-3"}
-    assert result.next_cursor == "vid-3"
+    assert [v["id"] for v in result.items] == ["vid-2", "vid-3"]
+    assert result.next_cursor.startswith("vid-3|")
 
 
-async def test_no_new_items_returns_empty_and_keeps_the_cursor_fresh() -> None:
+async def test_no_new_items_returns_empty() -> None:
     client = FakeYouTubeClient()
     client.uploads = [_playlist_item("vid-1")]
+    client.videos_by_id = {"vid-1": _video("vid-1")}
     adapter = _make_adapter(client)
 
     result = await adapter.fetch_updates(_ACCOUNT, cursor="vid-1")
 
     assert result.items == []
-    assert result.next_cursor == "vid-1"
+
+
+async def test_deleted_cursor_video_only_reports_uploads_added_after_it() -> None:
+    """Regression test: the cursor's video being deleted or made private
+    used to make every upload on the page look new, re-announcing up to 10
+    old videos."""
+    client = FakeYouTubeClient()
+    client.uploads = [
+        _playlist_item("vid-new", "2026-09-15T05:00:00Z"),
+        _playlist_item("vid-old", "2026-09-15T01:00:00Z"),
+    ]
+    client.videos_by_id = {"vid-new": _video("vid-new"), "vid-old": _video("vid-old")}
+    adapter = _make_adapter(client)
+
+    result = await adapter.fetch_updates(_ACCOUNT, cursor="vid-deleted|2026-09-15T03:00:00Z")
+
+    assert [v["id"] for v in result.items] == ["vid-new"]
+
+
+async def test_missing_legacy_cursor_rebaselines_instead_of_flooding() -> None:
+    client = FakeYouTubeClient()
+    client.uploads = [_playlist_item("vid-2"), _playlist_item("vid-1")]
+    client.videos_by_id = {"vid-2": _video("vid-2"), "vid-1": _video("vid-1")}
+    adapter = _make_adapter(client)
+
+    result = await adapter.fetch_updates(_ACCOUNT, cursor="vid-deleted")
+
+    assert result.items == []
+    assert result.next_cursor.startswith("vid-2|")
 
 
 async def test_fetch_updates_excludes_livestreams_from_new_video_results() -> None:
     """A stream going live (or one that already ended) shows up in the
     uploads playlist exactly like a regular upload — must never be
-    reported as a 'new video' (that's get_live_status()'s job), or it
-    fires the wrong notification template. Regression test for a real
-    production bug: a livestream was announced as 'New Video' instead of
-    'Live Started'."""
+    reported as a 'new video' (that's get_live_status()'s job). Regression
+    test for a real production bug: a livestream was announced as 'New
+    Video' instead of 'Live Started'."""
     client = FakeYouTubeClient()
-    client.uploads = [_playlist_item("live-1"), _playlist_item("vid-1")]
-    live_video = {
-        "id": "live-1",
-        "snippet": {"title": "live-1", "liveBroadcastContent": "live"},
-        "contentDetails": {},
-        "liveStreamingDetails": {"actualStartTime": "2026-09-15T10:00:00Z"},
+    client.uploads = [_playlist_item("live-1"), _playlist_item("vid-1"), _playlist_item("vid-0")]
+    client.videos_by_id = {
+        "live-1": _stream("live-1", "live", started="2026-09-15T10:00:00Z"),
+        "vid-1": _video("vid-1"),
+        "vid-0": _video("vid-0"),
     }
-    client.videos_by_id = {"live-1": live_video, "vid-1": _video("vid-1")}
     adapter = _make_adapter(client)
 
     result = await adapter.fetch_updates(_ACCOUNT, cursor="vid-0")
 
-    assert {v["id"] for v in result.items} == {"vid-1"}
-    assert result.next_cursor == "live-1"  # cursor still advances past the excluded item
+    assert [v["id"] for v in result.items] == ["vid-1"]
+    assert result.next_cursor.startswith("live-1|")  # cursor still advances past the excluded item
+
+
+async def test_regular_video_details_are_not_refetched_every_check() -> None:
+    client = FakeYouTubeClient()
+    clock = Clock()
+    client.uploads = [_playlist_item("vid-1")]
+    client.videos_by_id = {"vid-1": _video("vid-1")}
+    adapter = _make_adapter(client, clock)
+
+    await adapter.fetch_updates(_ACCOUNT, cursor=None)
+    clock.next_tick(adapter)
+    await adapter.fetch_updates(_ACCOUNT, cursor="vid-1")
+
+    assert client.list_uploads_calls == 2
+    assert client.get_videos_requests == [["vid-1"]]
 
 
 async def test_missing_channel_raises_permanent_error() -> None:
@@ -136,132 +201,186 @@ async def test_missing_channel_raises_permanent_error() -> None:
 
 async def test_uploads_playlist_id_is_cached_after_the_first_lookup() -> None:
     client = FakeYouTubeClient()
+    clock = Clock()
     client.uploads = [_playlist_item("vid-1")]
-    adapter = _make_adapter(client)
+    adapter = _make_adapter(client, clock)
 
-    await adapter.fetch_updates(_ACCOUNT, cursor=None)
-    await adapter.fetch_updates(_ACCOUNT, cursor="vid-1")
-    await adapter.fetch_updates(_ACCOUNT, cursor="vid-1")
+    for _ in range(3):
+        await adapter.fetch_updates(_ACCOUNT, cursor="vid-1")
+        clock.next_tick(adapter)
 
     assert client.get_channel_calls == 1  # not once per poll
 
 
-async def test_live_search_returns_offline_when_nothing_is_live() -> None:
+# ── live streams ────────────────────────────────────────────────────────
+
+
+async def test_offline_when_nothing_is_live() -> None:
     client = FakeYouTubeClient()
-    client.live_search_results = []
+    client.uploads = [_playlist_item("vid-1")]
+    client.videos_by_id = {"vid-1": _video("vid-1")}
     adapter = _make_adapter(client)
 
     status = await adapter.get_live_status(_ACCOUNT)
 
-    assert status is not None
-    assert status.is_live is False
+    assert status is not None and status.is_live is False
 
 
-async def test_live_search_returns_live_status_for_an_active_broadcast() -> None:
+async def test_a_stream_at_the_top_of_the_uploads_playlist_is_reported_live() -> None:
     client = FakeYouTubeClient()
-    client.live_search_results = [{"id": {"videoId": "live-1"}}]
-    client.videos_by_id = {
-        "live-1": {
-            "id": "live-1",
-            "snippet": {"liveBroadcastContent": "live", "title": "Live now"},
-            "liveStreamingDetails": {"concurrentViewers": "42"},
-        }
-    }
+    client.uploads = [_playlist_item("live-1"), _playlist_item("vid-1")]
+    client.videos_by_id = {"live-1": _stream("live-1", "live", started="2026-09-15T10:00:00Z"), "vid-1": _video("vid-1")}
+    client.videos_by_id["live-1"]["liveStreamingDetails"]["concurrentViewers"] = "42"
     adapter = _make_adapter(client)
 
     status = await adapter.get_live_status(_ACCOUNT)
 
-    assert status is not None
-    assert status.is_live is True
+    assert status is not None and status.is_live is True
+    assert status.stream_id == "live-1"
     assert status.viewer_count == 42
 
 
-async def test_live_search_is_skipped_once_the_daily_budget_is_exhausted() -> None:
-    # 200 units of budget = exactly 2 search.list calls (100 units each).
-    # Three *distinct* channels on purpose: the per-channel cache below
-    # would otherwise dedupe repeated calls for the same one, masking
-    # actual budget exhaustion (see test_repeated_calls_for_the_same_channel_are_cached).
+async def test_upcoming_stream_is_tracked_until_it_goes_live_and_then_ends() -> None:
     client = FakeYouTubeClient()
-    adapter = _make_adapter(client, live_search_daily_budget_units=200)
-    account_a = AccountRef(platform="youtube", platform_account_id="UCaaa", username="a")
-    account_b = AccountRef(platform="youtube", platform_account_id="UCbbb", username="b")
-    account_c = AccountRef(platform="youtube", platform_account_id="UCccc", username="c")
+    clock = Clock()
+    client.uploads = [_playlist_item("stream-1")]
+    client.videos_by_id = {"stream-1": _stream("stream-1", "upcoming")}
+    adapter = _make_adapter(client, clock)
 
-    await adapter.get_live_status(account_a)
-    await adapter.get_live_status(account_b)
-    third = await adapter.get_live_status(account_c)
+    upcoming = await adapter.get_live_status(_ACCOUNT)
+    client.videos_by_id["stream-1"] = _stream("stream-1", "live", started="2026-09-15T10:00:00Z")
+    clock.next_tick(adapter)
+    live = await adapter.get_live_status(_ACCOUNT)
+    client.videos_by_id["stream-1"] = _stream("stream-1", "none", started="2026-09-15T10:00:00Z")
+    clock.next_tick(adapter)
+    ended = await adapter.get_live_status(_ACCOUNT)
 
-    assert third is None  # skipped, not an error
-    assert client.search_live_calls == 2
+    assert upcoming is not None and upcoming.is_live is False
+    assert live is not None and live.is_live is True
+    assert ended is not None and ended.is_live is False
+    # The tracked broadcast's state is refreshed every check, not cached.
+    assert all("stream-1" in ids for ids in client.get_videos_requests)
 
 
-async def test_repeated_calls_for_the_same_channel_are_cached() -> None:
-    """Regression test: two guilds monitoring the same creator each get
-    their own AccountRef with the same platform_account_id — without
-    caching, each would pay the full 100-unit search cost for what is
-    really one physical channel check, silently doubling (or Nx-ing) real
-    cost against the shared daily budget."""
+async def test_a_tracked_stream_that_scrolled_off_the_page_is_still_checked() -> None:
     client = FakeYouTubeClient()
-    fake_clock = [1000.0]
-    adapter = _make_adapter(client, clock=lambda: fake_clock[0])
-
-    first = await adapter.get_live_status(_ACCOUNT)
-    fake_clock[0] += 5  # far less than min_poll_interval_seconds
-    second = await adapter.get_live_status(_ACCOUNT)
-
-    assert client.search_live_calls == 1
-    assert second == first
-
-
-async def test_cache_expires_after_the_interval_for_the_current_channel_count() -> None:
-    client = FakeYouTubeClient()
-    fake_clock = [1000.0]
-    adapter = _make_adapter(client, clock=lambda: fake_clock[0])
-
-    await adapter.get_live_status(_ACCOUNT)
-    fake_clock[0] += adapter.min_poll_interval_seconds + 1
+    clock = Clock()
+    client.uploads = [_playlist_item("stream-1")]
+    client.videos_by_id = {"stream-1": _stream("stream-1", "upcoming")}
+    adapter = _make_adapter(client, clock)
     await adapter.get_live_status(_ACCOUNT)
 
-    assert client.search_live_calls == 2
+    client.uploads = [_playlist_item(f"vid-{i}") for i in range(10)]
+    client.videos_by_id.update({f"vid-{i}": _video(f"vid-{i}") for i in range(10)})
+    client.videos_by_id["stream-1"] = _stream("stream-1", "live", started="2026-09-15T10:00:00Z")
+    clock.next_tick(adapter)
+    status = await adapter.get_live_status(_ACCOUNT)
+
+    assert status is not None and status.is_live is True
+    assert status.stream_id == "stream-1"
 
 
-async def test_cache_window_scales_up_with_the_number_of_distinct_channels() -> None:
-    """A second, different channel sharing this adapter's budget means
-    each individual channel must wait twice as long between real checks to
-    keep total daily usage within the same shared budget."""
+# ── Premieres ───────────────────────────────────────────────────────────
+
+
+async def test_a_premiere_is_announced_as_a_new_video_when_it_starts_not_as_a_stream() -> None:
     client = FakeYouTubeClient()
-    fake_clock = [1000.0]
-    adapter = _make_adapter(client, clock=lambda: fake_clock[0])
-    other_account = AccountRef(platform="youtube", platform_account_id="UCother", username="other")
+    clock = Clock()
+    client.uploads = [_playlist_item("prem-1"), _playlist_item("vid-0")]
+    client.videos_by_id = {"prem-1": _stream("prem-1", "upcoming", duration="PT12M"), "vid-0": _video("vid-0")}
+    adapter = _make_adapter(client, clock)
 
-    await adapter.get_live_status(_ACCOUNT)
-    await adapter.get_live_status(other_account)  # now 2 known channels
+    scheduled = await adapter.fetch_updates(_ACCOUNT, cursor="vid-0")
+    client.videos_by_id["prem-1"] = _stream("prem-1", "live", duration="PT12M", started="2026-09-15T10:00:00Z")
+    clock.next_tick(adapter)
+    started = await adapter.fetch_updates(_ACCOUNT, cursor=scheduled.next_cursor)
+    live_status = await adapter.get_live_status(_ACCOUNT)
 
-    base_interval = adapter.min_poll_interval_seconds
-    fake_clock[0] += base_interval + 1  # would have expired for 1 known channel
-    still_cached = await adapter.get_live_status(_ACCOUNT)
-
-    assert client.search_live_calls == 2  # the re-check was served from cache, not a 3rd call
-    assert still_cached is not None
+    assert scheduled.items == []
+    assert [v["id"] for v in started.items] == ["prem-1"]
+    assert live_status is not None and live_status.is_live is False
 
 
-def test_min_poll_interval_spreads_the_live_search_budget_across_the_day() -> None:
-    """Regression test: MonitoringManager used to schedule any LIVE_STATUS
-    adapter at a flat 60s cadence. For YouTube that burned the whole day's
-    100-unit-per-call search budget in the first few minutes (8000/100 = 80
-    calls at one every 60s is spent inside 80 minutes), then went dark for
-    the rest of the day instead of spreading checks out — see
-    platforms/base.py's min_poll_interval_seconds docstring. 8000 units /
-    100 per call = 80 calls/day = one every 1080s."""
+async def test_a_premiere_that_starts_and_finishes_between_checks_is_still_announced() -> None:
     client = FakeYouTubeClient()
+    clock = Clock()
+    client.uploads = [_playlist_item("prem-1"), _playlist_item("vid-0")]
+    client.videos_by_id = {"prem-1": _stream("prem-1", "upcoming", duration="PT20S"), "vid-0": _video("vid-0")}
+    adapter = _make_adapter(client, clock)
+
+    scheduled = await adapter.fetch_updates(_ACCOUNT, cursor="vid-0")
+    client.videos_by_id["prem-1"] = _stream("prem-1", "none", duration="PT20S", started="2026-09-15T10:00:00Z")
+    clock.next_tick(adapter)
+    result = await adapter.fetch_updates(_ACCOUNT, cursor=scheduled.next_cursor)
+
+    assert [v["id"] for v in result.items] == ["prem-1"]
+
+
+# ── sharing, quota, cadence ─────────────────────────────────────────────
+
+
+async def test_two_guilds_on_the_same_channel_share_one_check_per_tick() -> None:
+    """Two guilds monitoring the same creator each get their own AccountRef
+    with the same platform_account_id — without sharing, each would pay for
+    its own API calls against the one shared daily quota."""
+    client = FakeYouTubeClient()
+    client.uploads = [_playlist_item("vid-1")]
+    client.videos_by_id = {"vid-1": _video("vid-1")}
     adapter = _make_adapter(client)
+    same_channel_other_guild = AccountRef(platform="youtube", platform_account_id="UCabc", username="example")
 
-    assert adapter.min_poll_interval_seconds == 1080.0
+    await adapter.fetch_updates(_ACCOUNT, cursor="vid-1")
+    await adapter.get_live_status(_ACCOUNT)
+    await adapter.fetch_updates(same_channel_other_guild, cursor="vid-1")
+    await adapter.get_live_status(same_channel_other_guild)
+
+    assert client.list_uploads_calls == 1
 
 
-def test_min_poll_interval_follows_a_smaller_configured_budget() -> None:
+async def test_the_next_tick_checks_again() -> None:
     client = FakeYouTubeClient()
-    adapter = _make_adapter(client, live_search_daily_budget_units=200)
+    clock = Clock()
+    client.uploads = [_playlist_item("vid-1")]
+    adapter = _make_adapter(client, clock)
 
-    # 200 / 100 = 2 calls/day = one every 43200s.
-    assert adapter.min_poll_interval_seconds == 43200.0
+    await adapter.fetch_updates(_ACCOUNT, cursor="vid-1")
+    clock.next_tick(adapter)
+    await adapter.fetch_updates(_ACCOUNT, cursor="vid-1")
+
+    assert client.list_uploads_calls == 2
+
+
+async def test_exhausted_quota_skips_the_check_without_reporting_offline() -> None:
+    """None, not is_live=False — "offline" would make the worker announce
+    that a running stream ended."""
+    client = FakeYouTubeClient()
+    client.uploads = [_playlist_item("vid-1")]
+    adapter = _make_adapter(client, daily_quota_units=1)  # only the channels.list lookup fits
+
+    result = await adapter.fetch_updates(_ACCOUNT, cursor="vid-1")
+    status = await adapter.get_live_status(_ACCOUNT)
+
+    assert result.items == [] and result.next_cursor == "vid-1"
+    assert status is None
+    assert client.list_uploads_calls == 0
+
+
+def test_poll_interval_is_the_floor_for_a_single_channel() -> None:
+    adapter = _make_adapter(FakeYouTubeClient())
+
+    assert adapter.poll_interval_seconds(1) == 30.0
+
+
+def test_poll_interval_stretches_with_the_channel_count_to_fit_the_daily_quota() -> None:
+    """Each channel costs up to 2 units per check against 9,000 usable
+    units/day (10% headroom), so 10 channels need 86400*10*2/9000 = 192s."""
+    adapter = _make_adapter(FakeYouTubeClient())
+
+    assert adapter.poll_interval_seconds(5) == pytest.approx(96.0)
+    assert adapter.poll_interval_seconds(10) == pytest.approx(192.0)
+
+
+def test_poll_interval_respects_a_configured_floor() -> None:
+    adapter = _make_adapter(FakeYouTubeClient(), min_poll_interval_seconds=120.0)
+
+    assert adapter.poll_interval_seconds(1) == 120.0

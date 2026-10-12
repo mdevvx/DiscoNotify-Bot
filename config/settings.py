@@ -90,13 +90,12 @@ class Settings(BaseSettings):
     # YouTube Data API v3 quota (see platforms/youtube/adapter.py for the
     # full breakdown): free-tier default is 10,000 units/day, shared across
     # every YouTube account this bot monitors, in every guild — it's one
-    # budget per API key, not per account. search.list (used for live
-    # detection) costs 100 units/call; the adapter reserves a portion of
-    # the daily budget for it specifically so it can't starve the cheap
-    # calls (playlistItems.list / videos.list, 1 unit each) that new-video
-    # detection depends on.
+    # budget per API key, not per account. Each channel check costs at most
+    # 2 units; the adapter stretches the poll interval with the channel
+    # count so the day's checks fit, but never polls faster than
+    # youtube_min_poll_interval_seconds.
     youtube_daily_quota_units: int = Field(default=10_000, alias="YOUTUBE_DAILY_QUOTA_UNITS")
-    youtube_live_search_daily_budget_units: int = Field(default=8_000, alias="YOUTUBE_LIVE_SEARCH_DAILY_BUDGET_UNITS")
+    youtube_min_poll_interval_seconds: float = Field(default=30.0, alias="YOUTUBE_MIN_POLL_INTERVAL_SECONDS")
 
     @property
     def discord_owner_ids(self) -> List[int]:

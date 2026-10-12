@@ -27,21 +27,20 @@ from discord.ext import commands
 from commands.pulsenotify_group import pulsenotify_group
 from config import constants
 from events.models import EventType, NormalizedEvent
-from notifications.templates import MAX_TEMPLATE_LENGTH, PLACEHOLDERS, render_custom_message
+from notifications.templates import MAX_TEMPLATE_LENGTH, PLACEHOLDERS, format_role_mention, render_custom_message
 from platforms.base import event_types_for_capabilities
 from utils.errors import PermanentPlatformError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Grows by one Choice per phase as each platform adapter is registered
-# (Phase 5: Twitch, Phase 6: Kick, ...) — nothing else about these
-# commands needs to change when that happens.
+# Only platforms that are finalized (or actively being finalized) are
+# offered. Twitch and X (Twitter) have adapters under platforms/ but are
+# held back until they're finalized; re-adding one is a Choice here plus
+# its registration in bot/client.py's _register_platform_adapters().
 _PLATFORM_CHOICES = [
     app_commands.Choice(name="YouTube", value="youtube"),
-    app_commands.Choice(name="Twitch", value="twitch"),
     app_commands.Choice(name="Kick", value="kick"),
-    app_commands.Choice(name="X (Twitter)", value="twitter"),
     app_commands.Choice(name="Instagram", value="instagram"),
 ]
 
@@ -297,8 +296,11 @@ async def account_set_message(
             url="https://example.com/preview-link",
         ),
     )
+    # A confirmation must never ping — the preview can contain a literal
+    # @everyone typed into the template.
     await interaction.response.send_message(
-        f"✅ Custom message set for **{row['username']}** {scope}.\n\n**Preview:**\n{preview}"
+        f"✅ Custom message set for **{row['username']}** {scope}.\n\n**Preview:**\n{preview}",
+        allowed_mentions=discord.AllowedMentions.none(),
     )
 
 
@@ -357,7 +359,12 @@ async def account_set_mention(
         await interaction.response.send_message(f"🧹 Cleared the mention role for **{row['username']}** {scope}.")
         return
 
-    await interaction.response.send_message(f"✅ **{row['username']}** will now mention {role.mention} {scope}.")
+    # role.mention is literal "@everyone" for the default role; the
+    # confirmation itself must not ping it.
+    await interaction.response.send_message(
+        f"✅ **{row['username']}** will now mention {role.mention} {scope}.",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
 
 
 @pulsenotify_group.command(
@@ -462,7 +469,11 @@ async def account_info(interaction: discord.Interaction, account: str) -> None:
         label = _EVENT_TYPE_LABELS.get(config["event_type"], config["event_type"])
         state = "✅ On" if config["enabled"] else "❌ Off"
         embed_state = "embed on" if config["embed_enabled"] else "embed off"
-        mention = f"<@&{config['mention_role_id']}>" if config["mention_role_id"] else "no mention"
+        mention = (
+            format_role_mention(config["mention_role_id"], interaction.guild.id)
+            if config["mention_role_id"]
+            else "no mention"
+        )
         value = f"{state} · {embed_state} · {mention}"
         if config.get("custom_message"):
             preview = config["custom_message"]
