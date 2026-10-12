@@ -99,6 +99,11 @@ class MonitoringManager:
         logger.info("Registered %s platform adapter.", adapter.platform)
 
     async def start(self) -> None:
+        for adapter in self._adapters.values():
+            try:
+                await adapter.check_credentials()
+            except Exception:
+                logger.warning("Credential check for %s failed.", adapter.platform, exc_info=True)
         self._event_processor.start()
         await asyncio.gather(*(scheduler.start() for scheduler in self._schedulers.values()))
         self._started = True

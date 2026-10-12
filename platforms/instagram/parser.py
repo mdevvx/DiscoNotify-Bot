@@ -46,13 +46,14 @@ def discovery_to_account_ref(discovery: Dict[str, Any]) -> AccountRef:
 
 
 def normalize_media(account: AccountRef, media: Dict[str, Any]) -> NormalizedEvent:
-    """`media` is one item from business_discovery's `media` edge. Reels
-    are not distinguishable from a plain video post through this endpoint
-    (media_type is only IMAGE/VIDEO/CAROUSEL_ALBUM) — recorded as-is in
-    metadata rather than guessed at, matching the honesty bar set by
-    YouTube's documented Shorts heuristic rather than inventing a
-    reels-detection heuristic with no real signal behind it."""
+    """`media` is one item from business_discovery's `media` edge, with the
+    account's profile (name, profile picture) attached by the adapter under
+    "_profile". Reels are told apart from feed posts by media_product_type
+    ("REELS" vs "FEED" — verified against the live API 2026-10-12); both are
+    POST_CREATED events, with `is_reel` in metadata for the alert wording."""
     media_id = media["id"]
+    profile = media.get("_profile") or {}
+    is_video = media.get("media_type") == "VIDEO"
     return NormalizedEvent(
         platform=account.platform,
         platform_account_id=account.platform_account_id,
@@ -61,10 +62,17 @@ def normalize_media(account: AccountRef, media: Dict[str, Any]) -> NormalizedEve
         platform_event_id=media_id,
         description=media.get("caption"),
         url=media.get("permalink"),
-        thumbnail_url=media.get("media_url"),
-        author=account.username,
+        # A video's media_url is the video file itself; its still image is
+        # thumbnail_url.
+        thumbnail_url=media.get("thumbnail_url") if is_video else media.get("media_url"),
+        author=profile.get("name") or account.username,
+        author_avatar_url=profile.get("profile_picture_url"),
         published_at=_parse_timestamp(media.get("timestamp")),
-        metadata={"media_type": media.get("media_type")},
+        metadata={
+            "media_type": media.get("media_type"),
+            "media_product_type": media.get("media_product_type"),
+            "is_reel": media.get("media_product_type") == "REELS",
+        },
     )
 
 
@@ -72,6 +80,7 @@ def _parse_timestamp(value: Optional[str]) -> Optional[datetime.datetime]:
     if not value:
         return None
     try:
-        return datetime.datetime.fromisoformat(value)
+        # Meta's "+0000" offset isn't ISO 8601 enough for Python < 3.11.
+        return datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%S%z")
     except ValueError:
         return None

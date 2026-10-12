@@ -144,3 +144,28 @@ def test_build_alert_text_only_when_embeds_are_off() -> None:
     view = build_alert(_event(), top_line="hello", rich=False)
 
     assert [type(child) for child in view.children] == [discord.ui.TextDisplay]
+
+
+def test_instagram_reel_wording_and_caption_label() -> None:
+    reel = _event(
+        EventType.POST_CREATED,
+        platform="instagram",
+        account_username="nike",
+        author="Nike",
+        title=None,
+        description="Five MVPs.",
+        metadata={"is_reel": True},
+    )
+
+    text = _text(build_card(reel))
+    assert build_headline(reel) == "🎬 **Nike** posted a new Reel!"
+    assert "Nike posted a new Reel on Instagram!" in text
+    assert "**Caption**\nFive MVPs." in text
+    assert "-# Instagram Reels" in text
+
+
+def test_instagram_feed_post_wording() -> None:
+    post = _event(EventType.POST_CREATED, platform="instagram", account_username="nike", author="Nike", title=None)
+
+    assert build_headline(post) == "🆕 **Nike** shared a new post!"
+    assert "-# Instagram" in _text(build_card(post))

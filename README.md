@@ -26,7 +26,7 @@ Before any platform integration is built: verify that platform's *current* offic
 - **YouTube** is polled, not pushed (WebSub needs a public HTTPS endpoint this project doesn't have yet). Since 2026-10-12 every check, live status included, costs at most 2 quota units, so it can poll as fast as every 30s — see the YouTube adapter section below.
 - **Twitch (Phase 5) and Kick (Phase 6)** were deliberate polling choices too, also with sign-off where the tradeoff was real: EventSub-style webhooks are the "correct" push-based approach for both, but need a public HTTPS endpoint this project doesn't have; Twitch's EventSub WebSocket transport (which would avoid that) turned out to require a *user* access token capped far too low for monitoring arbitrary streamers, so it isn't viable at all. Polling is cheap enough on both platforms' free app-token tiers that there's no quota pressure forcing the webhook infrastructure question the way there was for YouTube.
 - **X/Twitter (Phase 7) has no free tier at all as of 2026** — reading posts is billed pay-per-use with no free allowance. This adapter is built, but enabling it (`TWITTER_BEARER_TOKEN`) is an explicit opt-in to a real, ongoing dollar cost, unlike every other platform here. See the X (Twitter) adapter section below before turning it on.
-- **Instagram (Phase 7)** has no equivalent to Twitch/Kick's "any public account, no consent needed" model. The only officially-supported path that doesn't require the *target* account's cooperation — Business Discovery — only works against Business/Creator accounts (not personal ones), requires the operator's own qualifying Meta app + linked professional account, and requires that app to pass Meta App Review before it can query anyone beyond its own testers. See the Instagram adapter section below.
+- **Instagram** uses Meta's official Business Discovery API: it works for any public Business/Creator account (not personal ones), needs the operator's own Meta app + Facebook Page + professional Instagram account, and needs no App Review for the operator's own use. See the Instagram adapter section below.
 - **Facebook and TikTok (Phase 7) have no adapter.** Both platforms' official APIs are built entirely around a creator/Page connecting *their own* account to your app — the opposite of monitoring one you don't control — with no Instagram-Business-Discovery-style exception for either. Facebook's closest equivalent ("Page Public Content Access") requires Meta Business Verification and is scoped to "analyze/display" use cases with no guarantee a notification bot qualifies; TikTok's developer platform has no discovery/monitoring surface at all. Building against either would mean scraping, which the standing policy above explicitly rules out. Revisit if either platform's policy changes.
 
 ## Requirements
@@ -58,7 +58,7 @@ Before any platform integration is built: verify that platform's *current* offic
    - `TWITCH_CLIENT_ID` / `TWITCH_CLIENT_SECRET` — from a [Twitch app](https://dev.twitch.tv/console/apps).
    - `KICK_CLIENT_ID` / `KICK_CLIENT_SECRET` — from a [Kick app](https://kick.com/settings/developer).
    - `TWITTER_BEARER_TOKEN` — an app-only Bearer token from the [X Developer Portal](https://developer.x.com). **Costs real money to use — no free tier as of 2026** (see the X (Twitter) adapter section below before enabling).
-   - `INSTAGRAM_ACCESS_TOKEN` / `INSTAGRAM_BUSINESS_ACCOUNT_ID` — a long-lived token + IG user ID for your *own* linked Instagram professional account, from a [Meta app](https://developers.facebook.com/apps). Requires Meta App Review before it can monitor accounts beyond your own testers, and only works against Business/Creator target accounts (see the Instagram adapter section below).
+   - `INSTAGRAM_ACCESS_TOKEN` / `INSTAGRAM_BUSINESS_ACCOUNT_ID` — a non-expiring Page token + the IG user ID of your *own* Instagram professional account. Step-by-step in "Instagram setup" below.
    - There's no Facebook or TikTok key to set — neither has an adapter (see the Phase 7 section above).
 
    `MONITORING_*`/`YOUTUBE_*` tuning variables (polling intervals, retry/backoff, rate limits, health thresholds, quota budgets) are all optional too — sensible defaults are baked in; see `.env.example` for the full list.
@@ -168,7 +168,7 @@ platforms/
   twitch/                 live/offline only — app-token polling, no adapter-level quota budgeting needed (see Twitch adapter section)
   kick/                   live/offline only — same shape as twitch/, one endpoint does both identifier resolution and live status
   twitter/                new-post detection — costs real money to enable, see X (Twitter) adapter section
-  instagram/              new-post detection via Business Discovery — real setup/review constraints, see Instagram adapter section
+  instagram/              new posts + Reels via Business Discovery — see the Instagram adapter section and its setup steps
 monitoring/
   manager.py            single start()/stop() entry point; owns one PlatformScheduler per registered adapter
   scheduler.py           polls one platform's enabled accounts on an interval, shared rate limiter
@@ -318,20 +318,36 @@ Credentials: `TWITTER_BEARER_TOKEN`, a static app-only Bearer token generated on
 
 ## Instagram adapter (platforms/instagram/)
 
-**Read this before enabling it — real setup and policy constraints, not just an API key.** As of 2026, Meta's official APIs don't allow discovering or reading an arbitrary Instagram account's content the way Twitch/Kick's app-token model does. The only officially-supported path that doesn't require the *target* account's cooperation is **Business Discovery**:
+New posts and Reels from any public Instagram **Business or Creator** account, via Meta's official **Business Discovery** API — no authorization from the monitored account needed. Verified against the live Graph API (v26.0) on 2026-10-12.
 
-| Feature | Method | Auth | Notes |
+| Feature | Method | Cost | Notes |
 |---|---|---|---|
-| Profile + recent media | `GET /{your_ig_user_id}?fields=business_discovery.username(...)` | Long-lived access token for **your own** linked IG professional account | No authorization from the target account — but see the constraints below. |
+| New posts | `GET /{your_ig_user_id}?fields=business_discovery.username(...)` | 1 call per account check | Caption, image, permalink, timestamp |
+| Reels | same call | (included) | Told apart by `media_product_type` = `REELS`; announced as "posted a new Reel" (still the **New Post** alert type) |
+| Stories, live | — | — | Not exposed for other accounts by any official API |
 
-Real constraints, unlike every other adapter in this project:
-1. **The target must itself be a Business or Creator account** — a personal Instagram account can't be monitored this way at all. A hard capability boundary, not a heuristic gap.
-2. **The operator needs their own qualifying setup**: a Meta Developer app, a Facebook Page, and their own Instagram Business/Creator account connected to it — that's where `INSTAGRAM_ACCESS_TOKEN`/`INSTAGRAM_BUSINESS_ACCOUNT_ID` come from.
-3. **Meta App Review is required before this works against arbitrary accounts.** In Development mode, Business Discovery only succeeds against accounts added as testers on the operator's own app.
-4. **Lookup is by username only** — there's no by-ID variant. If a monitored account renames its handle, polling breaks until the account is removed and re-added.
-5. **No webhook exists for this** — it's a straightforward poll; Instagram's webhook system only covers accounts your own app manages.
+Constraints:
+1. **Personal accounts can't be monitored** — only Business/Creator accounts. Meta answers "Cannot find user" for anything else, and `account-add` says so.
+2. **Lookup is by username only.** If a monitored account renames its handle, Meta answers "Cannot find user", the account is marked invalid, and it has to be re-added.
+3. **Rate limit: 200 calls per hour in total** while the Meta app is in Development mode (measured via the `x-app-usage` header). Each account costs one call per check, so the interval stretches with the number of distinct accounts — 30s for 1, ~120s for 5, ~240s for 10 — and doubles/quadruples when Meta reports ≥70%/≥90% of the hour used. Two Discord servers watching the same account share one lookup.
+4. **No App Review needed for your own use** — with the operator holding a role on the Meta app, Development mode can look up any public Business/Creator account (verified with `nike` and `natgeo`).
+5. **No webhook exists** for accounts you don't manage — this is a poll by necessity.
 
-Credentials renew manually roughly every 60 days — no in-app OAuth refresh flow is implemented, the same trade-off as YouTube's static API key.
+Errors are classified by Meta's error code, not the HTTP status (Meta answers almost everything with 400): an invalid/expired token (190) or missing permission (10) is reported as a credentials problem and never marks monitored accounts invalid; rate-limit codes (4/17/32/613/80002) pause Instagram polling for 15 minutes; only "Cannot find user" (110/2207013) marks an account invalid. At startup the bot checks the token with Meta's `debug_token` and logs a warning if it's invalid, expires within 14 days, or lacks a permission.
+
+### Instagram setup (getting the credentials)
+
+You need your own Instagram **Business or Creator** account linked to a **Facebook Page** you admin, and a Meta app. The bot only uses your token to look other accounts up.
+
+1. **Instagram**: Settings → Account type and tools → *Switch to professional account* (Business or Creator).
+2. **Facebook Page**: create one if needed, then in the Page: Settings → *Linked accounts* → Instagram → *Connect*. Linking in Accounts Center alone isn't enough.
+3. **Meta app**: developers.facebook.com → *Create app* → use case **Other** → type **Business** → add product **Instagram** → **"API setup with Facebook login"** (not "with Instagram login" — its `IGAA…` tokens can't look up other accounts).
+4. **Login configuration** (the app uses *Facebook Login for Business*, which ignores the Graph API Explorer's permission list): *Facebook Login for Business* → *Configurations* → *Create* — access token: **User access token**; assets: **Pages** and **Instagram accounts**; permissions: `instagram_basic`, `instagram_manage_insights`, `pages_read_engagement`, `pages_show_list`, `business_management`. `instagram_manage_insights` is required — without it every lookup fails with "(#10) Application does not have permission".
+5. **User token**: Graph API Explorer → your app → **Configurations** tab → select the configuration → *Generate Access Token*. Log in as your personal profile and tick your Page and Instagram account. (If the popup only says "name and profile picture", remove the app under Facebook Settings → *Business integrations* and generate again.)
+6. **Extend it** — the step that matters: paste the token into the Access Token Debugger (developers.facebook.com/tools/debug/accesstoken) → *Extend Access Token*.
+7. **Page token + account ID**: in the Explorer, with the **extended** token, run `me/accounts?fields=name,access_token,instagram_business_account`. The Page's `access_token` → `INSTAGRAM_ACCESS_TOKEN`; `instagram_business_account.id` → `INSTAGRAM_BUSINESS_ACCOUNT_ID`.
+
+A Page token fetched with an extended user token **doesn't expire**. Fetched with the short-lived one, it expires within hours — the startup check warns about exactly that. Meta's separate *data access* window (about 90 days) is renewed whenever you generate a token through the app again; the startup check warns two weeks before it ends.
 
 ## Facebook and TikTok (no adapter)
 

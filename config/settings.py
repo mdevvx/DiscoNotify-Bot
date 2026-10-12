@@ -62,6 +62,11 @@ class Settings(BaseSettings):
     # no in-app OAuth refresh flow is implemented.
     instagram_access_token: Optional[str] = Field(default=None, alias="INSTAGRAM_ACCESS_TOKEN")
     instagram_business_account_id: Optional[str] = Field(default=None, alias="INSTAGRAM_BUSINESS_ACCOUNT_ID")
+    # Meta's hourly call limit for this app (200 while the app is in
+    # Development mode) and the fastest Instagram is ever polled — see
+    # platforms/instagram/adapter.py's poll_interval_seconds().
+    instagram_hourly_call_limit: int = Field(default=200, alias="INSTAGRAM_HOURLY_CALL_LIMIT")
+    instagram_min_poll_interval_seconds: float = Field(default=30.0, alias="INSTAGRAM_MIN_POLL_INTERVAL_SECONDS")
     # Facebook and TikTok have no adapter (Phase 7) — neither platform
     # offers an official, ToS-compliant way to monitor a page/creator that
     # hasn't individually authorized this app. See README's Phase 7

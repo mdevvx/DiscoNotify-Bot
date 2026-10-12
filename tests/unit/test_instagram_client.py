@@ -67,31 +67,88 @@ async def test_request_sends_access_token_and_fields_params() -> None:
     assert "business_discovery.username(somecreator)" in seen_params["fields"]
 
 
-async def test_bad_request_raises_permanent_error() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return _json_response(400, {"error": {"message": "Unsupported get request."}})
+def _graph_error(code: int, message: str, *, subcode: int = None, status: int = 400) -> httpx.Response:
+    """Meta answers nearly every failure with HTTP 400 and puts the real
+    reason in error.code — shapes below are the ones the live API returned
+    on 2026-10-12."""
+    error = {"message": message, "type": "OAuthException", "code": code}
+    if subcode is not None:
+        error["error_subcode"] = subcode
+    return _json_response(status, {"error": error})
 
-    client = _client_with(handler)
+
+async def test_unknown_username_is_permanent() -> None:
+    client = _client_with(lambda request: _graph_error(110, "Invalid user id", subcode=2207013))
+
     with pytest.raises(PermanentPlatformError):
         await client.get_business_discovery("nonexistent")
 
 
-async def test_auth_error_raises_transient_error() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return _json_response(401, {"error": {"message": "Invalid OAuth access token."}})
+async def test_expired_token_is_not_blamed_on_the_account() -> None:
+    """Regression test: an invalid/expired token comes back as HTTP 400
+    (code 190), and every 400 used to be treated as "this account is
+    invalid" — so an expired token would have marked every monitored
+    Instagram account invalid."""
+    client = _client_with(lambda request: _graph_error(190, "Invalid OAuth access token - Cannot parse access token"))
 
-    client = _client_with(handler)
-    with pytest.raises(TransientPlatformError):
+    with pytest.raises(TransientPlatformError) as exc_info:
+        await client.get_business_discovery("somecreator")
+
+    assert not isinstance(exc_info.value, PermanentPlatformError)
+    assert "token" in str(exc_info.value)
+
+
+async def test_missing_permission_is_not_blamed_on_the_account() -> None:
+    client = _client_with(lambda request: _graph_error(10, "(#10) Application does not have permission for this action"))
+
+    with pytest.raises(TransientPlatformError) as exc_info:
+        await client.get_business_discovery("somecreator")
+
+    assert "instagram_manage_insights" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("code", [4, 17, 32, 613, 80002])
+async def test_meta_rate_limit_codes_raise_rate_limited(code: int) -> None:
+    client = _client_with(lambda request: _graph_error(code, "Application request limit reached"))
+
+    with pytest.raises(RateLimitedError):
         await client.get_business_discovery("somecreator")
 
 
-async def test_not_found_raises_permanent_error() -> None:
+async def test_an_unexpected_bad_request_is_not_permanent() -> None:
+    client = _client_with(lambda request: _graph_error(100, "Unsupported get request."))
+
+    with pytest.raises(TransientPlatformError) as exc_info:
+        await client.get_business_discovery("somecreator")
+
+    assert not isinstance(exc_info.value, PermanentPlatformError)
+
+
+async def test_app_usage_header_is_recorded() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        return _json_response(404, {"error": {"message": "not found"}})
+        return httpx.Response(
+            200,
+            content=json.dumps({"business_discovery": {"id": "1", "media": {"data": []}}}),
+            headers={"x-app-usage": '{"call_count":15,"total_cputime":2,"total_time":24}'},
+        )
 
     client = _client_with(handler)
-    with pytest.raises(PermanentPlatformError):
-        await client.get_business_discovery("somecreator")
+    await client.get_business_discovery("somecreator")
+
+    assert client.app_usage_percent == 24
+
+
+async def test_requests_reel_and_profile_fields() -> None:
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(dict(request.url.params))
+        return _json_response(200, {"business_discovery": {"id": "1", "media": {"data": []}}})
+
+    await _client_with(handler).get_business_discovery("somecreator")
+
+    for field in ("profile_picture_url", "media_product_type", "thumbnail_url"):
+        assert field in seen["fields"]
 
 
 async def test_rate_limited_raises_with_a_default_retry_after() -> None:

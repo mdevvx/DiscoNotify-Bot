@@ -167,6 +167,12 @@ class PlatformAdapter(abc.ABC):
         transformation, not another API call.
         """
 
+    async def check_credentials(self) -> None:
+        """Called once at startup. Logs a warning if the adapter's
+        credentials are invalid or about to expire; must never raise — a
+        bad credential shouldn't stop the bot or the other platforms.
+        Default no-op."""
+
     async def aclose(self) -> None:
         """Releases any resources the adapter owns (e.g. an HTTP client
         session). Default no-op — override only if there's something to

@@ -178,7 +178,13 @@ class PulseNotifyBot(commands.Bot):
                 self.settings.instagram_business_account_id,
                 timeout_seconds=self.settings.monitoring_http_timeout_seconds,
             )
-            self.monitoring.register_adapter(InstagramAdapter(instagram_client))
+            self.monitoring.register_adapter(
+                InstagramAdapter(
+                    instagram_client,
+                    hourly_call_limit=self.settings.instagram_hourly_call_limit,
+                    min_poll_interval_seconds=self.settings.instagram_min_poll_interval_seconds,
+                )
+            )
         else:
             logger.warning(
                 "INSTAGRAM_ACCESS_TOKEN/INSTAGRAM_BUSINESS_ACCOUNT_ID not set — Instagram monitoring is disabled."

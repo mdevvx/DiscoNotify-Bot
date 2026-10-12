@@ -46,6 +46,7 @@ class _PlatformStyle:
     button_label: str
     # Footer label per event type; anything missing uses `name`.
     footers: Dict[EventType, str]
+    description_label: str = "Description"
 
 
 _STYLES: Dict[str, _PlatformStyle] = {
@@ -59,7 +60,9 @@ _STYLES: Dict[str, _PlatformStyle] = {
         },
     ),
     "kick": _PlatformStyle(name="Kick", color=0x53FC18, button_label="Watch on Kick", footers={}),
-    "instagram": _PlatformStyle(name="Instagram", color=0xE1306C, button_label="Open on Instagram", footers={}),
+    "instagram": _PlatformStyle(
+        name="Instagram", color=0xE1306C, button_label="Open on Instagram", footers={}, description_label="Caption"
+    ),
 }
 
 _HEADLINES: Dict[EventType, str] = {
@@ -77,6 +80,10 @@ _BLURBS: Dict[EventType, str] = {
     EventType.POST_CREATED: "{name} shared a new post on {platform}!",
     EventType.STREAM_ENDED: "{name}'s stream on {platform} has ended.",
 }
+
+
+_REEL_HEADLINE = "🎬 **{name}** posted a new Reel!"
+_REEL_BLURB = "{name} posted a new Reel on {platform}!"
 
 
 def build_alert(
@@ -106,7 +113,7 @@ def build_card(event: NormalizedEvent) -> discord.ui.Container:
     if event.title:
         title = _link_text(_safe(_truncate(event.title, _TITLE_MAX_LENGTH)))
         header.append(discord.ui.TextDisplay(f"### [{title}]({event.url})" if event.url else f"### {title}"))
-    blurb = _BLURBS.get(event.event_type, "{name} has an update on {platform}.")
+    blurb = _REEL_BLURB if _is_reel(event) else _BLURBS.get(event.event_type, "{name} has an update on {platform}.")
     header.append(discord.ui.TextDisplay(blurb.format(name=name, platform=style.name)))
 
     children: list = []
@@ -118,7 +125,9 @@ def build_card(event: NormalizedEvent) -> discord.ui.Container:
     description = (event.description or "").strip()
     if description and event.event_type != EventType.STREAM_ENDED:
         children.append(
-            discord.ui.TextDisplay(f"**Description**\n{_safe(_truncate(description, _DESCRIPTION_MAX_LENGTH))}")
+            discord.ui.TextDisplay(
+                f"**{style.description_label}**\n{_safe(_truncate(description, _DESCRIPTION_MAX_LENGTH))}"
+            )
         )
     if event.thumbnail_url and event.event_type != EventType.STREAM_ENDED:
         children.append(discord.ui.MediaGallery(discord.MediaGalleryItem(event.thumbnail_url)))
@@ -133,7 +142,7 @@ def build_card(event: NormalizedEvent) -> discord.ui.Container:
 
 
 def build_headline(event: NormalizedEvent) -> str:
-    template = _HEADLINES.get(event.event_type, "🆕 **{name}** has an update!")
+    template = _REEL_HEADLINE if _is_reel(event) else _HEADLINES.get(event.event_type, "🆕 **{name}** has an update!")
     return template.format(name=_safe(discord.utils.escape_markdown(display_name(event))))
 
 
@@ -158,7 +167,7 @@ def _style(event: NormalizedEvent) -> _PlatformStyle:
 
 
 def _footer(event: NormalizedEvent, style: _PlatformStyle) -> str:
-    label = style.footers.get(event.event_type, style.name)
+    label = f"{style.name} Reels" if _is_reel(event) else style.footers.get(event.event_type, style.name)
     moment = event.started_at or event.published_at
     if moment is None:
         return label
@@ -166,6 +175,11 @@ def _footer(event: NormalizedEvent, style: _PlatformStyle) -> str:
         moment = moment.replace(tzinfo=datetime.timezone.utc)
     # Discord renders <t:...> in each viewer's own timezone.
     return f"{label} · <t:{int(moment.timestamp())}:f>"
+
+
+def _is_reel(event: NormalizedEvent) -> bool:
+    """Instagram posts that are Reels (see platforms/instagram/parser.py)."""
+    return event.event_type == EventType.POST_CREATED and bool(event.metadata.get("is_reel"))
 
 
 def _account_url(event: NormalizedEvent) -> Optional[str]:
