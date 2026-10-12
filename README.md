@@ -68,6 +68,9 @@ Before any platform integration is built: verify that platform's *current* offic
    - [database/migrations/0002_core_schema.sql](database/migrations/0002_core_schema.sql)
    - [database/migrations/0003_add_content_cursor.sql](database/migrations/0003_add_content_cursor.sql)
    - [database/migrations/0004_add_webhook_url.sql](database/migrations/0004_add_webhook_url.sql)
+   - [database/migrations/0005_move_to_pulsenotify_schema.sql](database/migrations/0005_move_to_pulsenotify_schema.sql)
+
+   Then add `pulsenotify` under **Project Settings > Data API > Exposed schemas**. All tables live in that schema, not `public`, and the bot can't reach them until the schema is exposed.
 
    More migrations are added as later phases need them.
 
@@ -206,6 +209,7 @@ Three migrations exist so far:
   - `pulsenotify_platform_health` — **not** guild-scoped; one row per platform (YouTube, Twitch, ...) tracking the bot's own API usage/quota/rate-limit state against that provider — created on first use
 - **`0003_add_content_cursor.sql`** — adds `pulsenotify_platform_accounts.content_cursor`, the persisted "newest content seen" pointer. Found and fixed during Phase 4: without persisting it, a bot restart reset an account's cursor to NULL, which would either re-flood the channel's entire back-catalog or silently skip whatever was published during the downtime, depending on how that case was handled. See `monitoring/worker.py`'s docstring.
 - **`0004_add_webhook_url.sql`** — adds `pulsenotify_notification_channels.webhook_url`, so the per-channel Discord webhook notifications are delivered through (see Monitoring framework below) is created once and reused across restarts instead of a new one appearing every time the bot starts up.
+- **`0005_move_to_pulsenotify_schema.sql`** — moves every table, domain and the `updated_at` trigger function out of `public` into a dedicated `pulsenotify` schema, and grants `service_role` access to it. The bot's client is pinned to that schema (`DB_SCHEMA` in `database/client.py`), and the schema has to be listed under the Data API's exposed schemas.
 
 `platform`, `event_type`, and `account_status` are Postgres domains (not raw `text`), so the valid-value list for each lives in exactly one `ALTER DOMAIN`-able place instead of being repeated across every column that uses it.
 

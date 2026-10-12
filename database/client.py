@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from supabase import AsyncClient, PostgrestAPIError, create_async_client
+from supabase import AsyncClient, AsyncClientOptions, PostgrestAPIError, create_async_client
 
 from utils.errors import DatabaseError
 from utils.logger import get_logger
@@ -23,6 +23,11 @@ logger = get_logger(__name__)
 # to recover from) apart from every other insert failure (not safe to
 # swallow).
 UNIQUE_VIOLATION = "23505"
+
+# Every PulseNotify table lives in this schema rather than `public` (see
+# migrations/0005). It must also be listed under the project's exposed
+# Data API schemas, or Postgrest rejects every query.
+DB_SCHEMA = "pulsenotify"
 
 
 def is_unique_violation(error: Exception) -> bool:
@@ -46,7 +51,9 @@ class Database:
         return self._client is not None
 
     async def connect(self) -> None:
-        self._client = await create_async_client(self._url, self._key)
+        self._client = await create_async_client(
+            self._url, self._key, options=AsyncClientOptions(schema=DB_SCHEMA)
+        )
         # Fail fast at startup if credentials or the schema are wrong, rather
         # than surfacing a confusing error on the first command a user runs.
         await self._client.table("pulsenotify_guilds").select("guild_id").limit(1).execute()
