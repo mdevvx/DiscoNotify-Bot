@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     # key — so this is a client_id/secret pair, not *_API_KEY.
     kick_client_id: Optional[str] = Field(default=None, alias="KICK_CLIENT_ID")
     kick_client_secret: Optional[str] = Field(default=None, alias="KICK_CLIENT_SECRET")
+    # Every Kick account is checked with one batched call per tick, so this
+    # doesn't grow with the account count (platforms/kick/adapter.py).
+    kick_poll_interval_seconds: float = Field(default=30.0, alias="KICK_POLL_INTERVAL_SECONDS")
     # Instagram Graph API Business Discovery (Phase 7) — a long-lived Page
     # access token belonging to the *bot operator's own* connected
     # Instagram professional account, plus that account's own IG user ID

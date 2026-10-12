@@ -122,6 +122,10 @@ def build_card(event: NormalizedEvent) -> discord.ui.Container:
     else:
         children.extend(header)
 
+    details = _stream_details(event)
+    if details:
+        children.append(discord.ui.TextDisplay(details))
+
     description = (event.description or "").strip()
     if description and event.event_type != EventType.STREAM_ENDED:
         children.append(
@@ -175,6 +179,21 @@ def _footer(event: NormalizedEvent, style: _PlatformStyle) -> str:
         moment = moment.replace(tzinfo=datetime.timezone.utc)
     # Discord renders <t:...> in each viewer's own timezone.
     return f"{label} · <t:{int(moment.timestamp())}:f>"
+
+
+def _stream_details(event: NormalizedEvent) -> Optional[str]:
+    """"🎮 Just Chatting · 👀 75,301 watching" for a stream that just went
+    live, from whatever the platform reported."""
+    if event.event_type != EventType.STREAM_STARTED:
+        return None
+    parts = []
+    category = event.metadata.get("category")
+    if category:
+        parts.append(f"🎮 {_safe(str(category))}")
+    viewers = event.metadata.get("viewer_count")
+    if isinstance(viewers, int) and viewers > 0:
+        parts.append(f"👀 {viewers:,} watching")
+    return " · ".join(parts) or None
 
 
 def _is_reel(event: NormalizedEvent) -> bool:

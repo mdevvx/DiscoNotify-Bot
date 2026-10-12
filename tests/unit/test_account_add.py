@@ -74,6 +74,10 @@ class FakeGuild:
     def __init__(self) -> None:
         self.id = 1
         self.me = object()
+        self.channels = {555: FakeTextChannel()}
+
+    def get_channel(self, channel_id: int) -> Any:
+        return self.channels.get(channel_id)
 
 
 class FakeClient:
@@ -88,6 +92,7 @@ class FakeClient:
 class FakeInteraction:
     def __init__(self, db: FakeDatabase, adapter: Optional[FakeAdapter] = None) -> None:
         self.guild = FakeGuild()
+        self.guild_id = self.guild.id
         self.client = FakeClient(db, adapter)
         self.response = FakeResponse()
         self.followup = FakeFollowup()
@@ -179,3 +184,58 @@ async def test_a_blank_identifier_is_refused(db: FakeDatabase) -> None:
 
     assert interaction.response.messages[0]["ephemeral"] is True
     assert interaction.response.deferred is False
+
+
+# ── submitting the real form ────────────────────────────────────────────
+
+
+class _Picked:
+    def __init__(self, item_id: int) -> None:
+        self.id = item_id
+
+
+def _fill(modal: AddAccountModal, *, identifier: str, channel: Any, role: Any = None) -> None:
+    modal.identifier._value = identifier  # what Discord's submit fills in
+    modal.channel._values = [channel]
+    modal.role._values = [role] if role is not None else []
+
+
+async def test_submitting_the_form_with_picked_objects_adds_the_account(db: FakeDatabase) -> None:
+    interaction = FakeInteraction(db, FakeAdapter())
+    modal = AddAccountModal("instagram")
+    _fill(modal, identifier="cookedcom", channel=_Picked(555), role=_Picked(777))
+
+    await modal.on_submit(interaction)  # type: ignore[arg-type]
+
+    assert "Now monitoring" in interaction.followup.messages[0]["content"]
+
+
+async def test_submitting_the_form_with_raw_id_strings_still_works(db: FakeDatabase) -> None:
+    """Regression test: discord.py hands back the picked channel/role as a
+    raw ID string when it can't build an object from Discord's resolved
+    data — `picked.id` on that string crashed the submit, which Discord
+    showed as "Something went wrong. Try again." (reported 2026-10-12)."""
+    interaction = FakeInteraction(db, FakeAdapter())
+    modal = AddAccountModal("instagram")
+    _fill(modal, identifier="cookedcom", channel="555", role="777")
+
+    await modal.on_submit(interaction)  # type: ignore[arg-type]
+
+    assert "Now monitoring" in interaction.followup.messages[0]["content"]
+    account_id = (await interaction.client.accounts_repo.list_by_guild(1))[0]["id"]
+    configs = await interaction.client.alert_configs_repo.list_for_account(account_id)
+    assert {config["mention_role_id"] for config in configs} == {777}
+
+
+async def test_a_form_error_shows_an_error_card_instead_of_discords_generic_message(db: FakeDatabase) -> None:
+    interaction = FakeInteraction(db)
+
+    await AddAccountModal("instagram").on_error(interaction, RuntimeError("boom"))  # type: ignore[arg-type]
+
+    assert interaction.response.messages[0]["ephemeral"] is True
+    assert "logged" in interaction.response.messages[0]["content"]
+
+
+def test_form_title_uses_the_right_article() -> None:
+    assert AddAccountModal("instagram").title == "Add an Instagram account"
+    assert AddAccountModal("youtube").title == "Add a YouTube account"

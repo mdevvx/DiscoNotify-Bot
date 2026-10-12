@@ -201,6 +201,27 @@ async def test_still_live_on_next_poll_does_not_fire_again(harness: Harness) -> 
     assert len(started) == 1
 
 
+async def test_two_sessions_without_a_stream_id_get_different_ended_event_ids(harness: Harness) -> None:
+    """Regression test: with no stream ID, every session's "ended" event used
+    the same id ("<account>-ended"), so the dedup ledger dropped every
+    stream-ended alert after an account's first one."""
+    first = datetime.datetime(2026, 10, 12, 13, 0, tzinfo=datetime.timezone.utc)
+    second = datetime.datetime(2026, 10, 13, 9, 0, tzinfo=datetime.timezone.utc)
+    harness.adapter.live_queue = [
+        LiveStatus(is_live=True, started_at=first),
+        LiveStatus(is_live=False),
+        LiveStatus(is_live=True, started_at=second),
+        LiveStatus(is_live=False),
+    ]
+
+    for _ in range(4):
+        await harness.worker.poll_once()
+
+    ended = [e.platform_event_id for e in harness.submitted if e.event_type == EventType.STREAM_ENDED]
+    assert len(ended) == 2
+    assert ended[0] != ended[1]
+
+
 async def test_live_to_offline_fires_stream_ended(harness: Harness) -> None:
     harness.adapter.live_queue = [
         LiveStatus(is_live=True, stream_id="s1"),

@@ -53,16 +53,39 @@ async def test_get_channel_by_slug_returns_none_when_no_data() -> None:
     assert channel is None
 
 
-async def test_get_channel_by_id_returns_the_channel() -> None:
+async def test_get_livestreams_batches_every_id_into_one_call() -> None:
+    seen = []
+
     def handler(request: httpx.Request) -> httpx.Response:
         if _is_auth_request(request):
             return _token_response()
-        return _json_response(200, {"data": [{"broadcaster_user_id": 123}], "message": "Success"})
+        seen.append(request.url.params.get_list("broadcaster_user_id"))
+        return _json_response(200, {"data": [{"broadcaster_user_id": 123}], "message": "OK"})
 
     client = _client_with(handler)
-    channel = await client.get_channel_by_id("123")
+    streams = await client.get_livestreams(["123", "456"])
 
-    assert channel == {"broadcaster_user_id": 123}
+    assert streams == [{"broadcaster_user_id": 123}]
+    assert seen == [["123", "456"]]
+
+
+async def test_get_livestreams_with_no_ids_makes_no_request() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("no request expected")
+
+    assert await _client_with(handler).get_livestreams([]) == []
+
+
+async def test_unknown_slug_returns_none() -> None:
+    """Kick answers an unknown slug with HTTP 400 "Invalid request", not an
+    empty list (verified against the live API 2026-10-12)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if _is_auth_request(request):
+            return _token_response()
+        return _json_response(400, {"data": {}, "message": "Invalid request"})
+
+    assert await _client_with(handler).get_channel_by_slug("no-such-channel") is None
 
 
 async def test_token_is_fetched_once_and_reused_across_calls() -> None:
@@ -76,9 +99,9 @@ async def test_token_is_fetched_once_and_reused_across_calls() -> None:
         return _json_response(200, {"data": []})
 
     client = _client_with(handler)
-    await client.get_channel_by_id("1")
-    await client.get_channel_by_id("2")
-    await client.get_channel_by_id("3")
+    await client.get_livestreams(["1"])
+    await client.get_livestreams(["2"])
+    await client.get_livestreams(["3"])
 
     assert auth_calls == 1
 
@@ -93,7 +116,7 @@ async def test_token_sends_client_credentials_grant() -> None:
         return _json_response(200, {"data": []})
 
     client = _client_with(handler)
-    await client.get_channel_by_id("1")
+    await client.get_livestreams(["1"])
 
     assert seen_body["client_id"] == "fake-client-id"
     assert seen_body["client_secret"] == "fake-client-secret"
@@ -110,7 +133,7 @@ async def test_helix_request_sends_bearer_token_header() -> None:
         return _json_response(200, {"data": []})
 
     client = _client_with(handler)
-    await client.get_channel_by_id("1")
+    await client.get_livestreams(["1"])
 
     assert seen_headers["authorization"] == "Bearer abc123"
 
@@ -129,8 +152,8 @@ async def test_token_is_refreshed_once_it_expires() -> None:
         return _json_response(200, {"data": []})
 
     client = _client_with(handler)
-    await client.get_channel_by_id("1")
-    await client.get_channel_by_id("2")
+    await client.get_livestreams(["1"])
+    await client.get_livestreams(["2"])
 
     assert auth_calls == 2
 
@@ -150,9 +173,9 @@ async def test_unexpected_401_forces_a_token_refresh_and_retries_once() -> None:
         return _json_response(200, {"data": []})
 
     client = _client_with(handler)
-    result = await client.get_channel_by_id("123")
+    result = await client.get_livestreams(["123"])
 
-    assert result is None
+    assert result == []
     assert auth_calls == 2  # initial fetch + forced refresh after the 401
     assert channel_calls == 2
 
@@ -165,7 +188,7 @@ async def test_persistent_401_after_retry_raises_transient_error() -> None:
 
     client = _client_with(handler)
     with pytest.raises(TransientPlatformError):
-        await client.get_channel_by_id("123")
+        await client.get_livestreams(["123"])
 
 
 async def test_oauth_token_endpoint_failure_raises_transient_error() -> None:
@@ -176,7 +199,7 @@ async def test_oauth_token_endpoint_failure_raises_transient_error() -> None:
 
     client = _client_with(handler)
     with pytest.raises(TransientPlatformError):
-        await client.get_channel_by_id("123")
+        await client.get_livestreams(["123"])
 
 
 async def test_rate_limited_raises_with_a_default_retry_after() -> None:
@@ -187,7 +210,7 @@ async def test_rate_limited_raises_with_a_default_retry_after() -> None:
 
     client = _client_with(handler)
     with pytest.raises(RateLimitedError) as exc_info:
-        await client.get_channel_by_id("123")
+        await client.get_livestreams(["123"])
 
     assert exc_info.value.retry_after is not None
 
@@ -200,7 +223,7 @@ async def test_bad_request_raises_permanent_error() -> None:
 
     client = _client_with(handler)
     with pytest.raises(PermanentPlatformError):
-        await client.get_channel_by_id("not-a-valid-id")
+        await client.get_livestreams(["not-a-valid-id"])
 
 
 async def test_not_found_raises_permanent_error() -> None:
@@ -211,7 +234,7 @@ async def test_not_found_raises_permanent_error() -> None:
 
     client = _client_with(handler)
     with pytest.raises(PermanentPlatformError):
-        await client.get_channel_by_id("123")
+        await client.get_livestreams(["123"])
 
 
 async def test_server_error_raises_transient_error() -> None:
@@ -222,7 +245,7 @@ async def test_server_error_raises_transient_error() -> None:
 
     client = _client_with(handler)
     with pytest.raises(TransientPlatformError):
-        await client.get_channel_by_id("123")
+        await client.get_livestreams(["123"])
 
 
 async def test_timeout_raises_transient_error() -> None:
@@ -233,4 +256,4 @@ async def test_timeout_raises_transient_error() -> None:
 
     client = _client_with(handler)
     with pytest.raises(TransientPlatformError):
-        await client.get_channel_by_id("123")
+        await client.get_livestreams(["123"])

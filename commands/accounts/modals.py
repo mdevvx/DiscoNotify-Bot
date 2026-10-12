@@ -85,13 +85,44 @@ def _shared_value(configs: Sequence[Dict[str, Any]], key: str) -> Any:
     return values.pop() if len(values) == 1 else None
 
 
+class _Form(discord.ui.Modal):
+    """Base for every form here. discord.py's default on_error only logs to
+    the console, so a failing submit showed Discord's generic "Something
+    went wrong. Try again." with nothing in the bot's own log (2026-10-12).
+    This logs the traceback and tells the user."""
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, /) -> None:
+        logger.error("Error handling form %s (guild=%s)", type(self).__name__, interaction.guild_id, exc_info=error)
+        try:
+            await cards.error(interaction, "Something went wrong saving that — it's been logged. Please try again.")
+        except discord.HTTPException:
+            logger.warning("Couldn't report the form error to the user.", exc_info=True)
+
+
+def _picked_id(values: Sequence[Any]) -> Optional[int]:
+    """The ID of the first channel/role picked in a form select. Usually a
+    channel/role object, but discord.py falls back to the raw ID string when
+    it can't build one from Discord's resolved data (it needs fields, like a
+    channel's "permissions", that a modal submit doesn't always include) —
+    reading `.id` off that string crashed the submit."""
+    if not values:
+        return None
+    value = values[0]
+    raw = getattr(value, "id", value)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 # ── account-add ─────────────────────────────────────────────────────────
 
 
-class AddAccountModal(discord.ui.Modal):
+class AddAccountModal(_Form):
     def __init__(self, platform: str) -> None:
         form = PLATFORM_FORMS[platform]
-        super().__init__(title=f"Add a {form.name} account", timeout=_MODAL_TIMEOUT_SECONDS)
+        article = "an" if form.name[0].lower() in "aeiou" else "a"
+        super().__init__(title=f"Add {article} {form.name} account", timeout=_MODAL_TIMEOUT_SECONDS)
         self.platform = platform
         self.identifier = discord.ui.TextInput(placeholder=form.placeholder, max_length=200)
         self.channel = discord.ui.ChannelSelect(
@@ -112,9 +143,9 @@ class AddAccountModal(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         assert interaction.guild is not None
-        picked = self.channel.values[0] if self.channel.values else None
-        channel = interaction.guild.get_channel(picked.id) if picked is not None else None
-        role_id = self.role.values[0].id if self.role.values else None
+        channel_id = _picked_id(self.channel.values)
+        channel = interaction.guild.get_channel(channel_id) if channel_id is not None else None
+        role_id = _picked_id(self.role.values)
         await self.apply(interaction, identifier=self.identifier.value, channel=channel, role_id=role_id)
 
     async def apply(
@@ -203,7 +234,7 @@ class AddAccountModal(discord.ui.Modal):
 # ── account-set-message ─────────────────────────────────────────────────
 
 
-class CustomMessageModal(discord.ui.Modal):
+class CustomMessageModal(_Form):
     def __init__(self, row: Dict[str, Any], configs: Sequence[Dict[str, Any]]) -> None:
         super().__init__(title=f"Alert message — {row['username']}"[:45], timeout=_MODAL_TIMEOUT_SECONDS)
         self.row = row
@@ -286,7 +317,7 @@ _MENTION_EVERYONE = "everyone"
 _MENTION_NONE = "none"
 
 
-class MentionModal(discord.ui.Modal):
+class MentionModal(_Form):
     """The @everyone role isn't offered by Discord's role picker, so who to
     ping is its own choice, with the role picker used for "a role"."""
 
@@ -317,7 +348,7 @@ class MentionModal(discord.ui.Modal):
         await self.apply(
             interaction,
             mode=self.mode.values[0] if self.mode.values else _MENTION_NONE,
-            role_id=self.role.values[0].id if self.role.values else None,
+            role_id=_picked_id(self.role.values),
             event_type=self.scope.values[0] if self.scope.values else _ALL_EVENT_TYPES,
         )
 
@@ -367,7 +398,7 @@ class MentionModal(discord.ui.Modal):
 # ── alerts ──────────────────────────────────────────────────────────────
 
 
-class AlertsModal(discord.ui.Modal):
+class AlertsModal(_Form):
     def __init__(self, row: Dict[str, Any], configs: Sequence[Dict[str, Any]]) -> None:
         super().__init__(title=f"Alerts — {row['username']}"[:45], timeout=_MODAL_TIMEOUT_SECONDS)
         self.row = row

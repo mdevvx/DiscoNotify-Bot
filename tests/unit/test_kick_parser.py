@@ -51,71 +51,54 @@ def test_channel_to_account_ref_falls_back_to_id_without_a_slug() -> None:
     assert ref.username == "12345"
 
 
-# ── channel_to_live_status ─────────────────────────────────────────────────
+# ── livestream_to_live_status ──────────────────────────────────────────
 
 
-def _channel(**overrides) -> dict:
-    channel = {
+def _livestream(**overrides) -> dict:
+    """Shape of a GET /public/v1/livestreams item, from the live API."""
+    item = {
         "broadcaster_user_id": 12345,
+        "channel_id": 999,
         "slug": "somestreamer",
         "stream_title": "Playing games",
-        "category": {"id": 1, "name": "Just Chatting"},
-        "stream": {
-            "is_live": True,
-            "viewer_count": 1234,
-            "start_time": "2026-09-15T10:00:00Z",
-            "url": "https://kick.com/somestreamer",
-            "thumbnail": "https://example.com/thumb.jpg",
-        },
+        "viewer_count": 1234,
+        "thumbnail": "https://images.kick.com/video_thumbnails/x/480.webp",
+        "started_at": "2026-10-12T13:31:08Z",
+        "category": {"id": 15, "name": "Just Chatting"},
+        "profile_picture": "https://files.kick.com/images/user/12345/profile.webp",
     }
-    channel.update(overrides)
-    return channel
+    item.update(overrides)
+    return item
 
 
-def test_channel_to_live_status_detects_live() -> None:
-    status = parser.channel_to_live_status(_channel())
+def test_livestream_is_live_with_title_category_and_viewers() -> None:
+    status = parser.livestream_to_live_status(_livestream())
     assert status.is_live is True
-    assert status.stream_id is None  # Kick exposes no per-session stream ID
-
-
-def test_channel_to_live_status_offline_when_stream_missing() -> None:
-    status = parser.channel_to_live_status(_channel(stream=None))
-    assert status.is_live is False
-
-
-def test_channel_to_live_status_offline_when_is_live_false() -> None:
-    status = parser.channel_to_live_status(_channel(stream={"is_live": False}))
-    assert status.is_live is False
-
-
-def test_channel_to_live_status_maps_category_and_title() -> None:
-    status = parser.channel_to_live_status(_channel())
     assert status.title == "Playing games"
     assert status.category == "Just Chatting"
-
-
-def test_channel_to_live_status_parses_viewer_count() -> None:
-    status = parser.channel_to_live_status(_channel())
     assert status.viewer_count == 1234
+    assert status.started_at is not None and status.started_at.hour == 13
 
 
-def test_channel_to_live_status_parses_started_at() -> None:
-    status = parser.channel_to_live_status(_channel())
-    assert status.started_at is not None
+def test_livestream_session_id_is_stable_within_a_session_and_differs_between_sessions() -> None:
+    """Kick has no stream ID; one built from broadcaster + start time keeps
+    each session's alerts distinct (the "ended" alert used to work only once)."""
+    first = parser.livestream_to_live_status(_livestream())
+    same = parser.livestream_to_live_status(_livestream(viewer_count=5))
+    later = parser.livestream_to_live_status(_livestream(started_at="2026-10-13T09:00:00Z"))
+    assert first.stream_id == same.stream_id == "12345:2026-10-12T13:31:08Z"
+    assert later.stream_id != first.stream_id
 
 
-def test_channel_to_live_status_uses_the_streams_own_url() -> None:
-    status = parser.channel_to_live_status(_channel())
+def test_livestream_carries_the_avatar_thumbnail_and_channel_url() -> None:
+    status = parser.livestream_to_live_status(_livestream())
+    assert status.author == "somestreamer"
+    assert status.author_avatar_url == "https://files.kick.com/images/user/12345/profile.webp"
+    assert status.thumbnail_url == "https://images.kick.com/video_thumbnails/x/480.webp"
     assert status.url == "https://kick.com/somestreamer"
 
 
-def test_channel_to_live_status_builds_url_from_slug_if_stream_url_missing() -> None:
-    channel = _channel()
-    channel["stream"] = {**channel["stream"], "url": None}
-    status = parser.channel_to_live_status(channel)
-    assert status.url == "https://kick.com/somestreamer"
-
-
-def test_channel_to_live_status_handles_missing_category() -> None:
-    status = parser.channel_to_live_status(_channel(category=None))
+def test_livestream_handles_missing_category_and_start_time() -> None:
+    status = parser.livestream_to_live_status(_livestream(category=None, started_at=None))
     assert status.category is None
+    assert status.stream_id is None

@@ -39,31 +39,30 @@ def channel_to_account_ref(channel: Dict[str, Any]) -> AccountRef:
     )
 
 
-def channel_to_live_status(channel: Dict[str, Any]) -> LiveStatus:
-    """`channel` is a GET /public/v1/channels resource — Kick nests live
-    state under `stream` (absent/empty for a channel that's never gone
-    live) rather than exposing a top-level boolean.
+def livestream_to_live_status(livestream: Dict[str, Any]) -> LiveStatus:
+    """`livestream` is one GET /public/v1/livestreams item — present only
+    while the broadcaster is live.
 
-    Unlike YouTube/Twitch, Kick's API exposes no per-session stream ID —
-    stream_id is deliberately left None here. monitoring.worker.py's
-    fallback platform_event_id generation accounts for exactly this case
-    (it varies by started_at, not just by account, so two different Kick
-    live sessions never collide under the events table's dedup key)."""
-    stream = channel.get("stream") or {}
-    if not stream.get("is_live"):
-        return LiveStatus(is_live=False)
-
-    category = (channel.get("category") or {}).get("name")
-    slug = channel.get("slug")
+    Kick exposes no per-session stream ID, so one is built from the
+    broadcaster and the stream's start time: stable for the whole session,
+    different for the next one. Without it, every session of a channel
+    shares one dedup key and only its first "stream ended" alert ever goes
+    out (found 2026-10-12)."""
+    slug = livestream.get("slug")
+    broadcaster_id = livestream.get("broadcaster_user_id")
+    started = livestream.get("started_at")
+    category = (livestream.get("category") or {}).get("name")
     return LiveStatus(
         is_live=True,
-        stream_id=None,
-        title=channel.get("stream_title"),
+        stream_id=f"{broadcaster_id}:{started}" if started else None,
+        title=livestream.get("stream_title"),
         category=category or None,
-        viewer_count=_safe_int(stream.get("viewer_count")),
-        started_at=_parse_timestamp(stream.get("start_time")),
-        thumbnail_url=stream.get("thumbnail"),
-        url=stream.get("url") or (f"https://kick.com/{slug}" if slug else None),
+        viewer_count=_safe_int(livestream.get("viewer_count")),
+        started_at=_parse_timestamp(started),
+        thumbnail_url=livestream.get("thumbnail") or None,
+        url=f"https://kick.com/{slug}" if slug else None,
+        author=slug,
+        author_avatar_url=livestream.get("profile_picture") or None,
     )
 
 

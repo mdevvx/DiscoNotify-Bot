@@ -50,6 +50,10 @@ def setup_logging(level: str = "INFO", log_dir: str = "logs") -> None:
     root.addHandler(console_handler)
 
     log_path = Path(log_dir)
+    if not log_path.is_absolute():
+        # Relative to the project, not to wherever the bot was started from
+        # — otherwise the log quietly lands in a different folder per launch.
+        log_path = Path(__file__).resolve().parent.parent / log_path
     log_path.mkdir(parents=True, exist_ok=True)
     file_handler = RotatingFileHandler(
         log_path / "pulsenotify.log",

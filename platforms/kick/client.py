@@ -13,7 +13,7 @@ approach applies.
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 import httpx
 
@@ -32,6 +32,8 @@ _TOKEN_REFRESH_MARGIN_SECONDS = 60.0
 # retry-after header (unlike Twitch's Ratelimit-Reset) — fall back to a
 # fixed, generous wait if a 429 is ever actually returned.
 _DEFAULT_RATE_LIMIT_WAIT_SECONDS = 60.0
+# Kick accepts up to 50 broadcaster IDs per /livestreams call.
+MAX_IDS_PER_CALL = 50
 
 
 class KickClient:
@@ -58,16 +60,27 @@ class KickClient:
         await self._http.aclose()
 
     async def get_channel_by_slug(self, slug: str) -> Optional[Dict[str, Any]]:
-        data = await self._get("/channels", {"slug": slug})
-        items = data.get("data", [])
+        """None for a slug Kick doesn't know. Kick answers that with HTTP 400
+        "Invalid request" (verified 2026-10-12), not an empty list."""
+        try:
+            data = await self._get("/channels", {"slug": slug})
+        except PermanentPlatformError:
+            return None
+        items = data.get("data") or []
         return items[0] if items else None
 
-    async def get_channel_by_id(self, broadcaster_user_id: str) -> Optional[Dict[str, Any]]:
-        data = await self._get("/channels", {"broadcaster_user_id": broadcaster_user_id})
-        items = data.get("data", [])
-        return items[0] if items else None
+    async def get_livestreams(self, broadcaster_user_ids: Sequence[str]) -> List[Dict[str, Any]]:
+        """The currently-live streams among these broadcasters — one call for
+        up to 50. A broadcaster who's offline is simply absent (verified
+        2026-10-12). Each item carries title, thumbnail, started_at,
+        category, viewer_count and the streamer's profile_picture."""
+        ids = list(broadcaster_user_ids)[:MAX_IDS_PER_CALL]
+        if not ids:
+            return []
+        data = await self._get("/livestreams", [("broadcaster_user_id", value) for value in ids])
+        return data.get("data") or []
 
-    async def _get(self, path: str, params: Dict[str, Any], *, _retried: bool = False) -> Dict[str, Any]:
+    async def _get(self, path: str, params: Any, *, _retried: bool = False) -> Dict[str, Any]:
         await self._ensure_token()
         headers = {"Authorization": f"Bearer {self._access_token}"}
         try:

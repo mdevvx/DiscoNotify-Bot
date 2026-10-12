@@ -1,10 +1,11 @@
-"""KickAdapter's own logic — resolving an identifier to an AccountRef and
-mapping get_live_status onto KickClient, driven through a fake KickClient
-(not real HTTP; that's covered separately in test_kick_client.py)."""
+"""KickAdapter's own logic — resolving a name to an AccountRef, and live
+status for every monitored broadcaster from ONE batched /livestreams call
+per tick. Driven through a fake KickClient (not real HTTP; that's covered
+separately in test_kick_client.py)."""
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 import pytest
 
@@ -13,107 +14,125 @@ from platforms.kick.adapter import KickAdapter
 from utils.errors import PermanentPlatformError
 
 _ACCOUNT = AccountRef(platform="kick", platform_account_id="12345", username="somestreamer")
+_OTHER = AccountRef(platform="kick", platform_account_id="777", username="other")
+
+
+def _livestream(broadcaster_id: int, slug: str) -> Dict[str, Any]:
+    return {
+        "broadcaster_user_id": broadcaster_id,
+        "slug": slug,
+        "stream_title": "Live now",
+        "started_at": "2026-10-12T13:31:08Z",
+        "viewer_count": 42,
+        "profile_picture": f"https://files.kick.com/{slug}.webp",
+    }
 
 
 class FakeKickClient:
     def __init__(self) -> None:
         self.channel_by_slug: Optional[Dict[str, Any]] = {"broadcaster_user_id": 12345, "slug": "somestreamer"}
-        self.channel_by_id: Optional[Dict[str, Any]] = None
+        self.live: List[Dict[str, Any]] = []
+        self.livestream_calls: List[List[str]] = []
 
     async def get_channel_by_slug(self, slug: str):
         return self.channel_by_slug
 
-    async def get_channel_by_id(self, broadcaster_user_id: str):
-        return self.channel_by_id
+    async def get_livestreams(self, broadcaster_user_ids: Sequence[str]):
+        ids = list(broadcaster_user_ids)
+        self.livestream_calls.append(ids)
+        return [item for item in self.live if str(item["broadcaster_user_id"]) in ids]
 
     async def aclose(self) -> None:
         pass
 
 
+class Clock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _make_adapter(client: FakeKickClient, clock: Optional[Clock] = None) -> KickAdapter:
+    return KickAdapter(client, clock=clock or Clock())  # type: ignore[arg-type]
+
+
 async def test_validate_account_resolves_a_slug_to_an_account_ref() -> None:
-    client = FakeKickClient()
-    adapter = KickAdapter(client)  # type: ignore[arg-type]
+    ref = await _make_adapter(FakeKickClient()).validate_account("https://kick.com/SomeStreamer")
 
-    ref = await adapter.validate_account("SomeStreamer")
-
-    assert ref.platform == "kick"
-    assert ref.platform_account_id == "12345"
-    assert ref.username == "somestreamer"
+    assert (ref.platform, ref.platform_account_id, ref.username) == ("kick", "12345", "somestreamer")
 
 
-async def test_validate_account_raises_permanent_error_when_not_found() -> None:
+async def test_validate_account_names_the_channel_it_could_not_find() -> None:
     client = FakeKickClient()
     client.channel_by_slug = None
-    adapter = KickAdapter(client)  # type: ignore[arg-type]
 
-    with pytest.raises(PermanentPlatformError):
-        await adapter.validate_account("nonexistent")
+    with pytest.raises(PermanentPlatformError, match="no Kick channel named 'typoname'"):
+        await _make_adapter(client).validate_account("typoname")
 
 
-async def test_get_live_status_returns_offline_when_channel_not_found() -> None:
+async def test_offline_when_the_broadcaster_is_not_in_the_live_list() -> None:
+    status = await _make_adapter(FakeKickClient()).get_live_status(_ACCOUNT)
+
+    assert status is not None and status.is_live is False
+
+
+async def test_live_status_carries_the_session_id_and_avatar() -> None:
     client = FakeKickClient()
-    client.channel_by_id = None
-    adapter = KickAdapter(client)  # type: ignore[arg-type]
+    client.live = [_livestream(12345, "somestreamer")]
 
-    status = await adapter.get_live_status(_ACCOUNT)
+    status = await _make_adapter(client).get_live_status(_ACCOUNT)
 
-    assert status is not None
-    assert status.is_live is False
+    assert status is not None and status.is_live is True
+    assert status.stream_id == "12345:2026-10-12T13:31:08Z"
+    assert status.author_avatar_url == "https://files.kick.com/somestreamer.webp"
 
 
-async def test_get_live_status_returns_live_status_for_an_active_stream() -> None:
+async def test_every_account_is_served_by_one_batched_call_per_tick() -> None:
     client = FakeKickClient()
-    client.channel_by_id = {
-        "broadcaster_user_id": 12345,
-        "slug": "somestreamer",
-        "stream_title": "Playing games",
-        "category": {"name": "Just Chatting"},
-        "stream": {
-            "is_live": True,
-            "viewer_count": 42,
-            "start_time": "2026-09-15T10:00:00Z",
-            "url": "https://kick.com/somestreamer",
-        },
-    }
-    adapter = KickAdapter(client)  # type: ignore[arg-type]
+    clock = Clock()
+    adapter = _make_adapter(client, clock)
+    client.live = [_livestream(777, "other")]
 
-    status = await adapter.get_live_status(_ACCOUNT)
+    # First tick: the second account wasn't known yet when the first call
+    # went out, so it triggers one more (batched) call.
+    await adapter.get_live_status(_ACCOUNT)
+    other = await adapter.get_live_status(_OTHER)
+    calls_first_tick = len(client.livestream_calls)
 
-    assert status is not None
-    assert status.is_live is True
-    assert status.viewer_count == 42
-    assert status.url == "https://kick.com/somestreamer"
+    clock.now += 30
+    await adapter.get_live_status(_ACCOUNT)
+    await adapter.get_live_status(_OTHER)
+
+    assert other is not None and other.is_live is True
+    assert calls_first_tick == 2
+    assert client.livestream_calls[-1] == ["12345", "777"]
+    assert len(client.livestream_calls) == calls_first_tick + 1  # one call for both on the next tick
 
 
-async def test_get_live_status_queries_by_the_stable_platform_account_id() -> None:
-    """Must use the numeric ID (stable across renames), not the slug."""
+async def test_two_guilds_on_the_same_channel_share_the_call() -> None:
     client = FakeKickClient()
-    seen_id = None
-
-    async def get_channel_by_id(broadcaster_user_id: str):
-        nonlocal seen_id
-        seen_id = broadcaster_user_id
-        return None
-
-    client.get_channel_by_id = get_channel_by_id  # type: ignore[assignment]
-    adapter = KickAdapter(client)  # type: ignore[arg-type]
+    adapter = _make_adapter(client)
+    same_channel = AccountRef(platform="kick", platform_account_id="12345", username="somestreamer")
 
     await adapter.get_live_status(_ACCOUNT)
+    await adapter.get_live_status(same_channel)
 
-    assert seen_id == "12345"
+    assert len(client.livestream_calls) == 1
+
+
+def test_poll_interval_does_not_grow_with_the_account_count() -> None:
+    adapter = _make_adapter(FakeKickClient())
+
+    assert adapter.poll_interval_seconds(1) == adapter.poll_interval_seconds(40) == 30.0
 
 
 async def test_fetch_updates_is_never_expected_to_be_called() -> None:
-    client = FakeKickClient()
-    adapter = KickAdapter(client)  # type: ignore[arg-type]
-
     with pytest.raises(NotImplementedError):
-        await adapter.fetch_updates(_ACCOUNT, cursor=None)
+        await _make_adapter(FakeKickClient()).fetch_updates(_ACCOUNT, None)
 
 
 async def test_normalize_event_is_never_expected_to_be_called() -> None:
-    client = FakeKickClient()
-    adapter = KickAdapter(client)  # type: ignore[arg-type]
-
     with pytest.raises(NotImplementedError):
-        adapter.normalize_event(_ACCOUNT, {})
+        _make_adapter(FakeKickClient()).normalize_event(_ACCOUNT, {})

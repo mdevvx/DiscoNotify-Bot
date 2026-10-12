@@ -295,15 +295,18 @@ Credentials: `TWITCH_CLIENT_ID`/`TWITCH_CLIENT_SECRET`, an app access token via 
 
 ## Kick adapter (platforms/kick/)
 
-Live/offline detection only, same shape as the Twitch adapter — see `platforms/kick/adapter.py`'s module docstring. Kick's Public API (docs.kick.com) is close enough to Twitch's own API/OAuth shape that the same polling decision and client structure apply.
+Live start/end detection via Kick's official Public API (docs.kick.com), re-verified against the live API on 2026-10-12 — see `platforms/kick/adapter.py`'s module docstring.
 
 | Feature | Method | Auth | Notes |
 |---|---|---|---|
-| Live/offline + channel resolution | `GET /public/v1/channels?slug=` or `?broadcaster_user_id=` | app access token | No broadcaster authorization needed. One endpoint returns both identity and live status (title/category/viewer_count/thumbnail/url) — unlike Twitch, no separate "users" endpoint is needed. |
+| Resolve a channel name | `GET /public/v1/channels?slug=` | app access token | An unknown name comes back as HTTP 400 "Invalid request"; `account-add` reports "no Kick channel named …" |
+| Live/offline | `GET /public/v1/livestreams?broadcaster_user_id=…` (up to 50 per call) | app access token | Only live broadcasters are returned, with title, thumbnail, start time, category, viewer count and profile picture |
 
-Credentials: `KICK_CLIENT_ID`/`KICK_CLIENT_SECRET`, an app access token via OAuth client-credentials — same model as Twitch, described by Kick's own docs as usable "when user login is not required."
+**One batched call per check for every Kick account**, however many are monitored: the first account polled in a tick fetches all known broadcasters at once and the rest are served from that result. Kick documents no rate limit and sends no rate-limit headers, so the cadence is a fixed 30s (`KICK_POLL_INTERVAL_SECONDS`).
 
-**One real difference from every other live-status platform: Kick's API exposes no per-session stream ID.** YouTube's video ID and Twitch's `stream.id` both uniquely identify one broadcast session; Kick's channel resource has nothing equivalent. `monitoring/worker.py`'s `platform_event_id` fallback for a missing `stream_id` was fixed during this phase to incorporate `started_at` (not just the account ID) specifically because of this — the original fallback (`f"live-{account_id}"`) would have been the *same string* every time that account went live again, and since the events table's dedup key is `(account_id, event_type, platform_event_id)`, every live notification after an account's first one would have been silently swallowed as "already seen." See `tests/unit/test_worker.py::test_two_separate_live_sessions_without_a_stream_id_get_different_event_ids` for the regression test.
+Credentials: `KICK_CLIENT_ID`/`KICK_CLIENT_SECRET`, an app access token via OAuth client-credentials (valid 60 days, refreshed automatically) — described by Kick's docs as usable "when user login is not required."
+
+**Kick exposes no per-session stream ID.** `platforms/kick/parser.py` builds one from the broadcaster and the stream's start time — stable for the whole session, different for the next. Without it, every session of a channel shared one dedup key and only the first "stream ended" alert ever went out (fixed 2026-10-12; `monitoring/worker.py` also falls back to the session's start time for any platform without stream IDs).
 
 ## X (Twitter) adapter (platforms/twitter/)
 

@@ -141,6 +141,10 @@ class AccountWorker:
             )
         elif not status.is_live and was_live:
             ended_stream_id = previous["current_stream_id"] if previous else None
+            # Without a stream ID, the session's start time keeps each
+            # session's "ended" event distinct — otherwise the dedup key
+            # would be the same every time and only the first would send.
+            ended_session = ended_stream_id or f"{self._account_id}-{(previous or {}).get('started_at')}"
             await self._live_state_repo.set_offline(guild_id=self._guild_id, account_id=self._account_id)
             await self._submit_event(
                 NormalizedEvent(
@@ -150,7 +154,7 @@ class AccountWorker:
                     platform_account_id=self._account_ref.platform_account_id,
                     account_username=self._account_ref.username,
                     event_type=EventType.STREAM_ENDED,
-                    platform_event_id=f"{ended_stream_id or self._account_id}-ended",
+                    platform_event_id=f"{ended_session}-ended",
                 )
             )
         else:

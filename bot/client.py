@@ -168,7 +168,9 @@ class PulseNotifyBot(commands.Bot):
                 self.settings.kick_client_secret,
                 timeout_seconds=self.settings.monitoring_http_timeout_seconds,
             )
-            self.monitoring.register_adapter(KickAdapter(kick_client))
+            self.monitoring.register_adapter(
+                KickAdapter(kick_client, poll_interval_seconds=self.settings.kick_poll_interval_seconds)
+            )
         else:
             logger.warning("KICK_CLIENT_ID/KICK_CLIENT_SECRET not set — Kick monitoring is disabled.")
 
