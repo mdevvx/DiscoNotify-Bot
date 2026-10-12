@@ -201,5 +201,6 @@ class PulseNotifyBot(commands.Bot):
     async def close(self) -> None:
         logger.info("Shutting down PulseNotify...")
         await self.monitoring.stop()
+        await self.notification_sender.aclose()
         await self.database.close()
         await super().close()

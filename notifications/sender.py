@@ -18,6 +18,14 @@ reason, this falls back to sending as the bot itself rather than dropping
 the notification — a missing permission in one channel must not silently
 swallow alerts.
 
+Images that aren't ready yet: alerts now go out within seconds of an
+upload, often before YouTube has generated the video's thumbnail — its URL
+already exists but serves a 404 placeholder, which Discord shows as a
+broken image (seen 2026-10-12). So the thumbnail URL is checked first; if
+it isn't serving an image yet, the alert is sent without it right away and
+a background task edits the image in once it appears (an edit never
+re-pings). The alert is never held back waiting for it.
+
 Discord-side rate limiting is handled by discord.py's own HTTP layer;
 EventProcessor's single-consumer queue already serializes delivery (one
 event handled at a time), which is what keeps this from ever firing a
@@ -27,9 +35,12 @@ no separate notification queue was built on top of that.
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, Optional
+import asyncio
+import dataclasses
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
 import discord
+import httpx
 
 from config import constants
 from database.repositories.alert_configs import AlertConfigurationRepository
@@ -42,6 +53,14 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 WebhookFromURL = Callable[..., discord.Webhook]
+ImageReady = Callable[[str], Awaitable[bool]]
+
+# How often, and for how long, to re-check a thumbnail that wasn't ready
+# when its alert went out. YouTube can take several minutes to generate
+# one for a fresh upload.
+_IMAGE_RETRY_INTERVAL_SECONDS = 30.0
+_IMAGE_RETRY_MAX_WAIT_SECONDS = 30 * 60.0
+_IMAGE_CHECK_TIMEOUT_SECONDS = 5.0
 
 
 class NotificationSender:
@@ -52,6 +71,9 @@ class NotificationSender:
         channel_repo: NotificationChannelRepository,
         *,
         webhook_from_url: WebhookFromURL = discord.Webhook.from_url,
+        image_ready: Optional[ImageReady] = None,
+        image_retry_interval_seconds: float = _IMAGE_RETRY_INTERVAL_SECONDS,
+        image_retry_max_wait_seconds: float = _IMAGE_RETRY_MAX_WAIT_SECONDS,
     ) -> None:
         self._bot = bot
         self._alert_config_repo = alert_config_repo
@@ -60,6 +82,21 @@ class NotificationSender:
         # Discord webhook URL to construct a usable object) — production
         # code never passes this.
         self._webhook_from_url = webhook_from_url
+        self._http: Optional[httpx.AsyncClient] = None
+        self._image_ready: ImageReady = image_ready or self._check_image
+        self._image_retry_interval = image_retry_interval_seconds
+        self._image_retry_max_wait = image_retry_max_wait_seconds
+        # Strong references, so pending image follow-ups aren't garbage
+        # collected mid-wait; cancelled on aclose().
+        self._image_tasks: Set["asyncio.Task[None]"] = set()
+
+    async def aclose(self) -> None:
+        for task in list(self._image_tasks):
+            task.cancel()
+        await asyncio.gather(*self._image_tasks, return_exceptions=True)
+        if self._http is not None:
+            await self._http.aclose()
+            self._http = None
 
     async def handle(self, event: NormalizedEvent) -> None:
         assert event.guild_id is not None and event.account_id is not None
@@ -84,13 +121,55 @@ class NotificationSender:
         top_line = self._top_line(
             event, embed_enabled=embed_enabled, mention_role_id=mention_role_id, custom_message=custom_message
         )
-        layout = build_alert(event, top_line=top_line, rich=embed_enabled)
         # Computed from the top line only: that's the one place a mention
         # is meant to be; the card's platform text is mention-escaped.
         allowed_mentions = self._allowed_mentions_for(top_line, mention_role_id, event.guild_id)
 
+        image_pending = bool(embed_enabled and event.thumbnail_url) and not await self._image_ready(
+            event.thumbnail_url  # type: ignore[arg-type]
+        )
+        shown = dataclasses.replace(event, thumbnail_url=None) if image_pending else event
+        layout = build_alert(shown, top_line=top_line, rich=embed_enabled)
+
+        sent = []
         for channel_row in channels:
-            await self._send_to_channel(channel_row, layout=layout, allowed_mentions=allowed_mentions)
+            message = await self._send_to_channel(channel_row, layout=layout, allowed_mentions=allowed_mentions)
+            if message is not None:
+                sent.append(message)
+
+        if image_pending and sent:
+            task = asyncio.create_task(self._add_image_when_ready(event, top_line, sent))
+            self._image_tasks.add(task)
+            task.add_done_callback(self._image_tasks.discard)
+
+    async def _add_image_when_ready(self, event: NormalizedEvent, top_line: str, messages: List[Any]) -> None:
+        url = event.thumbnail_url
+        assert url is not None
+        waited = 0.0
+        while waited < self._image_retry_max_wait:
+            await asyncio.sleep(self._image_retry_interval)
+            waited += self._image_retry_interval
+            if not await self._image_ready(url):
+                continue
+            layout = build_alert(event, top_line=top_line, rich=True)
+            for message in messages:
+                try:
+                    await message.edit(view=layout)
+                except discord.HTTPException:
+                    logger.warning("Couldn't add the thumbnail to alert message %s.", getattr(message, "id", "?"))
+            return
+        logger.info("Thumbnail %s never became available; the alert stays without it.", url)
+
+    async def _check_image(self, url: str) -> bool:
+        """Whether `url` serves an image right now. YouTube answers a not-yet-
+        generated thumbnail with HTTP 404 (and a placeholder image body)."""
+        if self._http is None:
+            self._http = httpx.AsyncClient(timeout=_IMAGE_CHECK_TIMEOUT_SECONDS, follow_redirects=True)
+        try:
+            response = await self._http.head(url)
+        except httpx.HTTPError:
+            return False
+        return response.status_code == 200 and response.headers.get("content-type", "").startswith("image/")
 
     def _top_line(
         self,
@@ -135,7 +214,9 @@ class NotificationSender:
         *,
         layout: discord.ui.LayoutView,
         allowed_mentions: discord.AllowedMentions,
-    ) -> None:
+    ) -> Optional[Any]:
+        """Returns the sent message (for a later edit), or None if nothing
+        was delivered."""
         discord_channel_id = channel_row["channel_id"]
         discord_channel = self._bot.get_channel(discord_channel_id)
 
@@ -144,10 +225,10 @@ class NotificationSender:
                 discord_channel = await self._bot.fetch_channel(discord_channel_id)
             except (discord.NotFound, discord.Forbidden):
                 await self._mark_invalid(channel_row, "channel is no longer accessible")
-                return
+                return None
             except discord.HTTPException:
                 logger.exception("Failed to look up notification channel %s.", discord_channel_id)
-                return
+                return None
 
         # Not verified up front (that would cost a Discord round trip on
         # every alert) — a deleted webhook surfaces as NotFound on send,
@@ -160,8 +241,8 @@ class NotificationSender:
                 # No username/avatar_url override here on purpose — see this
                 # module's docstring for why: it would stomp any branding an
                 # admin has customized on this webhook in Discord's own UI.
-                await webhook.send(view=layout, allowed_mentions=allowed_mentions)
-                return
+                # wait=True returns the message, so it can be edited later.
+                return await webhook.send(view=layout, allowed_mentions=allowed_mentions, wait=True)
             except discord.NotFound:
                 # The webhook itself was deleted from Discord's side (e.g.
                 # a server admin removed it manually) — forget it and send
@@ -175,13 +256,14 @@ class NotificationSender:
                 break
 
         try:
-            await discord_channel.send(view=layout, allowed_mentions=allowed_mentions)
+            return await discord_channel.send(view=layout, allowed_mentions=allowed_mentions)
         except discord.Forbidden:
             await self._mark_invalid(channel_row, "missing permission to send messages")
         except discord.NotFound:
             await self._mark_invalid(channel_row, "channel was deleted")
         except discord.HTTPException:
             logger.exception("Failed to send notification to channel %s.", discord_channel_id)
+        return None
 
     async def get_or_create_webhook(
         self, channel_row: Dict[str, Any], discord_channel: Any, *, verify: bool = True

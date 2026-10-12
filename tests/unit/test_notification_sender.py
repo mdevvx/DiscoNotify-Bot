@@ -4,6 +4,7 @@ forever when Discord says it's gone (section 23)."""
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Dict, List, Optional
 
 import discord
@@ -43,6 +44,20 @@ def _card_only(card: Any) -> Any:
     return view
 
 
+class FakeSentMessage:
+    """A delivered alert; edits replace its record in the channel's .sent."""
+
+    def __init__(self, channel: "FakeDiscordChannel", index: int) -> None:
+        self._channel = channel
+        self._index = index
+        self.id = index
+
+    async def edit(self, *, view=None):
+        previous = self._channel.sent[self._index]
+        self._channel.sent[self._index] = _record(view, previous["allowed_mentions"], username=previous["username"])
+        self._channel.edits += 1
+
+
 class FakeWebhook:
     """Sends land in the owning channel's `.sent` list, same as a direct
     channel.send() — from the test's perspective, "what actually reached
@@ -52,13 +67,14 @@ class FakeWebhook:
         self.url = url
         self._channel = channel
 
-    async def send(self, *, view=None, allowed_mentions=None, username=None):
+    async def send(self, *, view=None, allowed_mentions=None, username=None, wait=False):
         self._channel.webhook_send_calls += 1
         if self.url in self._channel.deleted_webhook_urls:
             raise _fake_http_exception(discord.NotFound, status=404)
         if self._channel.raise_on_webhook_send:
             raise self._channel.raise_on_webhook_send
         self._channel.sent.append(_record(view, allowed_mentions, username=username))
+        return FakeSentMessage(self._channel, len(self._channel.sent) - 1)
 
     async def fetch(self):
         self._channel.webhook_fetch_calls += 1
@@ -88,6 +104,7 @@ class FakeDiscordChannel:
         self.create_webhook_calls = 0
         self.webhook_fetch_calls = 0
         self.webhook_send_calls = 0
+        self.edits = 0
         self.deleted_webhook_urls: set = set()
         self._created_webhook_urls: List[str] = []
 
@@ -99,6 +116,7 @@ class FakeDiscordChannel:
         if self.raise_on_send:
             raise self.raise_on_send
         self.sent.append(_record(view, allowed_mentions, username=None))
+        return FakeSentMessage(self, len(self.sent) - 1)
 
     async def create_webhook(self, *, name: str):
         self.create_webhook_calls += 1
@@ -137,9 +155,26 @@ class Harness:
         self.alert_repo = AlertConfigurationRepository(self.db)  # type: ignore[arg-type]
         self.channel_repo = NotificationChannelRepository(self.db)  # type: ignore[arg-type]
         self.bot = FakeBot()
+        # Image URLs that "exist" right now; checks against anything else fail.
+        self.ready_images: set = set()
+        self.image_checks: List[str] = []
         self.sender = NotificationSender(  # type: ignore[arg-type]
-            self.bot, self.alert_repo, self.channel_repo, webhook_from_url=self._fake_webhook_from_url
+            self.bot,
+            self.alert_repo,
+            self.channel_repo,
+            webhook_from_url=self._fake_webhook_from_url,
+            image_ready=self._image_ready,
+            image_retry_interval_seconds=0.01,
+            image_retry_max_wait_seconds=0.05,
         )
+
+    async def _image_ready(self, url: str) -> bool:
+        self.image_checks.append(url)
+        return url in self.ready_images
+
+    async def settle(self) -> None:
+        """Lets pending image follow-ups finish (or give up)."""
+        await asyncio.gather(*list(self.sender._image_tasks), return_exceptions=True)
 
     def _fake_webhook_from_url(self, url: str, *, client=None) -> FakeWebhook:
         # The fake URL format is ".../webhooks/{channel_id}/faketoken" —
@@ -181,6 +216,7 @@ def harness() -> Harness:
 
 async def test_youtube_alert_is_a_v2_card_with_the_videos_details(harness: Harness) -> None:
     channel = await harness.add_channel(1, "acc-1", 555)
+    harness.ready_images.add("https://i.ytimg.com/vi/vid-1/maxresdefault.jpg")
 
     await harness.sender.handle(
         _event(
@@ -593,3 +629,60 @@ async def test_channel_that_cannot_be_fetched_is_marked_invalid(harness: Harness
     updated = await harness.channel_repo.get_by_discord_channel(1, 555)
     assert updated is not None
     assert updated["is_valid"] is False
+
+
+# ── thumbnails that aren't ready yet ────────────────────────────────────
+
+_THUMB = "https://i.ytimg.com/vi/vid-1/hqdefault.jpg"
+
+
+def _has_image(sent: Dict[str, Any]) -> bool:
+    return any(isinstance(item, discord.ui.MediaGallery) for item in sent["view"].walk_children())
+
+
+async def test_a_ready_thumbnail_goes_out_with_the_alert(harness: Harness) -> None:
+    channel = await harness.add_channel(1, "acc-1", 555)
+    harness.ready_images.add(_THUMB)
+
+    await harness.sender.handle(_event(thumbnail_url=_THUMB))
+
+    assert _has_image(channel.sent[0])
+    assert harness.sender._image_tasks == set()
+
+
+async def test_a_thumbnail_youtube_has_not_generated_yet_is_added_by_an_edit_later(harness: Harness) -> None:
+    """Regression test: alerts go out seconds after an upload, before
+    YouTube has generated the thumbnail — its URL served a 404, shown in
+    Discord as a broken image. The alert must not wait for it."""
+    channel = await harness.add_channel(1, "acc-1", 555)
+
+    await harness.sender.handle(_event(thumbnail_url=_THUMB))
+    assert not _has_image(channel.sent[0])  # sent straight away, without the image
+
+    harness.ready_images.add(_THUMB)
+    await harness.settle()
+
+    assert channel.edits == 1
+    assert _has_image(channel.sent[0])
+    assert channel.sent[0]["top"] == "🆕 **Example** uploaded a new video!"  # same alert, now with the image
+
+
+async def test_a_thumbnail_that_never_appears_leaves_the_alert_without_it(harness: Harness) -> None:
+    channel = await harness.add_channel(1, "acc-1", 555)
+
+    await harness.sender.handle(_event(thumbnail_url=_THUMB))
+    await harness.settle()
+
+    assert channel.edits == 0
+    assert not _has_image(channel.sent[0])
+
+
+async def test_no_image_check_when_embeds_are_off(harness: Harness) -> None:
+    channel = await harness.add_channel(1, "acc-1", 555)
+    await harness.alert_repo.seed_defaults(1, "acc-1", ["video_published"])
+    harness.db.tables["pulsenotify_alert_configurations"].rows[0]["embed_enabled"] = False
+
+    await harness.sender.handle(_event(thumbnail_url=_THUMB))
+
+    assert harness.image_checks == []
+    assert len(channel.sent) == 1
