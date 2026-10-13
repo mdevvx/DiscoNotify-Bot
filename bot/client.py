@@ -115,6 +115,10 @@ class PulseNotifyBot(commands.Bot):
             intents=intents,
             tree_cls=PulseNotifyCommandTree,
             help_command=None,
+            # Shown under the bot's name, e.g. "/pulsenotify help | pulsenotify.duoplus.org".
+            # Set at login, so it's there from the first moment the bot is online.
+            activity=discord.CustomActivity(name=settings.discord_status_text) if settings.discord_status_text else None,
+            status=discord.Status.online,
         )
 
         self.settings = settings

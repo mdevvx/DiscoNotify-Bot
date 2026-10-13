@@ -30,13 +30,14 @@ from typing import Dict, List, Optional
 
 import discord
 
+from config import constants
 from events.models import EventType, NormalizedEvent
 
 # Long descriptions (mostly link lists and sponsor blurbs) are trimmed so
 # the thumbnail stays the focus; a V2 message allows 4000 text characters.
 _DESCRIPTION_MAX_LENGTH = 350
 _TITLE_MAX_LENGTH = 256
-_DEFAULT_COLOR = 0x5865F2
+_DEFAULT_COLOR = constants.COLOR_PRIMARY
 
 
 @dataclass(frozen=True)

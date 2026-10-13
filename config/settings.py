@@ -34,6 +34,11 @@ class Settings(BaseSettings):
 
     discord_token: str = Field(..., min_length=1, alias="DISCORD_TOKEN")
     discord_command_prefix: str = Field(default="!", alias="DISCORD_COMMAND_PREFIX")
+    # The custom status shown under the bot's name in the member list and
+    # its profile. Empty = no status. Discord caps it at 128 characters.
+    discord_status_text: str = Field(
+        default="/pulsenotify help | pulsenotify.duoplus.org", max_length=128, alias="DISCORD_STATUS_TEXT"
+    )
     discord_owner_ids_raw: str = Field(default="", alias="DISCORD_OWNER_IDS")
     discord_dev_guild_id: Optional[int] = Field(default=None, alias="DEV_GUILD_ID")
 
