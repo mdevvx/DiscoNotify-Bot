@@ -292,3 +292,21 @@ async def test_an_invalid_token_is_flagged(caplog: pytest.LogCaptureFixture) -> 
         await _make_adapter(client).check_credentials()
 
     assert "invalid" in caplog.text
+
+
+async def test_an_account_added_before_its_first_post_still_announces_that_post() -> None:
+    """Regression test (2026-10-12): an account with zero posts got no
+    baseline, so its first post became the baseline on the next check and
+    was never announced."""
+    client = FakeInstagramClient()
+    clock = Clock()
+    adapter = _make_adapter(client, clock)
+
+    baseline = await adapter.fetch_updates(_ACCOUNT, cursor=None)
+    assert baseline.items == [] and baseline.next_cursor is not None
+
+    client.discovery["media"] = [_media("first", "2099-01-01T00:00:00+0000")]
+    _next_tick(adapter, clock)
+    result = await adapter.fetch_updates(_ACCOUNT, cursor=baseline.next_cursor)
+
+    assert [item["id"] for item in result.items] == ["first"]

@@ -38,6 +38,7 @@ distinct channels so the day's checks fit in the budget
 from __future__ import annotations
 
 import asyncio
+import datetime
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, ClassVar, Dict, FrozenSet, List, Optional, Set, Tuple
@@ -145,8 +146,13 @@ class YouTubeAdapter(PlatformAdapter):
 
     async def fetch_updates(self, account: AccountRef, cursor: Optional[str]) -> FetchResult:
         snapshot = await self._get_snapshot(account)
-        if snapshot is None or not snapshot.playlist_items:
+        if snapshot is None:
             return FetchResult(items=[], next_cursor=cursor)
+        if not snapshot.playlist_items:
+            # A channel with no uploads yet still needs a baseline — without
+            # one, its first upload would be taken as the baseline on the
+            # next check and never announced.
+            return FetchResult(items=[], next_cursor=cursor or _empty_baseline_cursor())
 
         next_cursor = _make_cursor(snapshot.playlist_items[0])
         if cursor is None:
@@ -289,6 +295,13 @@ class YouTubeAdapter(PlatformAdapter):
 
     def _log_budget_exhausted(self, account: AccountRef) -> None:
         logger.warning("Skipping YouTube check for %s — daily quota budget exhausted.", account.username)
+
+
+def _empty_baseline_cursor() -> str:
+    """"|<now>" — no upload yet, so anything added to the playlist after now
+    is new. Same timestamp format as the playlist's publishedAt."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return f"{_CURSOR_SEPARATOR}{now.strftime('%Y-%m-%dT%H:%M:%SZ')}"
 
 
 def _make_cursor(playlist_item: Dict[str, Any]) -> str:

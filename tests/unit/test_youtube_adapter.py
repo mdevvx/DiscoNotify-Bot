@@ -384,3 +384,22 @@ def test_poll_interval_respects_a_configured_floor() -> None:
     adapter = _make_adapter(FakeYouTubeClient(), min_poll_interval_seconds=120.0)
 
     assert adapter.poll_interval_seconds(1) == 120.0
+
+
+async def test_a_channel_added_before_its_first_upload_still_announces_that_upload() -> None:
+    """Regression test: a channel with no uploads got no baseline, so its
+    first upload became the baseline on the next check and was never
+    announced (same bug as found on Instagram 2026-10-12)."""
+    client = FakeYouTubeClient()
+    clock = Clock()
+    adapter = _make_adapter(client, clock)
+
+    baseline = await adapter.fetch_updates(_ACCOUNT, cursor=None)
+    assert baseline.items == [] and baseline.next_cursor is not None
+
+    client.uploads = [_playlist_item("first", "2099-01-01T00:00:00Z")]
+    client.videos_by_id = {"first": _video("first")}
+    clock.next_tick(adapter)
+    result = await adapter.fetch_updates(_ACCOUNT, cursor=baseline.next_cursor)
+
+    assert [video["id"] for video in result.items] == ["first"]

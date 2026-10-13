@@ -169,7 +169,11 @@ class InstagramAdapter(PlatformAdapter):
 
         media_items: List[Dict[str, Any]] = snapshot.discovery.get("media", [])
         if not media_items:
-            return FetchResult(items=[], next_cursor=cursor)
+            # An account with no posts yet still needs a baseline — without
+            # one, its first post was taken as the baseline on the next
+            # check and never announced (found 2026-10-12 with an account
+            # added before its first post).
+            return FetchResult(items=[], next_cursor=cursor or _empty_baseline_cursor())
 
         newest = max(media_items, key=lambda item: item.get("timestamp") or "")
         next_cursor = _make_cursor(newest)
@@ -220,6 +224,13 @@ class InstagramAdapter(PlatformAdapter):
             snapshot = _Snapshot(fetched_at=self._clock(), discovery=discovery)
             self._snapshots[key] = snapshot
             return snapshot
+
+
+def _empty_baseline_cursor() -> str:
+    """"|<now>" — no post yet, so anything posted after now is new. Same
+    timestamp format Meta uses, so it compares correctly as a string."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return f"{_CURSOR_SEPARATOR}{now.strftime('%Y-%m-%dT%H:%M:%S+0000')}"
 
 
 def _make_cursor(media: Dict[str, Any]) -> str:
