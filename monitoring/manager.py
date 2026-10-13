@@ -133,6 +133,12 @@ class MonitoringManager:
         return {platform: await self._health_repo.get(platform) for platform in self._adapters}
 
     @property
+    def poll_intervals(self) -> Dict[str, float]:
+        """Platform name -> how often it's currently checked, in seconds
+        (adapters stretch this with their account count). For /status."""
+        return {platform: scheduler.poll_interval for platform, scheduler in self._schedulers.items()}
+
+    @property
     def registered_platforms(self) -> Dict[str, int]:
         """Platform name -> number of accounts currently being polled. For /status."""
         return {platform: scheduler.worker_count for platform, scheduler in self._schedulers.items()}

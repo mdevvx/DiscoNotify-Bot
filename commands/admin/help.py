@@ -17,17 +17,26 @@ from config import constants
 from ui import cards
 
 
+# Hidden from /pulsenotify help for everyone but bot owners (the commands
+# themselves refuse non-owners too).
+OWNER_ONLY_COMMANDS = {"pulsenotify global status"}
+
+
 @pulsenotify_group.command(name="help", description="Show all PulseNotify commands and what they do.")
 async def help_command(interaction: discord.Interaction) -> None:
     fields = []
-    for command in sorted(pulsenotify_group.commands, key=lambda c: c.name):
-        if command.name == "help":
+    # walk_commands() includes commands inside subcommand groups
+    # (e.g. /pulsenotify global status); the groups themselves are skipped.
+    commands_ = [c for c in pulsenotify_group.walk_commands() if isinstance(c, app_commands.Command)]
+    is_owner = await interaction.client.is_owner(interaction.user)  # type: ignore[attr-defined]
+    for command in sorted(commands_, key=lambda c: c.qualified_name):
+        if command.name == "help" or (command.qualified_name in OWNER_ONLY_COMMANDS and not is_owner):
             continue
         usage = _format_usage(command)
         value = command.description or "No description."
         if usage:
             value += f"\n`{usage}`"
-        fields.append((f"/pulsenotify {command.name}", value))
+        fields.append((f"/{_qualified_name(command)}", value))
 
     # The text-command prefix is configurable (DISCORD_COMMAND_PREFIX), so
     # the hint shows whatever this bot actually answers to.
@@ -48,7 +57,11 @@ def _format_usage(command: app_commands.Command) -> str:
     tokens = [param.name if param.required else f"[{param.name}]" for param in command.parameters]
     if not tokens:
         return ""
-    return f"/pulsenotify {command.name} " + " ".join(tokens)
+    return f"/{_qualified_name(command)} " + " ".join(tokens)
+
+
+def _qualified_name(command: app_commands.Command) -> str:
+    return getattr(command, "qualified_name", None) or f"pulsenotify {command.name}"
 
 
 async def setup(bot: commands.Bot) -> None:

@@ -59,6 +59,10 @@ class PlatformScheduler:
         return self._adapter.platform
 
     @property
+    def poll_interval(self) -> float:
+        return self._poll_interval
+
+    @property
     def worker_count(self) -> int:
         return len(self._workers)
 

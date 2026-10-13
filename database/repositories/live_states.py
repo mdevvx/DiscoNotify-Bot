@@ -24,6 +24,11 @@ class LiveStateRepository:
     def __init__(self, database: Database) -> None:
         self._db = database
 
+    async def list_for_guild(self, guild_id: int) -> Dict[str, LiveStateRow]:
+        """account_id -> its live state, for one guild."""
+        result = await self._db.client.table(_TABLE).select("*").eq("guild_id", guild_id).execute()
+        return {row["account_id"]: row for row in result.data}
+
     async def get(self, account_id: str) -> Optional[LiveStateRow]:
         result = await self._db.client.table(_TABLE).select("*").eq("account_id", account_id).execute()
         return result.data[0] if result.data else None

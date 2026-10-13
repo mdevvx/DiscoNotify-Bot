@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from database.client import Database, is_unique_violation
 from database.models import NotificationChannelRow
@@ -86,6 +86,22 @@ class NotificationChannelRepository:
         except Exception as exc:
             if not is_unique_violation(exc):
                 raise  # already linked — nothing to do
+
+    async def list_by_account_for_guild(self, guild_id: int) -> Dict[str, List[NotificationChannelRow]]:
+        """account_id -> every channel it posts to (valid or not), for one
+        guild, in two queries — for /pulsenotify status."""
+        links = await self._db.client.table(_LINKS_TABLE).select("*").eq("guild_id", guild_id).execute()
+        if not links.data:
+            return {}
+        channel_row_ids = list({row["channel_id"] for row in links.data})
+        channels = await self._db.client.table(_CHANNELS_TABLE).select("*").in_("id", channel_row_ids).execute()
+        by_id = {row["id"]: row for row in channels.data}
+        result: Dict[str, List[NotificationChannelRow]] = {}
+        for link in links.data:
+            channel = by_id.get(link["channel_id"])
+            if channel is not None:
+                result.setdefault(link["account_id"], []).append(channel)
+        return result
 
     async def list_valid_for_account(self, account_id: str) -> List[NotificationChannelRow]:
         links = await self._db.client.table(_LINKS_TABLE).select("channel_id").eq("account_id", account_id).execute()

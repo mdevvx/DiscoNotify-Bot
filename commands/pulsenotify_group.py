@@ -8,13 +8,12 @@ command against THIS object rather than defining their own top-level
 once (`tree.add_command(pulsenotify_group)`), after every extension that
 contributes a subcommand has been loaded.
 
-Account management (`account-add`/`account-remove`/`account-list`) is
-flattened into direct subcommands here rather than nested under an
-"account" subcommand group: Discord does not allow mixing plain
-subcommands and subcommand groups as siblings under the same parent, and
-`/pulsenotify toggle` (a plain subcommand) is the pattern this project
-was explicitly asked to match — so every subcommand here is a plain
-subcommand, none are groups.
+Most commands are direct subcommands (`/pulsenotify account-add`). Discord
+also allows subcommand groups alongside them (verified in Discord's docs
+2026-10-13 — an earlier note here wrongly said mixing wasn't allowed), and
+`/pulsenotify global status` uses one: commands/admin/status.py's
+`global_group`. Only one level of grouping is possible:
+/pulsenotify <group> <subcommand>.
 """
 
 from __future__ import annotations

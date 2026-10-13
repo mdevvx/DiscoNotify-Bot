@@ -61,6 +61,10 @@ class AlertConfigurationRepository:
         )
         return result.data[0] if result.data else None
 
+    async def list_for_guild(self, guild_id: int) -> List[AlertConfigurationRow]:
+        result = await self._db.client.table(_TABLE).select("*").eq("guild_id", guild_id).execute()
+        return result.data
+
     async def list_for_account(self, account_id: str) -> List[AlertConfigurationRow]:
         result = await self._db.client.table(_TABLE).select("*").eq("account_id", account_id).execute()
         return result.data

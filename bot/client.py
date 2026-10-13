@@ -49,6 +49,9 @@ _EXTENSIONS = (
 )
 
 
+_ALWAYS_ALLOWED = {"pulsenotify toggle", "pulsenotify status", "pulsenotify global status"}
+
+
 class PulseNotifyCommandTree(app_commands.CommandTree):
     """Slash command tree that gates every command behind the guild's enabled flag.
 
@@ -62,7 +65,9 @@ class PulseNotifyCommandTree(app_commands.CommandTree):
             return True
 
         command = interaction.command
-        if command is not None and command.qualified_name == "pulsenotify toggle":
+        # toggle must work to re-enable a paused server; the status commands
+        # are read-only and are how an admin sees that it's paused.
+        if command is not None and command.qualified_name in _ALWAYS_ALLOWED:
             return True
 
         bot = cast("PulseNotifyBot", self.client)

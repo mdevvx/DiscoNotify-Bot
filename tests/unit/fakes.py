@@ -34,6 +34,8 @@ class _FakeQuery:
         self._payload = payload or {}
         self._filters: Dict[str, Any] = {}
         self._in_filters: Dict[str, List[Any]] = {}
+        self._order: Optional[tuple] = None
+        self._limit: Optional[int] = None
 
     def eq(self, column: str, value: Any) -> "_FakeQuery":
         self._filters[column] = value
@@ -41,6 +43,14 @@ class _FakeQuery:
 
     def in_(self, column: str, values: Sequence[Any]) -> "_FakeQuery":
         self._in_filters[column] = list(values)
+        return self
+
+    def order(self, column: str, *, desc: bool = False) -> "_FakeQuery":
+        self._order = (column, desc)
+        return self
+
+    def limit(self, count: int) -> "_FakeQuery":
+        self._limit = count
         return self
 
     def _matching_rows(self) -> List[Dict[str, Any]]:
@@ -51,7 +61,13 @@ class _FakeQuery:
 
     async def execute(self) -> _FakeResult:
         if self._op == "select":
-            return _FakeResult([dict(row) for row in self._matching_rows()])
+            rows = [dict(row) for row in self._matching_rows()]
+            if self._order is not None:
+                column, desc = self._order
+                rows.sort(key=lambda row: (row.get(column) is not None, row.get(column) or ""), reverse=desc)
+            if self._limit is not None:
+                rows = rows[: self._limit]
+            return _FakeResult(rows)
 
         if self._op == "insert":
             resolved_defaults = {k: (v() if callable(v) else v) for k, v in self._table.defaults.items()}

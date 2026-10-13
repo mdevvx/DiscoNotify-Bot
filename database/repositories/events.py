@@ -58,6 +58,25 @@ class EventRepository:
                 raise
             return None
 
+    async def last_notified_by_account(self, guild_id: int, *, scan_limit: int = 500) -> Dict[str, str]:
+        """account_id -> when its most recent alert went out (ISO time),
+        for one guild. Scans only the guild's latest `scan_limit` alerts —
+        an account with nothing among those just shows no "last alert"."""
+        result = await (
+            self._db.client.table(_TABLE)
+            .select("account_id,notified_at")
+            .eq("guild_id", guild_id)
+            .eq("notified", True)
+            .order("notified_at", desc=True)
+            .limit(scan_limit)
+            .execute()
+        )
+        latest: Dict[str, str] = {}
+        for row in result.data:
+            if row.get("notified_at"):
+                latest.setdefault(row["account_id"], row["notified_at"])
+        return latest
+
     async def mark_notified(self, event_id: str) -> None:
         await (
             self._db.client.table(_TABLE)

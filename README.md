@@ -101,7 +101,8 @@ Every slash command lives under one top-level `/pulsenotify` group (`commands/pu
 
 | Command | Description | Permission |
 |---|---|---|
-| `/pulsenotify status` | Bot health: uptime, latency, server count, database connection, this server's enabled state, per-platform monitoring health/request counts | Anyone |
+| `/pulsenotify status` | This server only: whether monitoring is on, and for every monitored account — the account (linked), the channel its alerts post to, how many alert types are on, who gets pinged, whether it's live, when it was last checked and when its last alert went out, plus each platform's check interval. Works while the server is paused | Anyone |
+| `/pulsenotify global status` | Bot-wide health: uptime, latency, server count, database connection, per-platform monitoring health and request counts. Private reply, hidden from `/pulsenotify help` for everyone else | Bot owner only (`DISCORD_OWNER_IDS` or the Discord application's owner) |
 | `/pulsenotify help` | Lists every command and what it does — built by introspecting the command group itself, so it can't drift out of sync with what's actually registered | Anyone |
 | `/pulsenotify toggle state:<on\|off>` | Enable/disable PulseNotify for this server. Everything else is blocked while disabled — `toggle` itself always still works. | Manage Server |
 | `/pulsenotify account-add platform` | Start monitoring a YouTube/Kick/Instagram account. Opens a form: the account (handle/URL/ID), a channel picker for where alerts post, and an optional role to mention. Refuses a channel the bot can't post in | Manage Server |
