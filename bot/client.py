@@ -54,6 +54,7 @@ _EXTENSIONS = (
     "commands.admin.sync",
     "commands.accounts.account_commands",
     "commands.admin.billing",
+    "commands.admin.whitelist",
 )
 
 

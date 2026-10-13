@@ -95,6 +95,8 @@ Before any platform integration is built: verify that platform's *current* offic
 
    (`!` is the default prefix, set by `DISCORD_COMMAND_PREFIX` in `.env`.)
 
+   **New servers set themselves up:** when the bot joins a server it syncs its commands there automatically (so `/pulsenotify` works right away — skipped when the commands are already global, since copying global commands into a server makes Discord show each one twice), starts the free trial if billing is on, and posts a welcome card with the setup commands in the server's system channel (or the first channel it can post in). See `bot/onboarding.py`. Avoid mixing `!sync` (per-server) with `!sync global` in the same server for the same reason — duplicate commands.
+
 ## Commands
 
 Every slash command lives under one top-level `/pulsenotify` group (`commands/pulsenotify_group.py`) — there is no bare `/status` or `/toggle`. Account management (`account-add`/`account-remove`/`account-list`) is flattened into direct subcommands of the same group rather than nested under its own `account` subgroup: Discord doesn't allow mixing plain subcommands and subcommand groups as siblings under one parent, and `/pulsenotify toggle` (a plain subcommand) was the pattern to match.
@@ -104,7 +106,7 @@ Every slash command lives under one top-level `/pulsenotify` group (`commands/pu
 | `/pulsenotify status` | This server only: whether monitoring is on, and for every monitored account — the account (linked), the channel its alerts post to, how many alert types are on, who gets pinged, whether it's live, when it was last checked and when its last alert went out, plus each platform's check interval. Works while the server is paused | Anyone |
 | `/pulsenotify global status` | Bot-wide health: uptime, latency, server count, database connection, per-platform monitoring health and request counts. Private reply, hidden from `/pulsenotify help` for everyone else | Bot owner only (`DISCORD_OWNER_IDS` or the Discord application's owner) |
 | `/pulsenotify subscribe` | Subscribe this server: shows its trial/subscription state, **Card — $2.99/month** (Paddle, renews monthly; subscribing during the free trial saves the card and charges nothing until the trial ends), **Crypto — 3/6/12 months** (NOWPayments, prepaid), and **Manage card subscription** (Paddle's billing portal: update the card or cancel). Only shown as "free" while billing is off | Manage Server |
-| `/pulsenotify global whitelist-add [server_id] [note]` · `whitelist-remove [server_id]` · `whitelist-list` | Let a server use everything without paying, undo that, or list whitelisted servers. `server_id` defaults to the current server | Bot owner only |
+| `!whitelist add [server_id] [note]` · `!whitelist remove [server_id]` · `!whitelist list` | Let a server use everything without paying, undo that, or list whitelisted servers. `server_id` defaults to the current server. A text command on purpose: Discord can't hide a slash command from individual users, so this never appears in anyone's command menu or `/pulsenotify help`, and anyone else typing it gets no reply | Bot owner only |
 | `/pulsenotify help` | Lists every command and what it does — built by introspecting the command group itself, so it can't drift out of sync with what's actually registered | Anyone |
 | `/pulsenotify toggle state:<on\|off>` | Enable/disable PulseNotify for this server. Off pauses monitoring (its accounts aren't polled and no alerts go out — before 2026-10-13 it only blocked commands) and blocks other commands; `toggle`, `status`, `help` and `subscribe` still work | Manage Server |
 | `/pulsenotify account-add platform` | Start monitoring a YouTube/Kick/Instagram account. Opens a form: the account (handle/URL/ID), a channel picker for where alerts post, and an optional role to mention. Refuses a channel the bot can't post in | Manage Server |
@@ -171,7 +173,7 @@ Per-server subscriptions (**`BILLING_PRICE_USD`** a month, $2.99 by default) liv
 2. **Settings → Payments → API keys** → generate → `NOWPAYMENTS_API_KEY`. (Sandbox: account at account-sandbox.nowpayments.io and `NOWPAYMENTS_SANDBOX=true`.)
 3. Offered coins: USDT on TRON and BNB Chain (lowest fees), LTC, SOL, BTC, ETH — `CRYPTO_COINS` in `billing/service.py`.
 
-**4. Turn it on:** `BILLING_ENABLED=true`, restart, `!sync`. Whitelist your own servers first with `/pulsenotify global whitelist-add`.
+**4. Turn it on:** `BILLING_ENABLED=true`, restart, `!sync`. Whitelist your own servers first with `!whitelist add` (in each server, or `!whitelist add <server_id>`).
 
 ## Testing
 

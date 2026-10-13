@@ -1,5 +1,6 @@
-"""`/pulsenotify subscribe` and the bot-owner whitelist commands
-(`/pulsenotify global whitelist-add|whitelist-remove|whitelist-list`).
+"""`/pulsenotify subscribe` — per-server subscriptions. (The bot-owner
+whitelist is the `!whitelist` text command in commands/admin/whitelist.py,
+kept out of the slash-command menu on purpose.)
 
 Subscribing is per server (BILLING_PRICE_USD a month): card via Paddle (renews monthly by
 itself) or crypto via NOWPayments (3/6/12 months prepaid). The poller in
@@ -10,6 +11,7 @@ channel the payment was started from.
 from __future__ import annotations
 
 import datetime
+import uuid
 from typing import Any, Dict, Optional
 
 import discord
@@ -18,7 +20,7 @@ from discord.ext import commands
 
 from billing.access import Access, describe_access, parse_time
 from billing.service import CRYPTO_COINS, CRYPTO_PLANS, BillingService, BillingUnavailable, format_usd
-from commands.pulsenotify_group import global_group, pulsenotify_group
+from commands.pulsenotify_group import pulsenotify_group
 from ui import cards
 from utils.errors import PlatformError
 from utils.logger import get_logger
@@ -75,8 +77,14 @@ async def _report_error(interaction: discord.Interaction, error: Exception) -> N
     if isinstance(error, (BillingUnavailable, PlatformError)):
         message = str(error)
     else:
-        logger.error("Billing action failed in guild %s", interaction.guild_id, exc_info=error)
-        message = "Something went wrong starting that payment — it's been logged. Please try again."
+        # The error type and a reference ID go in the reply too, so a failure
+        # can be traced even when the bot's log isn't at hand.
+        reference = uuid.uuid4().hex[:8]
+        logger.error("Billing action failed in guild %s [ref %s]", interaction.guild_id, reference, exc_info=error)
+        message = (
+            f"Something went wrong starting that payment ({type(error).__name__}, ref `{reference}`) — "
+            "it's been logged. Please try again."
+        )
     try:
         await cards.error(interaction, message)
     except discord.HTTPException:
@@ -242,83 +250,6 @@ def crypto_payment_card(payment: Dict[str, Any], *, months: int, coin: str) -> d
         "this server activates automatically and I'll post a confirmation in this channel."
     )
     return cards.card(*lines, title="Crypto payment", footer=f"Payment ID {payment.get('payment_id')}")
-
-
-# ── /pulsenotify global whitelist-* (bot owner only) ─────────────────────
-
-
-async def _owner_only(interaction: discord.Interaction) -> bool:
-    if await interaction.client.is_owner(interaction.user):  # type: ignore[attr-defined]
-        return True
-    await cards.error(interaction, "Only the bot owner can use this command.")
-    return False
-
-
-def _parse_server_id(interaction: discord.Interaction, server_id: Optional[str]) -> Optional[int]:
-    if not server_id:
-        return interaction.guild_id
-    value = server_id.strip()
-    return int(value) if value.isdigit() else None
-
-
-def _server_label(interaction: discord.Interaction, guild_id: int) -> str:
-    guild = interaction.client.get_guild(guild_id)
-    return f"**{discord.utils.escape_markdown(guild.name)}** (`{guild_id}`)" if guild else f"`{guild_id}`"
-
-
-@global_group.command(name="whitelist-add", description="Bot owner only: let a server use PulseNotify without paying.")
-@app_commands.describe(server_id="Server ID (leave empty for this server)", note="Why — for your own reference")
-async def whitelist_add(interaction: discord.Interaction, server_id: Optional[str] = None, note: Optional[str] = None) -> None:
-    if not await _owner_only(interaction):
-        return
-    guild_id = _parse_server_id(interaction, server_id)
-    if guild_id is None:
-        await cards.error(interaction, "That's not a server ID — it's the long number from *Copy Server ID*.")
-        return
-    # The billing row references the server's settings row, which this creates if needed.
-    await interaction.client.guilds_repo.is_enabled(guild_id)  # type: ignore[attr-defined]
-    await _billing(interaction).whitelist(guild_id, by=interaction.user.id, note=note)
-    logger.info("Server %s whitelisted by %s (%s).", guild_id, interaction.user.id, note)
-    await cards.reply(
-        interaction, f"{_server_label(interaction, guild_id)} is whitelisted — no payment needed.",
-        title="Whitelisted", tone=cards.SUCCESS, ephemeral=True,
-    )
-
-
-@global_group.command(name="whitelist-remove", description="Bot owner only: make a server pay again.")
-@app_commands.describe(server_id="Server ID (leave empty for this server)")
-async def whitelist_remove(interaction: discord.Interaction, server_id: Optional[str] = None) -> None:
-    if not await _owner_only(interaction):
-        return
-    guild_id = _parse_server_id(interaction, server_id)
-    if guild_id is None:
-        await cards.error(interaction, "That's not a server ID — it's the long number from *Copy Server ID*.")
-        return
-    removed = await _billing(interaction).unwhitelist(guild_id)
-    if not removed:
-        await cards.error(interaction, f"{_server_label(interaction, guild_id)} isn't whitelisted.")
-        return
-    logger.info("Server %s removed from the whitelist by %s.", guild_id, interaction.user.id)
-    await cards.reply(
-        interaction,
-        f"{_server_label(interaction, guild_id)} is no longer whitelisted — it needs an active subscription or trial.",
-        title="Removed from whitelist", ephemeral=True,
-    )
-
-
-@global_group.command(name="whitelist-list", description="Bot owner only: every whitelisted server.")
-async def whitelist_list(interaction: discord.Interaction) -> None:
-    if not await _owner_only(interaction):
-        return
-    rows = await _billing(interaction).list_whitelisted()
-    if not rows:
-        await cards.reply(interaction, "No servers are whitelisted.", title="Whitelist", ephemeral=True)
-        return
-    lines = []
-    for row in rows:
-        note = f" — {discord.utils.escape_markdown(row['whitelist_note'])}" if row.get("whitelist_note") else ""
-        lines.append(f"⭐ {_server_label(interaction, int(row['guild_id']))}{note}")
-    await cards.reply(interaction, "\n".join(lines), title=f"Whitelist · {len(rows)}", ephemeral=True)
 
 
 async def setup(bot: commands.Bot) -> None:

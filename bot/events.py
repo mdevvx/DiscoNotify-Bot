@@ -13,6 +13,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from bot import onboarding
 from config import constants
 from ui import cards
 from utils.logger import get_logger
@@ -36,6 +37,8 @@ def register_events(bot: "PulseNotifyBot") -> None:
         logger.info("Joined guild: %s (%s)", guild.name, guild.id)
         # Ensures a row (and warm cache entry) exists for this guild immediately.
         await bot.guilds_repo.is_enabled(guild.id)
+        # Commands available right away, trial started, intro posted.
+        await onboarding.on_join(bot, guild)
 
     @bot.event
     async def on_guild_remove(guild: discord.Guild) -> None:

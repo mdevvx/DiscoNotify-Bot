@@ -10,7 +10,8 @@ import pytest
 
 from billing.access import Access, AccessReason
 from bot.client import PulseNotifyCommandTree
-from commands.admin.billing import subscribe, whitelist_add, whitelist_list, whitelist_remove
+from commands.admin.billing import subscribe
+from commands.admin.whitelist import WhitelistCog
 from tests.unit.fake_interactions import FakeFollowup, FakeResponse, FakeUser
 from tests.unit.fakes import FakeDatabase
 from tests.unit.test_scheduler import _make_scheduler
@@ -166,7 +167,7 @@ async def test_a_server_without_access_is_told_to_subscribe() -> None:
 
 
 @pytest.mark.parametrize(
-    "command", ["pulsenotify subscribe", "pulsenotify status", "pulsenotify help", "pulsenotify toggle", "pulsenotify global whitelist-add"]
+    "command", ["pulsenotify subscribe", "pulsenotify status", "pulsenotify help", "pulsenotify toggle", "pulsenotify global status"]
 )
 async def test_billing_and_owner_commands_always_work(command: str) -> None:
     allowed, _ = await _check(FakeBot(allowed=False, enabled=False), command)
@@ -206,33 +207,71 @@ async def test_subscribe_shows_card_and_crypto_buttons() -> None:
     assert "never charged" in interaction.response.messages[0]["content"]
 
 
-@pytest.mark.parametrize("command", [whitelist_add, whitelist_remove, whitelist_list])
-async def test_whitelist_commands_refuse_anyone_but_the_owner(command: Any) -> None:
+# ── !whitelist (owner-only text command) ────────────────────────────────
+
+
+class FakeCtx:
+    """Just what WhitelistCog uses from commands.Context."""
+
+    def __init__(self, guild_id: int = 1) -> None:
+        self.guild = type("G", (), {"id": guild_id})()
+        self.author = FakeUser(_OWNER)
+        self.clean_prefix = "!"
+        self.sent: List[str] = []
+
+    async def send(self, *, view: Any = None) -> None:
+        from ui.cards import plain_text
+
+        self.sent.append(plain_text(view))
+
+
+async def test_whitelist_is_a_text_command_not_in_the_slash_menu() -> None:
+    """Discord can't hide a slash subcommand from individual users, so the
+    owner's whitelist must not be one."""
+    from commands.pulsenotify_group import pulsenotify_group
+    from discord import app_commands
+
+    import commands.admin.billing  # noqa: F401  (registers /pulsenotify subscribe)
+
+    names = [c.qualified_name for c in pulsenotify_group.walk_commands() if isinstance(c, app_commands.Command)]
+    assert not any("whitelist" in name for name in names)
+
+
+async def test_whitelist_commands_are_owner_only() -> None:
+    cog = WhitelistCog(FakeBot())  # type: ignore[arg-type]
+    for command in (cog.whitelist, cog.add, cog.remove, cog.list_):
+        assert any("is_owner" in getattr(check, "__qualname__", "") for check in command.checks)
+
+
+async def test_owner_can_whitelist_this_server_or_another_by_id() -> None:
     bot = FakeBot()
-    interaction = FakeInteraction(bot, user_id=5)
+    cog = WhitelistCog(bot)  # type: ignore[arg-type]
 
-    await command.callback(interaction)  # type: ignore[arg-type]
+    here = FakeCtx(guild_id=1)
+    await cog.add.callback(cog, here, None, note=None)  # type: ignore[arg-type]
+    other = FakeCtx()
+    await cog.add.callback(cog, other, "1466009969806545009", note="friend")  # type: ignore[arg-type]
+    listing = FakeCtx()
+    await cog.list_.callback(cog, listing)  # type: ignore[arg-type]
 
-    assert "Only the bot owner" in interaction.response.messages[0]["content"]
-    assert bot.billing.whitelisted == []
+    assert bot.billing.whitelisted == [1, 1466009969806545009]
+    assert "1466009969806545009" in listing.sent[0]
 
 
-async def test_owner_can_whitelist_a_server_by_id_and_list_it() -> None:
+async def test_whitelist_add_without_an_id_treats_the_words_as_the_note() -> None:
     bot = FakeBot()
+    cog = WhitelistCog(bot)  # type: ignore[arg-type]
 
-    await whitelist_add.callback(FakeInteraction(bot, user_id=_OWNER), "1466009969806545009", "friend")  # type: ignore[arg-type]
-    listing = FakeInteraction(bot, user_id=_OWNER)
-    await whitelist_list.callback(listing)  # type: ignore[arg-type]
+    await cog.add.callback(cog, FakeCtx(guild_id=7), "my", note="own server")  # type: ignore[arg-type]
 
-    assert bot.billing.whitelisted == [1466009969806545009]
-    assert "1466009969806545009" in listing.response.messages[0]["content"]
+    assert bot.billing.whitelisted == [7]
 
 
-async def test_whitelist_rejects_something_that_is_not_a_server_id() -> None:
+async def test_whitelist_remove_reports_a_server_that_was_not_whitelisted() -> None:
     bot = FakeBot()
-    interaction = FakeInteraction(bot, user_id=_OWNER)
+    cog = WhitelistCog(bot)  # type: ignore[arg-type]
+    ctx = FakeCtx()
 
-    await whitelist_add.callback(interaction, "my server", None)  # type: ignore[arg-type]
+    await cog.remove.callback(cog, ctx, "123")  # type: ignore[arg-type]
 
-    assert "not a server ID" in interaction.response.messages[0]["content"]
-    assert bot.billing.whitelisted == []
+    assert "isn't whitelisted" in ctx.sent[0]
