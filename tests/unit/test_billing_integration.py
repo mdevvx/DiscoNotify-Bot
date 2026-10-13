@@ -275,3 +275,16 @@ async def test_whitelist_remove_reports_a_server_that_was_not_whitelisted() -> N
     await cog.remove.callback(cog, ctx, "123")  # type: ignore[arg-type]
 
     assert "isn't whitelisted" in ctx.sent[0]
+
+
+async def test_a_paddle_rejection_is_shown_by_name_not_as_a_generic_error() -> None:
+    """Real case 2026-10-13: a PaddleError showed only "Something went wrong"."""
+    from billing.paddle import PaddleError
+    from commands.admin.billing import _report_error
+
+    interaction = FakeInteraction(FakeBot())
+    await _report_error(interaction, PaddleError("Paddle rejected the API key (403): not authorized to read price"))  # type: ignore[arg-type]
+
+    text = interaction.response.messages[0]["content"]
+    assert "not authorized to read price" in text
+    assert "Something went wrong" not in text

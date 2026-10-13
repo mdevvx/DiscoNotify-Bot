@@ -26,6 +26,17 @@ LIVE_URL = "https://api.paddle.com"
 SANDBOX_URL = "https://sandbox-api.paddle.com"
 
 
+def is_sandbox_key(api_key: str, configured_sandbox: bool) -> bool:
+    """Paddle keys say which environment they belong to (`pdl_sdbx_apikey_…`
+    / `pdl_live_apikey_…`); a key sent to the other environment is always
+    rejected. Trust the key; fall back to PADDLE_SANDBOX for older keys."""
+    if api_key.startswith("pdl_sdbx_"):
+        return True
+    if api_key.startswith("pdl_live_"):
+        return False
+    return configured_sandbox
+
+
 class PaddleError(Exception):
     """A Paddle API call failed in a way worth showing the user."""
 

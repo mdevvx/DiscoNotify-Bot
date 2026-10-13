@@ -64,12 +64,31 @@ class NowPaymentsClient:
             },
         )
 
+    async def min_amount_usd(self, pay_currency: str) -> float:
+        """The smallest payment NOWPayments accepts in this coin right now,
+        in USD. It moves with network fees — e.g. on 2026-10-13 USDT on
+        TRON needed ~$11.18 and BTC ~$21.98, while USDT on BNB Chain, LTC,
+        SOL and ETH needed under $1."""
+        data = await self._request(
+            "GET",
+            "/min-amount",
+            params={"currency_from": pay_currency, "currency_to": pay_currency, "fiat_equivalent": "usd"},
+        )
+        return float(data.get("fiat_equivalent") or 0)
+
     async def get_payment(self, payment_id: str) -> Dict[str, Any]:
         return await self._request("GET", f"/payment/{payment_id}")
 
-    async def _request(self, method: str, path: str, *, json: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         try:
-            response = await self._http.request(method, path, json=json)
+            response = await self._http.request(method, path, json=json, params=params)
         except httpx.HTTPError as exc:
             raise TransientPlatformError(f"NOWPayments request failed: {path}: {exc}") from exc
 

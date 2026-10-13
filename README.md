@@ -164,14 +164,15 @@ Per-server subscriptions (**`BILLING_PRICE_USD`** a month, $2.99 by default) liv
 **2. Paddle (cards)** — a *merchant of record*: it charges the customer, handles VAT/sales tax, and pays you out. Fees ≈ 5% + $0.50 per payment.
 1. Sign up at paddle.com. Paddle verifies sellers and needs a live website with your pricing, Terms of Service, Privacy Policy and Refund Policy (a simple site on GitHub Pages/Netlify is fine). Test first in the sandbox (sandbox-login.paddle.com).
 2. **Catalog → Products → New product** ("PulseNotify"), then add a **price**: recurring **monthly**, USD, no trial (the bot sets the amount from `BILLING_PRICE_USD` and adds trials itself — this price provides the product, billing cycle and tax settings). Copy the price ID (`pri_…`) → `PADDLE_PRICE_ID`.
-3. **Developer tools → Authentication → API keys** → new key → `PADDLE_API_KEY`. Create a **client-side token** too, for the checkout page.
+3. **Developer tools → Authentication → API keys** → new key → `PADDLE_API_KEY`. Give it these permissions: **Prices** read, **Transactions** read + write, **Subscriptions** read, **Customers** read, **Customer portal sessions** write (without "read price" every card checkout fails with "not authorized to read price"). The key's prefix decides the environment — `pdl_sdbx_…` sandbox, `pdl_live_…` live — and the bot follows it even if `PADDLE_SANDBOX` says otherwise (logging a warning). `PADDLE_PRICE_ID` must come from the same environment as the key. Create a **client-side token** too, for the checkout page.
 4. Host [website/pay.html](website/pay.html) on your site, paste the client-side token into it, then **Checkout → Checkout settings → Default payment link** = that page's URL (Paddle approves the domain). The bot's checkout links open this page, and Paddle.js opens the checkout automatically.
 5. Sandbox: set `PADDLE_SANDBOX=true` with sandbox keys and uncomment the sandbox line in `pay.html`.
 
 **3. NOWPayments (crypto)**
 1. Sign up at nowpayments.io, add your **payout wallet(s)** (where received crypto is sent).
 2. **Settings → Payments → API keys** → generate → `NOWPAYMENTS_API_KEY`. (Sandbox: account at account-sandbox.nowpayments.io and `NOWPAYMENTS_SANDBOX=true`.)
-3. Offered coins: USDT on TRON and BNB Chain (lowest fees), LTC, SOL, BTC, ETH — `CRYPTO_COINS` in `billing/service.py`.
+3. Offered coins: USDT on BNB Chain, LTC, SOL, ETH, USDT on TRON, BTC — `CRYPTO_COINS` in `billing/service.py`. Each coin has a **minimum payment** that moves with network fees (2026-10-13: under $1 for USDT-BNB/LTC/SOL/ETH, ~$11.18 for USDT on TRON, ~$21.98 for BTC). The bot checks it live before creating a payment; a plan below it gets a message suggesting a longer plan or a lower-minimum coin instead of a failed payment.
+4. Use a **live** API key: NOWPayments' sandbox isn't maintained and rejects live keys (`NOWPAYMENTS_SANDBOX=false`).
 
 **4. Turn it on:** `BILLING_ENABLED=true`, restart, `!sync`. Whitelist your own servers first with `!whitelist add` (in each server, or `!whitelist add <server_id>`).
 

@@ -19,6 +19,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from billing.access import Access, describe_access, parse_time
+from billing.paddle import PaddleError
 from billing.service import CRYPTO_COINS, CRYPTO_PLANS, BillingService, BillingUnavailable, format_usd
 from commands.pulsenotify_group import pulsenotify_group
 from ui import cards
@@ -76,6 +77,9 @@ class _OwnedView(discord.ui.LayoutView):
 async def _report_error(interaction: discord.Interaction, error: Exception) -> None:
     if isinstance(error, (BillingUnavailable, PlatformError)):
         message = str(error)
+    elif isinstance(error, PaddleError):
+        logger.error("Paddle rejected a request in guild %s: %s", interaction.guild_id, error)
+        message = f"Card payments aren't working right now — {error}. (Bot owner: check PADDLE_API_KEY.)"
     else:
         # The error type and a reference ID go in the reply too, so a failure
         # can be traced even when the bot's log isn't at hand.

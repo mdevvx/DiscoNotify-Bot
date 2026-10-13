@@ -19,7 +19,7 @@ from discord.ext import commands
 
 from billing.access import Access
 from billing.nowpayments import NowPaymentsClient
-from billing.paddle import PaddleClient
+from billing.paddle import PaddleClient, is_sandbox_key
 from billing.repository import BillingRepository
 from billing.service import BillingService
 from bot.events import handle_app_command_error, register_events
@@ -132,7 +132,7 @@ class PulseNotifyBot(commands.Bot):
             price_usd=settings.billing_price_usd,
             trial_days=settings.billing_trial_days,
             grace_days=settings.billing_grace_days,
-            paddle=PaddleClient(settings.paddle_api_key, sandbox=settings.paddle_sandbox) if settings.paddle_api_key else None,
+            paddle=self._paddle_client(settings),
             paddle_price_id=settings.paddle_price_id,
             nowpayments=(
                 NowPaymentsClient(settings.nowpayments_api_key, sandbox=settings.nowpayments_sandbox)
@@ -255,6 +255,20 @@ class PulseNotifyBot(commands.Bot):
 
         self.owner_ids = owner_ids
         logger.info("Resolved %d bot owner(s).", len(owner_ids))
+
+    @staticmethod
+    def _paddle_client(settings: Settings) -> Optional[PaddleClient]:
+        if not settings.paddle_api_key:
+            return None
+        sandbox = is_sandbox_key(settings.paddle_api_key, settings.paddle_sandbox)
+        if sandbox != settings.paddle_sandbox:
+            logger.warning(
+                "PADDLE_SANDBOX=%s but PADDLE_API_KEY is a %s key — using %s.",
+                str(settings.paddle_sandbox).lower(),
+                "sandbox" if sandbox else "live",
+                "sandbox" if sandbox else "live",
+            )
+        return PaddleClient(settings.paddle_api_key, sandbox=sandbox)
 
     async def _monitorable_guilds(self, guild_ids: Set[int]) -> Set[int]:
         enabled = {guild_id for guild_id in guild_ids if await self.guilds_repo.is_enabled(guild_id)}

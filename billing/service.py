@@ -34,16 +34,20 @@ logger = get_logger(__name__)
 
 DAYS_PER_MONTH = 30
 CRYPTO_PLANS: Tuple[int, ...] = (3, 6, 12)
-# NOWPayments currency codes → what the server admin sees. Low-fee
-# networks first; all comfortably above coin minimums at $3+.
+# NOWPayments currency codes → what the server admin sees, lowest minimum
+# payment first. Minimums move with network fees and are checked live
+# before every payment (USDT on TRON and BTC can need $10–20+).
 CRYPTO_COINS: Dict[str, str] = {
-    "usdttrc20": "USDT (TRON · TRC20)",
     "usdtbsc": "USDT (BNB Chain · BEP20)",
     "ltc": "Litecoin (LTC)",
     "sol": "Solana (SOL)",
-    "btc": "Bitcoin (BTC)",
     "eth": "Ethereum (ETH)",
+    "usdttrc20": "USDT (TRON · TRC20)",
+    "btc": "Bitcoin (BTC)",
 }
+# NOWPayments compares the minimum against the crypto amount after fees,
+# so the plan must clear it with a little room.
+_MINIMUM_MARGIN = 1.05
 
 # A card checkout nobody completed, or a crypto payment never sent, stops
 # being checked after this long.
@@ -204,6 +208,9 @@ class BillingService:
         if months not in CRYPTO_PLANS or coin not in CRYPTO_COINS:
             raise ValueError("Unsupported plan or coin.")
         amount = round(months * self.price_usd, 2)
+        minimum = await self._nowpayments.min_amount_usd(coin) * _MINIMUM_MARGIN
+        if amount < minimum:
+            raise BillingUnavailable(self._below_minimum_message(coin, minimum))
         payment = await self._nowpayments.create_payment(
             price_usd=amount,
             pay_currency=coin,
@@ -225,6 +232,15 @@ class BillingService:
             },
         )
         return payment
+
+    def _below_minimum_message(self, coin: str, minimum: float) -> str:
+        label = CRYPTO_COINS[coin]
+        longer = [plan for plan in CRYPTO_PLANS if plan * self.price_usd >= minimum]
+        options = []
+        if longer:
+            options.append(f"choose the {longer[0]}-month plan")
+        options.append("pay with USDT (BNB Chain) or Litecoin, which have much lower minimums")
+        return f"{label} payments need at least {format_usd(round(minimum, 2))} right now — " + ", or ".join(options) + "."
 
     async def remaining_trial_days(self, guild_id: int) -> int:
         """Whole days left in the server's free trial (rounded up), so a card

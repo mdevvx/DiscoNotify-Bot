@@ -14,7 +14,7 @@ import pytest
 
 from billing.access import Access, AccessReason, describe_access, evaluate
 from billing.nowpayments import NowPaymentsClient
-from billing.paddle import PaddleClient
+from billing.paddle import PaddleClient, is_sandbox_key
 from billing.repository import BillingRepository
 from billing.service import BillingService, BillingUnavailable, format_usd
 from tests.unit.fakes import FakeDatabase
@@ -81,6 +81,10 @@ class FakePaddle:
 class FakeNowPayments:
     def __init__(self) -> None:
         self.payments: Dict[str, Dict[str, Any]] = {}
+        self.minimums: Dict[str, float] = {}
+
+    async def min_amount_usd(self, pay_currency: str) -> float:
+        return self.minimums.get(pay_currency, 0.5)
 
     async def create_payment(self, *, price_usd: float, pay_currency: str, order_id: str, description: str):
         payment_id = str(5000 + len(self.payments))
@@ -482,3 +486,73 @@ async def test_paddle_checkout_charges_the_configured_amount_not_the_catalog_one
     assert price["unit_price"] == {"amount": "300", "currency_code": "USD"}
     assert price["billing_cycle"] == {"interval": "month", "frequency": 1}
     assert "trial_period" not in price
+
+
+# ── coin minimums (live from NOWPayments) ───────────────────────────────
+
+
+async def test_a_plan_below_the_coins_minimum_is_refused_with_advice(db: FakeDatabase, clock: Clock) -> None:
+    """Real case 2026-10-13: USDT on TRON needed $11.18, so the 3-month plan
+    ($8.97) was rejected by NOWPayments with "amount … is less than minimal"."""
+    nowpayments = FakeNowPayments()
+    nowpayments.minimums["usdttrc20"] = 11.18
+    service = _service(db, clock, nowpayments=nowpayments)
+    await service.access(_GUILD)
+
+    with pytest.raises(BillingUnavailable) as exc_info:
+        await service.start_crypto_payment(_GUILD, months=3, coin="usdttrc20", user_id=7, channel_id=None)
+
+    message = str(exc_info.value)
+    assert "USDT (TRON · TRC20)" in message and "$11.74" in message  # minimum + 5% margin
+    assert "6-month plan" in message
+    assert "USDT (BNB Chain)" in message
+    assert nowpayments.payments == {}  # nothing created at NOWPayments
+    assert db.tables["pulsenotify_payments"].rows == []
+
+
+async def test_a_plan_above_the_minimum_goes_through(db: FakeDatabase, clock: Clock) -> None:
+    nowpayments = FakeNowPayments()
+    nowpayments.minimums["usdttrc20"] = 11.18
+    service = _service(db, clock, nowpayments=nowpayments)
+    await service.access(_GUILD)
+
+    payment = await service.start_crypto_payment(_GUILD, months=6, coin="usdttrc20", user_id=7, channel_id=None)
+
+    assert payment["pay_amount"] == 17.94
+
+
+async def test_when_no_plan_is_big_enough_only_another_coin_is_suggested(db: FakeDatabase, clock: Clock) -> None:
+    nowpayments = FakeNowPayments()
+    nowpayments.minimums["btc"] = 60.0
+    service = _service(db, clock, nowpayments=nowpayments)
+    await service.access(_GUILD)
+
+    with pytest.raises(BillingUnavailable) as exc_info:
+        await service.start_crypto_payment(_GUILD, months=12, coin="btc", user_id=7, channel_id=None)
+
+    assert "month plan" not in str(exc_info.value)
+    assert "Litecoin" in str(exc_info.value)
+
+
+async def test_nowpayments_min_amount_request_shape() -> None:
+    seen: Dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(dict(request.url.params))
+        return httpx.Response(200, json={"currency_from": "usdttrc20", "min_amount": 11.16, "fiat_equivalent": 11.18})
+
+    client = NowPaymentsClient("np-key", transport=httpx.MockTransport(handler))
+
+    assert await client.min_amount_usd("usdttrc20") == 11.18
+    assert seen == {"currency_from": "usdttrc20", "currency_to": "usdttrc20", "fiat_equivalent": "usd"}
+
+
+# ── Paddle environment from the key ─────────────────────────────────────
+
+
+def test_paddle_environment_comes_from_the_key() -> None:
+    """Real case 2026-10-13: a live key with PADDLE_SANDBOX=true was sent to
+    the sandbox and rejected."""
+    assert is_sandbox_key("pdl_live_apikey_abc", configured_sandbox=True) is False
+    assert is_sandbox_key("pdl_sdbx_apikey_abc", configured_sandbox=False) is True
+    assert is_sandbox_key("old-style-key", configured_sandbox=True) is True
