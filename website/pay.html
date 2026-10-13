@@ -1,0 +1,44 @@
+<!doctype html>
+<!--
+  PulseNotify checkout page — Paddle's "default payment link".
+
+  The bot creates a Paddle transaction and sends the server admin to
+  <this page>?_ptxn=txn_…; Paddle.js sees the _ptxn parameter and opens the
+  checkout for that transaction automatically.
+
+  Setup (README → "Payments setup"):
+    1. Host this file anywhere with HTTPS (GitHub Pages, Netlify, …).
+    2. Paddle dashboard → Developer tools → Authentication → create a
+       *client-side token*, and paste it below.
+    3. Paddle dashboard → Checkout → Checkout settings → set the default
+       payment link to this page's URL (Paddle approves the domain).
+  For sandbox testing, uncomment the Environment line and use a sandbox
+  client-side token.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PulseNotify — Subscribe</title>
+  <style>
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center;
+           font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: #f4f5fb; color: #1f2330; }
+    main { max-width: 28rem; padding: 2rem; text-align: center; }
+    h1 { font-size: 1.4rem; margin: 0 0 .5rem; }
+    p { line-height: 1.5; color: #4a5068; }
+  </style>
+  <script src="https://cdn.paddle.com/paddle/v2/paddle.js"></script>
+  <script>
+    // Paddle.Environment.set("sandbox");
+    Paddle.Initialize({ token: "PASTE_YOUR_CLIENT_SIDE_TOKEN_HERE" });
+  </script>
+</head>
+<body>
+  <main>
+    <h1>PulseNotify — monthly subscription per server</h1>
+    <p>The secure Paddle checkout opens automatically. If it doesn't, go back to Discord and run
+       <code>/pulsenotify subscribe</code> again.</p>
+    <p>Once paid, your server activates within about 2 minutes and the bot posts a confirmation.</p>
+  </main>
+</body>
+</html>

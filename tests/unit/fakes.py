@@ -22,6 +22,10 @@ from supabase import PostgrestAPIError
 _DefaultValue = Union[Any, Callable[[], Any]]
 
 
+def _now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
 class _FakeResult:
     def __init__(self, data: List[Dict[str, Any]]) -> None:
         self.data = data
@@ -167,6 +171,14 @@ class FakeDatabase:
             "pulsenotify_alert_configurations": FakeTable(
                 unique_on=[("id",), ("account_id", "event_type")],
                 defaults={"enabled": True, "mention_role_id": None, "embed_enabled": True, "custom_message": None},
+                has_generated_id=True,
+            ),
+            "pulsenotify_billing": FakeTable(
+                unique_on=[("guild_id",)], defaults={"whitelisted": False, "paid_until": None}
+            ),
+            "pulsenotify_payments": FakeTable(
+                unique_on=[("provider", "external_id")],
+                defaults={"status": "pending", "metadata": dict, "created_at": _now_iso},
                 has_generated_id=True,
             ),
             "pulsenotify_platform_health": FakeTable(

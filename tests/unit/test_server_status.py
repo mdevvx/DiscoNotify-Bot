@@ -9,6 +9,8 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 
+from billing.repository import BillingRepository
+from billing.service import BillingService
 from commands.admin.help import help_command
 from commands.admin.status import format_account_line, global_status, status
 from database.repositories.accounts import PlatformAccountRepository
@@ -46,6 +48,7 @@ class FakeBot:
         self.channels_repo = NotificationChannelRepository(db)  # type: ignore[arg-type]
         self.alert_configs_repo = AlertConfigurationRepository(db)  # type: ignore[arg-type]
         self.monitoring = FakeMonitoring()
+        self.billing = BillingService(BillingRepository(db), enabled=False)  # type: ignore[arg-type]
         self.latency = 0.05
         self.guilds: List[Any] = [object(), object()]
         self.command_prefix = "!"

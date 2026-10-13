@@ -20,7 +20,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from commands.pulsenotify_group import pulsenotify_group
+from billing.access import describe_access
+from commands.pulsenotify_group import global_group, pulsenotify_group
 from config import constants
 from database.repositories.events import EventRepository
 from database.repositories.live_states import LiveStateRepository
@@ -29,10 +30,6 @@ from ui import cards
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
-
-global_group = app_commands.Group(
-    name="global", description="PulseNotify across every server.", parent=pulsenotify_group
-)
 
 _HEALTH_ICONS = {"healthy": "🟢", "degraded": "🟡", "error": "🔴", "disabled": "⚪"}
 _ACCOUNT_ICONS = {"active": "🟢", "error": "🟡", "invalid": "🔴"}
@@ -70,6 +67,12 @@ async def status(interaction: discord.Interaction) -> None:
     channel_ids = {channel["channel_id"] for rows in channels_by_account.values() for channel in rows}
     state = "🟢 Monitoring **on**" if enabled else "🔴 Monitoring **paused** — `/pulsenotify toggle` to resume"
     overview = f"{state} · **{len(accounts)}** account(s) · **{len(channel_ids)}** alert channel(s)"
+    billing = bot.billing  # type: ignore[attr-defined]
+    subscription = None
+    if billing.enabled:
+        subscription = describe_access(
+            await billing.access(guild.id), await billing.billing_row(guild.id), price_label=billing.price_label
+        )
 
     fields = []
     for platform in _ordered_platforms(accounts):
@@ -90,7 +93,7 @@ async def status(interaction: discord.Interaction) -> None:
         label = _PLATFORM_LABELS.get(platform, platform.title())
         fields.append((f"{label} · {len(rows)}", "\n".join(lines)))
 
-    body = [overview]
+    body = [overview] + ([subscription] if subscription else [])
     if not accounts:
         body.append("No accounts monitored yet — add one with `/pulsenotify account-add`.")
 

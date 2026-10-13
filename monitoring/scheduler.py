@@ -12,7 +12,7 @@ without a bot restart.
 from __future__ import annotations
 
 import asyncio
-from typing import Awaitable, Callable, Dict
+from typing import Awaitable, Callable, Dict, Optional, Set
 
 from database.repositories.accounts import PlatformAccountRepository
 from database.repositories.live_states import LiveStateRepository
@@ -39,8 +39,13 @@ class PlatformScheduler:
         retry_policy: RetryPolicy,
         health_tracker: PlatformHealthTracker,
         submit_event: Callable[[NormalizedEvent], Awaitable[None]],
+        guild_filter: Optional[Callable[[Set[int]], Awaitable[Set[int]]]] = None,
     ) -> None:
         self._adapter = adapter
+        # Which servers may be monitored right now (not paused with
+        # /pulsenotify toggle, and with billing access) — see
+        # MonitoringManager.guild_filter. None = every server.
+        self._guild_filter = guild_filter
         self._default_poll_interval = poll_interval_seconds
         self._poll_interval = poll_interval_seconds
         self._account_repo = account_repo
@@ -128,6 +133,14 @@ class PlatformScheduler:
 
     async def _sync_workers(self) -> None:
         rows = await self._account_repo.list_enabled_by_platform(self._adapter.platform)
+        if self._guild_filter is not None and rows:
+            try:
+                allowed = await self._guild_filter({int(row["guild_id"]) for row in rows})
+                rows = [row for row in rows if int(row["guild_id"]) in allowed]
+            except Exception:
+                # A failing check must not stop monitoring for servers that
+                # are entitled to it — keep everyone this cycle.
+                logger.warning("Server filter failed for %s; polling every account this cycle.", self._adapter.platform, exc_info=True)
         current_ids = {row["id"] for row in rows}
 
         for stale_id in set(self._workers) - current_ids:

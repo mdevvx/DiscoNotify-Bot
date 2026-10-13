@@ -1,0 +1,113 @@
+"""Database access for billing (migration 0006): one `pulsenotify_billing`
+row per server, and a `pulsenotify_payments` ledger of every checkout the
+bot started."""
+
+from __future__ import annotations
+
+import datetime
+from typing import Any, Dict, Iterable, List, Optional
+
+from database.client import Database, is_unique_violation
+
+_BILLING = "pulsenotify_billing"
+_PAYMENTS = "pulsenotify_payments"
+
+
+def _iso(moment: datetime.datetime) -> str:
+    return moment.isoformat()
+
+
+class BillingRepository:
+    def __init__(self, database: Database) -> None:
+        self._db = database
+
+    # ── billing rows ────────────────────────────────────────────────────
+
+    async def get(self, guild_id: int) -> Optional[Dict[str, Any]]:
+        result = await self._db.client.table(_BILLING).select("*").eq("guild_id", guild_id).execute()
+        return result.data[0] if result.data else None
+
+    async def list_for_guilds(self, guild_ids: Iterable[int]) -> Dict[int, Dict[str, Any]]:
+        ids = list(set(guild_ids))
+        if not ids:
+            return {}
+        result = await self._db.client.table(_BILLING).select("*").in_("guild_id", ids).execute()
+        return {int(row["guild_id"]): row for row in result.data}
+
+    async def get_or_create(self, guild_id: int, *, trial_ends_at: datetime.datetime) -> Dict[str, Any]:
+        """The server's row, starting its trial if this is the first time
+        it's been seen with billing on. The guild row must already exist
+        (pulsenotify_guilds is the foreign key)."""
+        existing = await self.get(guild_id)
+        if existing is not None:
+            return existing
+        try:
+            inserted = await (
+                self._db.client.table(_BILLING)
+                .insert({"guild_id": guild_id, "trial_ends_at": _iso(trial_ends_at)})
+                .execute()
+            )
+            return inserted.data[0]
+        except Exception as exc:
+            if not is_unique_violation(exc):
+                raise
+            row = await self.get(guild_id)
+            assert row is not None
+            return row
+
+    async def update(self, guild_id: int, changes: Dict[str, Any]) -> None:
+        payload = {key: _iso(value) if isinstance(value, datetime.datetime) else value for key, value in changes.items()}
+        await self._db.client.table(_BILLING).update(payload).eq("guild_id", guild_id).execute()
+
+    async def list_whitelisted(self) -> List[Dict[str, Any]]:
+        result = await self._db.client.table(_BILLING).select("*").eq("whitelisted", True).execute()
+        return result.data
+
+    async def list_card_subscriptions(self) -> List[Dict[str, Any]]:
+        """Rows with a Paddle subscription that may still change state."""
+        result = await self._db.client.table(_BILLING).select("*").execute()
+        return [row for row in result.data if row.get("card_subscription_id") and row.get("card_status") != "canceled"]
+
+    # ── payments ledger ─────────────────────────────────────────────────
+
+    async def create_payment(
+        self,
+        *,
+        guild_id: int,
+        provider: str,
+        external_id: str,
+        months: int,
+        amount_usd: float,
+        requested_by: int,
+        channel_id: Optional[int],
+        checkout_url: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        result = await (
+            self._db.client.table(_PAYMENTS)
+            .insert(
+                {
+                    "guild_id": guild_id,
+                    "provider": provider,
+                    "external_id": external_id,
+                    "months": months,
+                    "amount_usd": amount_usd,
+                    "requested_by": requested_by,
+                    "channel_id": channel_id,
+                    "checkout_url": checkout_url,
+                    "metadata": metadata or {},
+                }
+            )
+            .execute()
+        )
+        return result.data[0]
+
+    async def list_pending(self) -> List[Dict[str, Any]]:
+        result = await self._db.client.table(_PAYMENTS).select("*").eq("status", "pending").execute()
+        return result.data
+
+    async def set_payment_status(self, payment_id: str, status: str, *, paid_at: Optional[datetime.datetime] = None) -> None:
+        changes: Dict[str, Any] = {"status": status}
+        if paid_at is not None:
+            changes["paid_at"] = _iso(paid_at)
+        await self._db.client.table(_PAYMENTS).update(changes).eq("id", payment_id).execute()

@@ -103,8 +103,10 @@ Every slash command lives under one top-level `/pulsenotify` group (`commands/pu
 |---|---|---|
 | `/pulsenotify status` | This server only: whether monitoring is on, and for every monitored account — the account (linked), the channel its alerts post to, how many alert types are on, who gets pinged, whether it's live, when it was last checked and when its last alert went out, plus each platform's check interval. Works while the server is paused | Anyone |
 | `/pulsenotify global status` | Bot-wide health: uptime, latency, server count, database connection, per-platform monitoring health and request counts. Private reply, hidden from `/pulsenotify help` for everyone else | Bot owner only (`DISCORD_OWNER_IDS` or the Discord application's owner) |
+| `/pulsenotify subscribe` | Subscribe this server: shows its trial/subscription state, **Card — $2.99/month** (Paddle, renews monthly; subscribing during the free trial saves the card and charges nothing until the trial ends), **Crypto — 3/6/12 months** (NOWPayments, prepaid), and **Manage card subscription** (Paddle's billing portal: update the card or cancel). Only shown as "free" while billing is off | Manage Server |
+| `/pulsenotify global whitelist-add [server_id] [note]` · `whitelist-remove [server_id]` · `whitelist-list` | Let a server use everything without paying, undo that, or list whitelisted servers. `server_id` defaults to the current server | Bot owner only |
 | `/pulsenotify help` | Lists every command and what it does — built by introspecting the command group itself, so it can't drift out of sync with what's actually registered | Anyone |
-| `/pulsenotify toggle state:<on\|off>` | Enable/disable PulseNotify for this server. Everything else is blocked while disabled — `toggle` itself always still works. | Manage Server |
+| `/pulsenotify toggle state:<on\|off>` | Enable/disable PulseNotify for this server. Off pauses monitoring (its accounts aren't polled and no alerts go out — before 2026-10-13 it only blocked commands) and blocks other commands; `toggle`, `status`, `help` and `subscribe` still work | Manage Server |
 | `/pulsenotify account-add platform` | Start monitoring a YouTube/Kick/Instagram account. Opens a form: the account (handle/URL/ID), a channel picker for where alerts post, and an optional role to mention. Refuses a channel the bot can't post in | Manage Server |
 | `/pulsenotify account-remove account` | Stop monitoring an account (autocompletes from this server's configured accounts). Asks for confirmation first — Remove/Cancel buttons only the person who ran it can press, expiring after 60s with nothing deleted | Manage Server |
 | `/pulsenotify account-list` | List accounts monitored in this server, with status | Anyone |
@@ -141,6 +143,35 @@ Every message the bot sends — alerts and command replies alike — is a Compon
 - **Command replies** (`ui/cards.py`): one card helper used for every confirmation, list, status and error, so they look consistent. Replies never ping by default — a custom message preview or account-info showing "@everyone" displays it without triggering it.
 - **Mention safety:** unlike legacy embeds, text inside a V2 message *does* ping. Only the alert's top line is meant to carry a mention; every piece of platform-sourced text (titles, descriptions, channel names) is mention-escaped before it goes anywhere in the message, so a video titled "@everyone" can't ping a server.
 - A V2 message gets no automatic link preview from Discord, which is why every platform's alert is built as a card from the event's own data.
+
+## Payments setup
+
+Per-server subscriptions (**`BILLING_PRICE_USD`** a month, $2.99 by default) live in `billing/` with the commands in `commands/admin/billing.py`. **Nothing is enforced until `BILLING_ENABLED=true`** — until then every server keeps full access and no trial clock starts.
+
+**How it works**
+- **Price:** set once with `BILLING_PRICE_USD` (e.g. `2.99`, `4.99`) — card checkouts, crypto amounts (3/6/12 × price) and every price shown in Discord follow it; restart to apply. Card checkouts carry the price themselves, so Paddle's catalog price never needs editing. Existing card subscribers keep the price they signed up at (Paddle never changes a running subscription's price).
+- **Trial:** a server's 7-day free trial starts the first time the bot sees it with billing on. Afterwards it needs an active subscription (or the bot owner's whitelist).
+- **Card (Paddle):** $2.99/month, renews by itself. Subscribing *during* the trial saves the card and Paddle charges nothing until the trial ends (the checkout carries a trial for exactly the remaining days). Cancelling in the billing portal during the trial → never charged; after paying → the server stays active until the end of the paid month, with no further charges.
+- **Crypto (NOWPayments):** crypto can't auto-debit, so it's prepaid for 3, 6 or 12 months ($8.97/$17.94/$35.88) — that also clears the coins' minimum payment (~$2–5). The admin picks a coin in Discord and gets the exact amount and deposit address; months stack.
+- **Grace:** 3 days after paid time runs out (covers a renewal Paddle retries), then monitoring pauses. Settings are never deleted; monitoring resumes the moment the server pays.
+- **Confirmation:** payments are confirmed by polling Paddle/NOWPayments every 60s (no webhook URL needed); the bot posts "✅ Payment received" in the channel `/pulsenotify subscribe` was used in.
+- Servers without access can still use `/pulsenotify subscribe`, `status`, `help` and `toggle`; everything else explains how to subscribe.
+
+**1. Database:** run [database/migrations/0006_billing.sql](database/migrations/0006_billing.sql) in the Supabase SQL editor.
+
+**2. Paddle (cards)** — a *merchant of record*: it charges the customer, handles VAT/sales tax, and pays you out. Fees ≈ 5% + $0.50 per payment.
+1. Sign up at paddle.com. Paddle verifies sellers and needs a live website with your pricing, Terms of Service, Privacy Policy and Refund Policy (a simple site on GitHub Pages/Netlify is fine). Test first in the sandbox (sandbox-login.paddle.com).
+2. **Catalog → Products → New product** ("PulseNotify"), then add a **price**: recurring **monthly**, USD, no trial (the bot sets the amount from `BILLING_PRICE_USD` and adds trials itself — this price provides the product, billing cycle and tax settings). Copy the price ID (`pri_…`) → `PADDLE_PRICE_ID`.
+3. **Developer tools → Authentication → API keys** → new key → `PADDLE_API_KEY`. Create a **client-side token** too, for the checkout page.
+4. Host [website/pay.html](website/pay.html) on your site, paste the client-side token into it, then **Checkout → Checkout settings → Default payment link** = that page's URL (Paddle approves the domain). The bot's checkout links open this page, and Paddle.js opens the checkout automatically.
+5. Sandbox: set `PADDLE_SANDBOX=true` with sandbox keys and uncomment the sandbox line in `pay.html`.
+
+**3. NOWPayments (crypto)**
+1. Sign up at nowpayments.io, add your **payout wallet(s)** (where received crypto is sent).
+2. **Settings → Payments → API keys** → generate → `NOWPAYMENTS_API_KEY`. (Sandbox: account at account-sandbox.nowpayments.io and `NOWPAYMENTS_SANDBOX=true`.)
+3. Offered coins: USDT on TRON and BNB Chain (lowest fees), LTC, SOL, BTC, ETH — `CRYPTO_COINS` in `billing/service.py`.
+
+**4. Turn it on:** `BILLING_ENABLED=true`, restart, `!sync`. Whitelist your own servers first with `/pulsenotify global whitelist-add`.
 
 ## Testing
 

@@ -17,9 +17,9 @@ from config import constants
 from ui import cards
 
 
-# Hidden from /pulsenotify help for everyone but bot owners (the commands
-# themselves refuse non-owners too).
-OWNER_ONLY_COMMANDS = {"pulsenotify global status"}
+# Every `/pulsenotify global …` command is bot-owner only: hidden from
+# /pulsenotify help for everyone else (the commands refuse non-owners too).
+OWNER_ONLY_PREFIX = "pulsenotify global "
 
 
 @pulsenotify_group.command(name="help", description="Show all PulseNotify commands and what they do.")
@@ -30,7 +30,7 @@ async def help_command(interaction: discord.Interaction) -> None:
     commands_ = [c for c in pulsenotify_group.walk_commands() if isinstance(c, app_commands.Command)]
     is_owner = await interaction.client.is_owner(interaction.user)  # type: ignore[attr-defined]
     for command in sorted(commands_, key=lambda c: c.qualified_name):
-        if command.name == "help" or (command.qualified_name in OWNER_ONLY_COMMANDS and not is_owner):
+        if command.name == "help" or (command.qualified_name.startswith(OWNER_ONLY_PREFIX) and not is_owner):
             continue
         usage = _format_usage(command)
         value = command.description or "No description."

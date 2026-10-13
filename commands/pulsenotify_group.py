@@ -25,3 +25,10 @@ pulsenotify_group = app_commands.Group(
     description="PulseNotify — monitor social/streaming accounts and post alerts to this server.",
     guild_only=True,
 )
+
+# `/pulsenotify global …` — bot-owner commands that span every server
+# (global status, whitelist). Defined here, next to the parent, so every
+# module that adds to it imports one shared object.
+global_group = app_commands.Group(
+    name="global", description="Bot owner only: PulseNotify across every server.", parent=pulsenotify_group
+)

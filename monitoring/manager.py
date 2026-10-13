@@ -10,7 +10,7 @@ retries, and dedup all just work without this file changing.
 from __future__ import annotations
 
 import asyncio
-from typing import Dict, Optional
+from typing import Awaitable, Callable, Dict, Optional, Set
 
 from config.settings import Settings
 from database.client import Database
@@ -60,6 +60,15 @@ class MonitoringManager:
         self._schedulers: Dict[str, PlatformScheduler] = {}
         self._adapters: Dict[str, PlatformAdapter] = {}
         self._started = False
+        # Set by bot/client.py: which servers may be monitored right now.
+        # Accounts of any other server are simply not polled — their
+        # settings stay, and polling resumes once the server qualifies again.
+        self.guild_filter: Optional[Callable[[Set[int]], Awaitable[Set[int]]]] = None
+
+    async def _filter_guilds(self, guild_ids: Set[int]) -> Set[int]:
+        if self.guild_filter is None:
+            return guild_ids
+        return await self.guild_filter(guild_ids)
 
     def register_adapter(self, adapter: PlatformAdapter) -> None:
         """Wires up a new platform. Call before start() — see bot/client.py."""
@@ -94,6 +103,7 @@ class MonitoringManager:
             ),
             health_tracker=health_tracker,
             submit_event=self._event_processor.submit,
+            guild_filter=self._filter_guilds,
         )
         self._adapters[adapter.platform] = adapter
         logger.info("Registered %s platform adapter.", adapter.platform)

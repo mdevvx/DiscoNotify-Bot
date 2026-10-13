@@ -95,6 +95,24 @@ class Settings(BaseSettings):
     monitoring_health_error_after: int = Field(default=8, alias="MONITORING_HEALTH_ERROR_AFTER")
     monitoring_http_timeout_seconds: float = Field(default=15.0, alias="MONITORING_HTTP_TIMEOUT_SECONDS")
 
+    # Per-server subscriptions (billing/). Nothing is enforced until
+    # BILLING_ENABLED=true — until then every server keeps full access and
+    # no trial clock starts. Card = Paddle (BILLING_PRICE_USD/month, recurring), crypto =
+    # NOWPayments (3/6/12 months prepaid); either can be left unset.
+    billing_enabled: bool = Field(default=False, alias="BILLING_ENABLED")
+    # The monthly price per server, in USD — the one place it's set. Card
+    # checkouts and crypto amounts (3/6/12 × this) both use it; existing
+    # card subscribers keep the price they signed up at.
+    billing_price_usd: float = Field(default=2.99, gt=0, alias="BILLING_PRICE_USD")
+    billing_trial_days: int = Field(default=7, alias="BILLING_TRIAL_DAYS")
+    billing_grace_days: int = Field(default=3, alias="BILLING_GRACE_DAYS")
+    billing_poll_interval_seconds: float = Field(default=60.0, alias="BILLING_POLL_INTERVAL_SECONDS")
+    paddle_api_key: Optional[str] = Field(default=None, alias="PADDLE_API_KEY")
+    paddle_price_id: Optional[str] = Field(default=None, alias="PADDLE_PRICE_ID")
+    paddle_sandbox: bool = Field(default=False, alias="PADDLE_SANDBOX")
+    nowpayments_api_key: Optional[str] = Field(default=None, alias="NOWPAYMENTS_API_KEY")
+    nowpayments_sandbox: bool = Field(default=False, alias="NOWPAYMENTS_SANDBOX")
+
     # YouTube Data API v3 quota (see platforms/youtube/adapter.py for the
     # full breakdown): free-tier default is 10,000 units/day, shared across
     # every YouTube account this bot monitors, in every guild — it's one
