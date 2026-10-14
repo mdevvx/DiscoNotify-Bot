@@ -109,8 +109,9 @@ def subscription_needed(row: Optional[Dict[str, Any]], *, price_label: str) -> "
     return [
         ended,
         "Alerts are paused, but **every setting is kept** — nothing needs setting up again.",
-        f"To switch it back on, a server admin (Manage Server) runs **`/pulsenotify subscribe`** — "
-        f"**{price_label}/month**, card or crypto. Alerts resume within about 2 minutes of paying.",
+        f"To switch it back on, subscribe on the PulseNotify website — **{price_label}/month**, card or crypto "
+        "(a server admin can also run **`/pulsenotify subscribe`** for the link). "
+        "Alerts resume within about 2 minutes of paying.",
     ]
 
 
@@ -137,7 +138,10 @@ def subscription_details(access: Access, row: Optional[Dict[str, Any]], *, price
         lines.append("🪙 Prepaid with crypto — renew before it ends to keep alerts running")
 
     if access.allowed:
-        lines.append("Manage, renew or cancel: `/pulsenotify subscribe`")
+        if card_status in ("active", "trialing", "past_due") and cancels_at is None:
+            lines.append("Cancel any time: `/pulsenotify cancel`")
+        else:
+            lines.append("Subscribe or renew: `/pulsenotify subscribe`")
     else:
         lines.append(f"Turn alerts back on: `/pulsenotify subscribe` — {price_label}/month, card or crypto")
     return lines

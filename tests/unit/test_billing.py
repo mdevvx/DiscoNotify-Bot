@@ -1,7 +1,7 @@
-"""Billing: access rules, the trial, card subscriptions (Paddle) including
-cancellation, crypto prepayments (NOWPayments), the whitelist, and the
-payment poller — driven through fake provider clients and the fake
-database, with an injectable clock."""
+"""Billing: access rules, the trial, website card subscriptions (Paddle)
+including cancellation, website crypto prepayments (NOWPayments), the
+whitelist, upgrade reminders and the payment poller — driven through fake
+provider clients and the fake database, with an injectable clock."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from billing.access import Access, AccessReason, describe_access, evaluate
 from billing.nowpayments import NowPaymentsClient
 from billing.paddle import PaddleClient, is_sandbox_key
 from billing.repository import BillingRepository
-from billing.service import BillingService, BillingUnavailable, format_usd
+from billing.service import BillingService, format_usd, with_server
 from tests.unit.fakes import FakeDatabase
 
 _GUILD = 1
@@ -36,20 +36,20 @@ class Clock:
 
 
 class FakePaddle:
+    """Paddle as the bot sees it: transactions the website's checkout
+    created (with custom_data.guild_id) and the subscriptions behind them."""
+
     def __init__(self) -> None:
         self.transactions: Dict[str, Dict[str, Any]] = {}
         self.subscriptions: Dict[str, Dict[str, Any]] = {}
-        self.created: List[Dict[str, Any]] = []
+        self.listed_after: List[str] = []
 
-    async def create_transaction(
-        self, price_id: str, custom_data: Dict[str, str], *, trial_days: int = 0, amount_cents: Optional[int] = None
-    ):
-        txn_id = f"txn_{len(self.created) + 1}"
-        self.created.append(
-            {"price_id": price_id, "custom_data": custom_data, "trial_days": trial_days, "amount_cents": amount_cents}
-        )
-        self.transactions[txn_id] = {"id": txn_id, "status": "ready", "subscription_id": None}
-        return {"id": txn_id, "checkout": {"url": f"https://pay.example/?_ptxn={txn_id}"}}
+    async def list_paid_transactions(self, *, updated_after: str, per_page: int = 100):
+        self.listed_after.append(updated_after)
+        after = datetime.datetime.fromisoformat(updated_after)
+        paid = [t for t in self.transactions.values() if t["status"] in ("paid", "completed")]
+        newer = [t for t in paid if datetime.datetime.fromisoformat(t["updated_at"]) > after]
+        return sorted(newer, key=lambda t: t["updated_at"])
 
     async def get_transaction(self, transaction_id: str):
         return self.transactions[transaction_id]
@@ -57,15 +57,27 @@ class FakePaddle:
     async def get_subscription(self, subscription_id: str):
         return self.subscriptions[subscription_id]
 
-    async def create_portal_session(self, customer_id: str, subscription_ids: List[str]):
-        return {"urls": {"general": {"overview": f"https://portal.example/{customer_id}"}}}
-
     async def aclose(self) -> None:
         pass
 
-    def pay(self, txn_id: str, *, status: str, period_end: datetime.datetime, cancel_at: Optional[datetime.datetime] = None):
-        """Simulates the customer completing checkout."""
-        self.transactions[txn_id].update(status="completed", subscription_id="sub_1")
+    def checkout(
+        self,
+        txn_id: str,
+        *,
+        status: str,
+        period_end: datetime.datetime,
+        at: datetime.datetime,
+        guild_id: Any = _GUILD,
+        cancel_at: Optional[datetime.datetime] = None,
+    ) -> None:
+        """Simulates a customer completing checkout on the website."""
+        self.transactions[txn_id] = {
+            "id": txn_id,
+            "status": "completed",
+            "subscription_id": "sub_1",
+            "custom_data": {"guild_id": str(guild_id)},
+            "updated_at": at.isoformat(),
+        }
         self.set_subscription(status=status, period_end=period_end, cancel_at=cancel_at)
 
     def set_subscription(self, *, status: str, period_end: datetime.datetime, cancel_at: Optional[datetime.datetime] = None):
@@ -81,26 +93,20 @@ class FakePaddle:
 class FakeNowPayments:
     def __init__(self) -> None:
         self.payments: Dict[str, Dict[str, Any]] = {}
-        self.minimums: Dict[str, float] = {}
-
-    async def min_amount_usd(self, pay_currency: str) -> float:
-        return self.minimums.get(pay_currency, 0.5)
-
-    async def create_payment(self, *, price_usd: float, pay_currency: str, order_id: str, description: str):
-        payment_id = str(5000 + len(self.payments))
-        self.payments[payment_id] = {"payment_id": payment_id, "payment_status": "waiting"}
-        return {
-            "payment_id": payment_id,
-            "pay_address": "TXyzAddress",
-            "pay_amount": price_usd,
-            "pay_currency": pay_currency,
-        }
 
     async def get_payment(self, payment_id: str):
         return self.payments[payment_id]
 
     async def aclose(self) -> None:
         pass
+
+    def create(self, payment_id: str, *, price_usd: float, order_id: str, status: str = "waiting") -> None:
+        self.payments[payment_id] = {
+            "payment_id": payment_id,
+            "payment_status": status,
+            "price_amount": price_usd,
+            "order_id": order_id,
+        }
 
 
 @pytest.fixture
@@ -116,13 +122,33 @@ def db() -> FakeDatabase:
 
 
 def _service(db: FakeDatabase, clock: Clock, **kwargs: Any) -> BillingService:
-    defaults: Dict[str, Any] = {"enabled": True, "paddle": FakePaddle(), "paddle_price_id": "pri_1", "nowpayments": FakeNowPayments()}
+    defaults: Dict[str, Any] = {"enabled": True, "paddle": FakePaddle(), "nowpayments": FakeNowPayments()}
     defaults.update(kwargs)
     return BillingService(BillingRepository(db), clock=clock, **defaults)  # type: ignore[arg-type]
 
 
 def _row(db: FakeDatabase) -> Dict[str, Any]:
     return db.tables["pulsenotify_billing"].rows[0]
+
+
+def _website_row(
+    db: FakeDatabase, provider: str, external_id: str, *, months: int, amount_usd: float, created_at: datetime.datetime = _START
+) -> None:
+    """What the website inserts after creating a payment."""
+    db.tables["pulsenotify_payments"].rows.append(
+        {
+            "id": f"row-{external_id}",
+            "guild_id": _GUILD,
+            "provider": provider,
+            "external_id": external_id,
+            "months": months,
+            "amount_usd": amount_usd,
+            "status": "pending",
+            "requested_by": None,
+            "channel_id": None,
+            "created_at": created_at.isoformat(),
+        }
+    )
 
 
 # ── access rules ────────────────────────────────────────────────────────
@@ -183,56 +209,58 @@ async def test_whitelisted_server_never_needs_to_pay(db: FakeDatabase, clock: Cl
     assert _row(db)["whitelist_note"] == "my own server"
 
 
-# ── card (Paddle) ───────────────────────────────────────────────────────
+# ── card (Paddle, checkout on the website) ──────────────────────────────
 
 
-async def test_card_checkout_during_the_trial_defers_the_first_charge_to_the_trial_end(db: FakeDatabase, clock: Clock) -> None:
-    """Subscribing during the trial must not charge until it ends."""
-    paddle = FakePaddle()
-    service = _service(db, clock, paddle=paddle)
-    await service.access(_GUILD)
-    clock.advance(days=2, hours=1)  # 4 days 23 hours of trial left
-
-    url = await service.start_card_checkout(_GUILD, user_id=7, channel_id=555)
-
-    assert url.startswith("https://pay.example/")
-    assert paddle.created[0]["trial_days"] == 5  # rounded up
-    assert db.tables["pulsenotify_payments"].rows[0]["status"] == "pending"
-
-
-async def test_card_checkout_after_the_trial_charges_straight_away(db: FakeDatabase, clock: Clock) -> None:
-    paddle = FakePaddle()
-    service = _service(db, clock, paddle=paddle)
-    await service.access(_GUILD)
-    clock.advance(days=9)
-
-    await service.start_card_checkout(_GUILD, user_id=7, channel_id=555)
-
-    assert paddle.created[0]["trial_days"] == 0
-
-
-async def test_a_paid_card_subscription_grants_access_until_the_period_ends(db: FakeDatabase, clock: Clock) -> None:
+async def test_a_website_card_checkout_is_found_and_grants_access_until_the_period_ends(db: FakeDatabase, clock: Clock) -> None:
     paddle = FakePaddle()
     service = _service(db, clock, paddle=paddle)
     announced: List[Any] = []
 
     async def on_payment(payment: Dict[str, Any], access: Access) -> None:
-        announced.append((payment["provider"], access.reason))
+        announced.append((payment["provider"], payment["requested_by"], payment["channel_id"], access.reason))
 
     service.on_payment = on_payment
     await service.access(_GUILD)
     clock.advance(days=8)
-    await service.start_card_checkout(_GUILD, user_id=7, channel_id=555)
     period_end = clock.now + datetime.timedelta(days=30)
-    paddle.pay("txn_1", status="active", period_end=period_end)
+    paddle.checkout("txn_1", status="active", period_end=period_end, at=clock.now)
 
     await service.poll_once()
+    await service.poll_once()  # already credited — no second confirmation
 
     access = await service.access(_GUILD)
     assert access.reason == AccessReason.PAID and access.until == period_end
-    assert db.tables["pulsenotify_payments"].rows[0]["status"] == "paid"
-    assert announced == [("paddle", AccessReason.PAID)]
+    payments = db.tables["pulsenotify_payments"].rows
+    assert [(p["external_id"], p["status"]) for p in payments] == [("txn_1", "paid")]
+    assert announced == [("paddle", None, None, AccessReason.PAID)]
     assert "renews automatically by card" in describe_access(access, _row(db))
+
+
+async def test_checkouts_without_a_server_id_or_for_unknown_servers_are_ignored(db: FakeDatabase, clock: Clock) -> None:
+    paddle = FakePaddle()
+    service = _service(db, clock, paddle=paddle)
+    end = clock.now + datetime.timedelta(days=30)
+    paddle.checkout("txn_1", status="active", period_end=end, at=clock.now, guild_id="")
+    paddle.checkout("txn_2", status="active", period_end=end, at=clock.now, guild_id=999)
+
+    await service.poll_once()
+
+    assert db.tables["pulsenotify_payments"].rows == []
+    assert db.tables["pulsenotify_billing"].rows == []
+
+
+async def test_discovery_only_asks_for_transactions_newer_than_the_last_seen(db: FakeDatabase, clock: Clock) -> None:
+    paddle = FakePaddle()
+    service = _service(db, clock, paddle=paddle)
+    seen_at = clock.now + datetime.timedelta(minutes=1)
+    paddle.checkout("txn_1", status="active", period_end=clock.now + datetime.timedelta(days=30), at=seen_at)
+
+    await service.poll_once()
+    await service.poll_once()
+
+    assert paddle.listed_after[0] == (_START - datetime.timedelta(days=3)).isoformat()
+    assert paddle.listed_after[1] == seen_at.isoformat()
 
 
 async def test_cancelling_during_the_trial_is_never_charged(db: FakeDatabase, clock: Clock) -> None:
@@ -242,9 +270,8 @@ async def test_cancelling_during_the_trial_is_never_charged(db: FakeDatabase, cl
     paddle = FakePaddle()
     service = _service(db, clock, paddle=paddle)
     await service.access(_GUILD)
-    await service.start_card_checkout(_GUILD, user_id=7, channel_id=555)
     trial_end = _START + datetime.timedelta(days=7)
-    paddle.pay("txn_1", status="trialing", period_end=trial_end)
+    paddle.checkout("txn_1", status="trialing", period_end=trial_end, at=clock.now)
     await service.poll_once()
 
     during = await service.access(_GUILD)
@@ -269,9 +296,8 @@ async def test_cancelling_after_paying_keeps_access_until_the_paid_month_ends(db
     service = _service(db, clock, paddle=paddle)
     await service.access(_GUILD)
     clock.advance(days=8)
-    await service.start_card_checkout(_GUILD, user_id=7, channel_id=555)
     period_end = clock.now + datetime.timedelta(days=30)
-    paddle.pay("txn_1", status="active", period_end=period_end)
+    paddle.checkout("txn_1", status="active", period_end=period_end, at=clock.now)
     await service.poll_once()
 
     paddle.set_subscription(status="active", period_end=period_end, cancel_at=period_end)  # cancels, no renewal
@@ -288,54 +314,51 @@ async def test_cancelling_after_paying_keeps_access_until_the_paid_month_ends(db
     assert (await service.allowed_guild_ids({_GUILD})) == set()
 
 
-async def test_monthly_renewal_extends_access(db: FakeDatabase, clock: Clock) -> None:
+async def test_monthly_renewal_extends_access_without_a_new_confirmation(db: FakeDatabase, clock: Clock) -> None:
     paddle = FakePaddle()
     service = _service(db, clock, paddle=paddle)
+    announced: List[str] = []
+
+    async def on_payment(payment: Dict[str, Any], access: Access) -> None:
+        announced.append(payment["external_id"])
+
+    service.on_payment = on_payment
     await service.access(_GUILD)
     clock.advance(days=8)
-    await service.start_card_checkout(_GUILD, user_id=7, channel_id=555)
     first_end = clock.now + datetime.timedelta(days=30)
-    paddle.pay("txn_1", status="active", period_end=first_end)
+    paddle.checkout("txn_1", status="active", period_end=first_end, at=clock.now)
     await service.poll_once()
 
     clock.now = first_end + datetime.timedelta(hours=1)
-    paddle.set_subscription(status="active", period_end=first_end + datetime.timedelta(days=30))
+    paddle.checkout("txn_2", status="active", period_end=first_end + datetime.timedelta(days=30), at=clock.now)
     await service.poll_once()
 
     assert (await service.access(_GUILD)).until == first_end + datetime.timedelta(days=30)
+    assert announced == ["txn_1"]
 
 
-async def test_an_abandoned_card_checkout_expires(db: FakeDatabase, clock: Clock) -> None:
-    service = _service(db, clock)
+async def test_an_abandoned_pending_card_row_expires(db: FakeDatabase, clock: Clock) -> None:
+    paddle = FakePaddle()
+    service = _service(db, clock, paddle=paddle)
     await service.access(_GUILD)
-    await service.start_card_checkout(_GUILD, user_id=7, channel_id=555)
-    db.tables["pulsenotify_payments"].rows[0]["created_at"] = (clock.now - datetime.timedelta(days=2)).isoformat()
+    _website_row(db, "paddle", "txn_9", months=1, amount_usd=2.99)
+    paddle.transactions["txn_9"] = {"id": "txn_9", "status": "ready", "subscription_id": None, "updated_at": _START.isoformat()}
+    clock.advance(days=2)
 
     await service.poll_once()
 
     assert db.tables["pulsenotify_payments"].rows[0]["status"] == "expired"
 
 
-async def test_card_not_configured_is_reported(db: FakeDatabase, clock: Clock) -> None:
+async def test_card_is_unavailable_without_a_paddle_key(db: FakeDatabase, clock: Clock) -> None:
     service = _service(db, clock, paddle=None)
 
-    with pytest.raises(BillingUnavailable):
-        await service.start_card_checkout(_GUILD, user_id=7, channel_id=555)
+    await service.poll_once()
+
     assert service.card_available is False
 
 
-async def test_manage_link_comes_from_paddles_portal(db: FakeDatabase, clock: Clock) -> None:
-    paddle = FakePaddle()
-    service = _service(db, clock, paddle=paddle)
-    await service.access(_GUILD)
-    await service.start_card_checkout(_GUILD, user_id=7, channel_id=555)
-    paddle.pay("txn_1", status="trialing", period_end=_START + datetime.timedelta(days=7))
-    await service.poll_once()
-
-    assert await service.manage_card_url(_GUILD) == "https://portal.example/ctm_1"
-
-
-# ── crypto (NOWPayments) ────────────────────────────────────────────────
+# ── crypto (NOWPayments, payment created on the website) ────────────────
 
 
 async def test_crypto_prepayment_adds_months_once_confirmed(db: FakeDatabase, clock: Clock) -> None:
@@ -343,13 +366,13 @@ async def test_crypto_prepayment_adds_months_once_confirmed(db: FakeDatabase, cl
     service = _service(db, clock, nowpayments=nowpayments)
     await service.access(_GUILD)
     clock.advance(days=8)
+    nowpayments.create("5000", price_usd=8.97, order_id=f"{_GUILD}-abc")
+    _website_row(db, "nowpayments", "5000", months=3, amount_usd=8.97, created_at=clock.now)
 
-    payment = await service.start_crypto_payment(_GUILD, months=3, coin="usdttrc20", user_id=7, channel_id=555)
-    assert payment["pay_amount"] == 8.97  # 3 × the $2.99 default
     await service.poll_once()
     assert (await service.allowed_guild_ids({_GUILD})) == set()  # still waiting
 
-    nowpayments.payments[payment["payment_id"]]["payment_status"] = "confirmed"
+    nowpayments.payments["5000"]["payment_status"] = "confirmed"
     await service.poll_once()
     await service.poll_once()  # already credited — must not add another 3 months
 
@@ -362,10 +385,10 @@ async def test_a_second_crypto_payment_stacks_on_the_first(db: FakeDatabase, clo
     nowpayments = FakeNowPayments()
     service = _service(db, clock, nowpayments=nowpayments)
     await service.access(_GUILD)
-    first = await service.start_crypto_payment(_GUILD, months=3, coin="ltc", user_id=7, channel_id=None)
-    second = await service.start_crypto_payment(_GUILD, months=6, coin="ltc", user_id=7, channel_id=None)
-    for payment in (first, second):
-        nowpayments.payments[payment["payment_id"]]["payment_status"] = "finished"
+    nowpayments.create("1", price_usd=8.97, order_id=f"{_GUILD}-a", status="finished")
+    nowpayments.create("2", price_usd=17.94, order_id=f"{_GUILD}-b", status="finished")
+    _website_row(db, "nowpayments", "1", months=3, amount_usd=8.97)
+    _website_row(db, "nowpayments", "2", months=6, amount_usd=17.94)
 
     await service.poll_once()
 
@@ -376,10 +399,10 @@ async def test_failed_and_expired_crypto_payments_grant_nothing(db: FakeDatabase
     nowpayments = FakeNowPayments()
     service = _service(db, clock, nowpayments=nowpayments)
     await service.access(_GUILD)
-    failed = await service.start_crypto_payment(_GUILD, months=3, coin="btc", user_id=7, channel_id=None)
-    expired = await service.start_crypto_payment(_GUILD, months=3, coin="btc", user_id=7, channel_id=None)
-    nowpayments.payments[failed["payment_id"]]["payment_status"] = "failed"
-    nowpayments.payments[expired["payment_id"]]["payment_status"] = "expired"
+    nowpayments.create("1", price_usd=8.97, order_id=f"{_GUILD}-a", status="failed")
+    nowpayments.create("2", price_usd=8.97, order_id=f"{_GUILD}-b", status="expired")
+    _website_row(db, "nowpayments", "1", months=3, amount_usd=8.97)
+    _website_row(db, "nowpayments", "2", months=3, amount_usd=8.97)
 
     await service.poll_once()
 
@@ -388,9 +411,88 @@ async def test_failed_and_expired_crypto_payments_grant_nothing(db: FakeDatabase
     assert _row(db).get("paid_until") is None
 
 
-async def test_unsupported_plan_is_rejected(db: FakeDatabase, clock: Clock) -> None:
-    with pytest.raises(ValueError):
-        await _service(db, clock).start_crypto_payment(_GUILD, months=1, coin="btc", user_id=7, channel_id=None)
+@pytest.mark.parametrize(
+    ("price_usd", "order_id"),
+    [(2.99, f"{_GUILD}-a"), (35.88, "777-a")],  # underpaid for 12 months · paid for another server
+)
+async def test_a_crypto_row_that_doesnt_match_nowpayments_is_not_credited(
+    db: FakeDatabase, clock: Clock, price_usd: float, order_id: str
+) -> None:
+    nowpayments = FakeNowPayments()
+    service = _service(db, clock, nowpayments=nowpayments)
+    await service.access(_GUILD)
+    nowpayments.create("1", price_usd=price_usd, order_id=order_id, status="finished")
+    _website_row(db, "nowpayments", "1", months=12, amount_usd=35.88)
+
+    await service.poll_once()
+
+    assert db.tables["pulsenotify_payments"].rows[0]["status"] == "failed"
+    assert _row(db).get("paid_until") is None
+
+
+# ── website links ───────────────────────────────────────────────────────
+
+
+def test_website_links_carry_the_server_id(db: FakeDatabase, clock: Clock) -> None:
+    service = _service(
+        db, clock, subscribe_url="https://pulsenotify.duoplus.org/subscribe", cancel_url="https://x.org/c?ref=bot"
+    )
+
+    assert service.subscribe_url(42) == "https://pulsenotify.duoplus.org/subscribe?guild_id=42"
+    assert service.cancel_url(42) == "https://x.org/c?ref=bot&guild_id=42"
+    assert with_server("https://x.org/servers/{guild_id}/pay", 42) == "https://x.org/servers/42/pay"
+    assert _service(db, clock).subscribe_url(42) is None
+
+
+# ── upgrade reminders ───────────────────────────────────────────────────
+
+
+async def test_reminders_start_when_the_trial_ends_then_repeat_weekly_up_to_three(db: FakeDatabase, clock: Clock) -> None:
+    service = _service(db, clock)
+    await service.access(_GUILD)
+
+    async def remind() -> bool:
+        due = await service.reminders_due({_GUILD})
+        for row in due:
+            await service.mark_reminded(row)
+        return bool(due)
+
+    assert await remind() is False  # still in the trial
+    clock.advance(days=7, minutes=1)
+    assert await remind() is True  # trial just ended
+    clock.advance(days=6)
+    assert await remind() is False
+    clock.advance(days=1)
+    assert await remind() is True  # a week later
+    clock.advance(days=7)
+    assert await remind() is True  # third and last
+    clock.advance(days=30)
+    assert await remind() is False
+    assert _row(db)["reminders_sent"] == 3
+
+
+async def test_paying_resets_the_reminders_for_the_next_lapse(db: FakeDatabase, clock: Clock) -> None:
+    service = _service(db, clock)
+    await service.access(_GUILD)
+    clock.advance(days=8)
+    for row in await service.reminders_due({_GUILD}):
+        await service.mark_reminded(row)
+
+    _row(db)["paid_until"] = (clock.now + datetime.timedelta(days=30)).isoformat()
+    assert await service.reminders_due({_GUILD}) == []
+    assert _row(db)["reminders_sent"] == 0
+
+    clock.advance(days=34)  # paid time + grace over
+    assert [row["guild_id"] for row in await service.reminders_due({_GUILD})] == [_GUILD]
+
+
+async def test_whitelisted_servers_and_billing_off_get_no_reminders(db: FakeDatabase, clock: Clock) -> None:
+    service = _service(db, clock)
+    await service.whitelist(_GUILD, by=1, note=None)
+    clock.advance(days=30)
+
+    assert await service.reminders_due({_GUILD}) == []
+    assert await _service(db, clock, enabled=False).reminders_due({_GUILD}) == []
 
 
 # ── provider clients ────────────────────────────────────────────────────
@@ -440,7 +542,7 @@ async def test_nowpayments_sends_the_api_key_and_usd_price() -> None:
     assert seen["body"]["pay_currency"] == "usdttrc20"
 
 
-# ── price setting (BILLING_PRICE_USD) ───────────────────────────────────
+# ── price display ───────────────────────────────────────────────────────
 
 
 def test_prices_display_without_needless_cents() -> None:
@@ -449,20 +551,24 @@ def test_prices_display_without_needless_cents() -> None:
     assert format_usd(2.5) == "$2.50"
 
 
-async def test_the_price_setting_drives_card_and_crypto(db: FakeDatabase, clock: Clock) -> None:
-    paddle = FakePaddle()
-    nowpayments = FakeNowPayments()
-    service = _service(db, clock, paddle=paddle, nowpayments=nowpayments, price_usd=2.5)
-    await service.access(_GUILD)
+async def test_paddle_list_paid_transactions_request_shape() -> None:
+    seen: Dict[str, Any] = {}
 
-    await service.start_card_checkout(_GUILD, user_id=7, channel_id=None)
-    crypto = await service.start_crypto_payment(_GUILD, months=6, coin="ltc", user_id=7, channel_id=None)
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(dict(request.url.params))
+        seen["path"] = request.url.path
+        return httpx.Response(200, json={"data": [{"id": "txn_1"}], "meta": {}})
 
-    assert service.price_label == "$2.50"
-    assert paddle.created[0]["amount_cents"] == 250
-    assert crypto["pay_amount"] == 15.0  # 6 × $2.50
-    amounts = sorted(float(row["amount_usd"]) for row in db.tables["pulsenotify_payments"].rows)
-    assert amounts == [2.5, 15.0]
+    client = PaddleClient("key", transport=httpx.MockTransport(handler))
+
+    assert await client.list_paid_transactions(updated_after="2026-10-01T12:00:00+00:00") == [{"id": "txn_1"}]
+    assert seen == {
+        "path": "/transactions",
+        "status": "paid,completed",
+        "updated_at[GT]": "2026-10-01T12:00:00+00:00",
+        "order_by": "updated_at[ASC]",
+        "per_page": "100",
+    }
 
 
 async def test_paddle_checkout_charges_the_configured_amount_not_the_catalog_one() -> None:
@@ -486,52 +592,6 @@ async def test_paddle_checkout_charges_the_configured_amount_not_the_catalog_one
     assert price["unit_price"] == {"amount": "300", "currency_code": "USD"}
     assert price["billing_cycle"] == {"interval": "month", "frequency": 1}
     assert "trial_period" not in price
-
-
-# ── coin minimums (live from NOWPayments) ───────────────────────────────
-
-
-async def test_a_plan_below_the_coins_minimum_is_refused_with_advice(db: FakeDatabase, clock: Clock) -> None:
-    """Real case 2026-10-13: USDT on TRON needed $11.18, so the 3-month plan
-    ($8.97) was rejected by NOWPayments with "amount … is less than minimal"."""
-    nowpayments = FakeNowPayments()
-    nowpayments.minimums["usdttrc20"] = 11.18
-    service = _service(db, clock, nowpayments=nowpayments)
-    await service.access(_GUILD)
-
-    with pytest.raises(BillingUnavailable) as exc_info:
-        await service.start_crypto_payment(_GUILD, months=3, coin="usdttrc20", user_id=7, channel_id=None)
-
-    message = str(exc_info.value)
-    assert "USDT (TRON · TRC20)" in message and "$11.74" in message  # minimum + 5% margin
-    assert "6-month plan" in message
-    assert "USDT (BNB Chain)" in message
-    assert nowpayments.payments == {}  # nothing created at NOWPayments
-    assert db.tables["pulsenotify_payments"].rows == []
-
-
-async def test_a_plan_above_the_minimum_goes_through(db: FakeDatabase, clock: Clock) -> None:
-    nowpayments = FakeNowPayments()
-    nowpayments.minimums["usdttrc20"] = 11.18
-    service = _service(db, clock, nowpayments=nowpayments)
-    await service.access(_GUILD)
-
-    payment = await service.start_crypto_payment(_GUILD, months=6, coin="usdttrc20", user_id=7, channel_id=None)
-
-    assert payment["pay_amount"] == 17.94
-
-
-async def test_when_no_plan_is_big_enough_only_another_coin_is_suggested(db: FakeDatabase, clock: Clock) -> None:
-    nowpayments = FakeNowPayments()
-    nowpayments.minimums["btc"] = 60.0
-    service = _service(db, clock, nowpayments=nowpayments)
-    await service.access(_GUILD)
-
-    with pytest.raises(BillingUnavailable) as exc_info:
-        await service.start_crypto_payment(_GUILD, months=12, coin="btc", user_id=7, channel_id=None)
-
-    assert "month plan" not in str(exc_info.value)
-    assert "Litecoin" in str(exc_info.value)
 
 
 async def test_nowpayments_min_amount_request_shape() -> None:

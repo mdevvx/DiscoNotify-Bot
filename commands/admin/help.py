@@ -61,8 +61,9 @@ _ADMIN_COMMANDS = {
     "alerts",
     "toggle",
     "subscribe",
+    "cancel",
 }
-_HIDDEN = {"help", "subscribe"}  # subscribe has its own box at the top
+_HIDDEN = {"help", "subscribe", "cancel"}  # these have their own box at the top
 
 
 @pulsenotify_group.command(name="help", description="Show all PulseNotify commands and what they do.")
@@ -129,7 +130,8 @@ async def _subscribe_box(interaction: discord.Interaction) -> Optional[discord.u
     row = await billing.billing_row(interaction.guild.id)
     return cards.container(
         f"**`/pulsenotify subscribe`** 🛡️ — keep alerts running in this server: **{billing.price_label}/month**, "
-        "card or crypto. Cancel any time.",
+        "card or crypto, on our website.",
+        "`/pulsenotify cancel` 🛡️ — cancel any time; paid time is never cut short.",
         f"This server: {describe_access(access, row, price_label=billing.price_label)}",
         title="⭐ Subscription",
         tone=cards.WARNING if not access.allowed else cards.INFO,

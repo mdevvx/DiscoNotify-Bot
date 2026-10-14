@@ -1,6 +1,7 @@
-"""Database access for billing (migration 0006): one `pulsenotify_billing`
-row per server, and a `pulsenotify_payments` ledger of every checkout the
-bot started."""
+"""Database access for billing (migrations 0006 and 0008): one
+`pulsenotify_billing` row per server, and a `pulsenotify_payments` ledger
+of every payment — written by the website (pending crypto payments) or by
+the bot (card checkouts it found at Paddle)."""
 
 from __future__ import annotations
 
@@ -11,6 +12,7 @@ from database.client import Database, is_unique_violation
 
 _BILLING = "pulsenotify_billing"
 _PAYMENTS = "pulsenotify_payments"
+_GUILDS = "pulsenotify_guilds"
 
 
 def _iso(moment: datetime.datetime) -> str:
@@ -78,7 +80,7 @@ class BillingRepository:
         external_id: str,
         months: int,
         amount_usd: float,
-        requested_by: int,
+        requested_by: Optional[int],
         channel_id: Optional[int],
         checkout_url: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
@@ -101,6 +103,18 @@ class BillingRepository:
             .execute()
         )
         return result.data[0]
+
+    async def get_payment(self, provider: str, external_id: str) -> Optional[Dict[str, Any]]:
+        result = await (
+            self._db.client.table(_PAYMENTS).select("*").eq("provider", provider).eq("external_id", external_id).execute()
+        )
+        return result.data[0] if result.data else None
+
+    async def guild_exists(self, guild_id: int) -> bool:
+        """Billing rows reference pulsenotify_guilds — only servers the bot
+        has joined can be credited."""
+        result = await self._db.client.table(_GUILDS).select("guild_id").eq("guild_id", guild_id).execute()
+        return bool(result.data)
 
     async def list_pending(self) -> List[Dict[str, Any]]:
         result = await self._db.client.table(_PAYMENTS).select("*").eq("status", "pending").execute()

@@ -1,14 +1,11 @@
 """Thin async client for the Paddle Billing API (card payments, recurring).
 
-Flow: the bot creates a transaction for the monthly price with the server
-ID in custom_data; Paddle returns a checkout URL; once the customer pays,
-Paddle puts a subscription_id on the transaction, and that subscription
-renews monthly by itself. The bot learns all of this by polling (no
-webhook endpoint needed) — see billing/service.py.
-
-Checkout URLs open on the seller's "default payment link" — a page on the
-seller's own approved website that loads Paddle.js (Paddle dashboard →
-Checkout → Checkout settings). See README "Payments setup".
+Flow: checkout happens on the PulseNotify website, which opens Paddle.js
+with the server ID in customData.guild_id. Once the customer pays, Paddle
+puts a subscription_id on the transaction, and that subscription renews
+monthly by itself. The bot learns all of this by polling (no webhook
+endpoint needed) — see billing/service.py. create_transaction() is kept for
+starting a checkout server-side, but the bot no longer does.
 
 Auth: `Authorization: Bearer <API key>`. Responses wrap the object in
 {"data": …}.
@@ -111,6 +108,22 @@ class PaddleClient:
     async def get_subscription(self, subscription_id: str) -> Dict[str, Any]:
         return await self._request("GET", f"/subscriptions/{subscription_id}")
 
+    async def list_paid_transactions(self, *, updated_after: str, per_page: int = 100) -> List[Dict[str, Any]]:
+        """Paid/completed transactions changed after `updated_after` (RFC
+        3339), oldest first — how the bot finds checkouts made on the
+        website, which carry the server ID in custom_data.guild_id."""
+        data = await self._request(
+            "GET",
+            "/transactions",
+            params={
+                "status": "paid,completed",
+                "updated_at[GT]": updated_after,
+                "order_by": "updated_at[ASC]",
+                "per_page": per_page,
+            },
+        )
+        return data if isinstance(data, list) else []
+
     async def create_portal_session(self, customer_id: str, subscription_ids: List[str]) -> Dict[str, Any]:
         """A one-off link to Paddle's customer portal, where the customer can
         update their card or cancel."""
@@ -118,9 +131,16 @@ class PaddleClient:
             "POST", f"/customers/{customer_id}/portal-sessions", json={"subscription_ids": subscription_ids}
         )
 
-    async def _request(self, method: str, path: str, *, json: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Any:
         try:
-            response = await self._http.request(method, path, json=json)
+            response = await self._http.request(method, path, json=json, params=params)
         except httpx.HTTPError as exc:
             raise TransientPlatformError(f"Paddle request failed: {path}: {exc}") from exc
 

@@ -10,7 +10,7 @@ import pytest
 
 from billing.access import Access, AccessReason
 from bot.client import PulseNotifyCommandTree
-from commands.admin.billing import subscribe
+from commands.admin.billing import cancel, subscribe
 from commands.admin.whitelist import WhitelistCog
 from tests.unit.fake_interactions import FakeFollowup, FakeResponse, FakeUser
 from tests.unit.fakes import FakeDatabase
@@ -95,12 +95,21 @@ class FakeBilling:
         self.card_available = True
         self.crypto_available = True
         self.whitelisted: List[int] = []
+        self.reason = AccessReason.TRIAL if allowed else AccessReason.EXPIRED
+        self.row: Any = None
+        self.site = "https://pulsenotify.duoplus.org"
+
+    def subscribe_url(self, guild_id: int) -> Any:
+        return f"{self.site}/subscribe?guild_id={guild_id}" if self.site else None
+
+    def cancel_url(self, guild_id: int) -> Any:
+        return f"{self.site}/cancel?guild_id={guild_id}" if self.site else None
 
     async def access(self, guild_id: int) -> Access:
-        return Access(self._allowed, AccessReason.TRIAL if self._allowed else AccessReason.EXPIRED)
+        return Access(self._allowed, self.reason)
 
     async def billing_row(self, guild_id: int) -> Any:
-        return None
+        return self.row
 
     async def whitelist(self, guild_id: int, *, by: int, note: Any) -> None:
         self.whitelisted.append(guild_id)
@@ -175,6 +184,13 @@ async def test_a_server_without_access_is_told_to_subscribe() -> None:
     assert "Subscription needed" in reply["content"]
     assert "/pulsenotify subscribe" in reply["content"] and "$1/month" in reply["content"]
     assert "every setting is kept" in reply["content"]
+    assert _link_urls(reply["view"]) == ["https://pulsenotify.duoplus.org/subscribe?guild_id=1"]
+
+
+def _link_urls(view: Any) -> List[str]:
+    import discord
+
+    return [item.url for item in view.walk_children() if isinstance(item, discord.ui.Button) and item.url]
 
 
 def test_subscription_needed_says_what_ended() -> None:
@@ -285,7 +301,15 @@ async def test_maintenance_on_asks_to_confirm_and_only_confirm_turns_it_on() -> 
 
 
 @pytest.mark.parametrize(
-    "command", ["pulsenotify subscribe", "pulsenotify status", "pulsenotify help", "pulsenotify toggle", "pulsenotify global status"]
+    "command",
+    [
+        "pulsenotify subscribe",
+        "pulsenotify cancel",
+        "pulsenotify status",
+        "pulsenotify help",
+        "pulsenotify toggle",
+        "pulsenotify global status",
+    ],
 )
 async def test_billing_and_owner_commands_always_work(command: str) -> None:
     allowed, _ = await _check(FakeBot(allowed=False, enabled=False), command)
@@ -312,17 +336,104 @@ async def test_subscribe_says_free_while_billing_is_off() -> None:
     assert "free" in interaction.response.messages[0]["content"].lower()
 
 
-async def test_subscribe_shows_card_and_crypto_buttons() -> None:
+async def test_subscribe_links_to_the_website_with_the_server_id() -> None:
     interaction = FakeInteraction(FakeBot())
 
     await subscribe.callback(interaction)  # type: ignore[arg-type]
 
-    import discord
+    reply = interaction.response.messages[0]
+    assert _link_urls(reply["view"]) == ["https://pulsenotify.duoplus.org/subscribe?guild_id=1"]
+    assert "website" in reply["content"] and "$1/month" in reply["content"]
+    assert "`/pulsenotify cancel`" in reply["content"]
 
-    view = interaction.response.messages[0]["view"]
-    labels = [item.label for item in view.walk_children() if isinstance(item, discord.ui.Button)]
-    assert any("Card" in label for label in labels) and any("Crypto" in label for label in labels)
-    assert "never charged" in interaction.response.messages[0]["content"]
+
+async def test_subscribe_without_a_website_link_says_it_isnt_ready() -> None:
+    bot = FakeBot()
+    bot.billing.site = ""
+    interaction = FakeInteraction(bot)
+
+    await subscribe.callback(interaction)  # type: ignore[arg-type]
+
+    reply = interaction.response.messages[0]
+    assert _link_urls(reply["view"]) == []
+    assert "isn't available yet" in reply["content"]
+
+
+async def test_cancel_links_to_the_website_and_explains_paid_time_is_kept() -> None:
+    bot = FakeBot()
+    bot.billing.reason = AccessReason.PAID
+    bot.billing.row = {"card_status": "active", "card_subscription_id": "sub_1"}
+    interaction = FakeInteraction(bot)
+
+    await cancel.callback(interaction)  # type: ignore[arg-type]
+
+    reply = interaction.response.messages[0]
+    assert _link_urls(reply["view"]) == ["https://pulsenotify.duoplus.org/cancel?guild_id=1"]
+    assert "stays active until the end of the month" in reply["content"]
+
+
+@pytest.mark.parametrize(
+    ("reason", "row", "expected"),
+    [
+        (AccessReason.TRIAL, {"card_status": "trialing"}, "hasn't been charged"),
+        (AccessReason.PAID, {"card_status": "active", "card_cancels_at": "2026-11-01T00:00:00+00:00"}, "Already cancelled"),
+        (AccessReason.PAID, {}, "prepaid with crypto"),
+        (AccessReason.TRIAL, {}, "free trial with no payment method"),
+        (AccessReason.WHITELISTED, {}, "whitelisted"),
+    ],
+)
+async def test_cancel_explains_what_cancelling_means_for_this_server(reason: AccessReason, row: Any, expected: str) -> None:
+    bot = FakeBot()
+    bot.billing.reason = reason
+    bot.billing.row = row
+    interaction = FakeInteraction(bot)
+
+    await cancel.callback(interaction)  # type: ignore[arg-type]
+
+    assert expected in interaction.response.messages[0]["content"]
+
+
+# ── upgrade reminder DMs ────────────────────────────────────────────────
+
+
+class _Recipient:
+    def __init__(self) -> None:
+        self.sent: List[Any] = []
+
+    async def send(self, *, view: Any = None, allowed_mentions: Any = None) -> None:
+        self.sent.append(view)
+
+
+async def test_the_server_owner_is_dmed_an_upgrade_reminder_with_the_link() -> None:
+    from bot.client import PulseNotifyBot
+    from ui.cards import plain_text
+
+    owner = _Recipient()
+    guild = type("G", (), {"id": 1, "name": "Gaming Hub", "owner_id": 9, "owner": owner})()
+    marked: List[Any] = []
+    row = {"guild_id": 1, "trial_ends_at": "2026-10-08T00:00:00+00:00", "reminders_sent": 0}
+
+    class Billing(FakeBilling):
+        async def reminders_due(self, guild_ids: Any) -> List[Any]:
+            assert set(guild_ids) == {1}
+            return [row]
+
+        async def mark_reminded(self, due: Any) -> None:
+            marked.append(due["guild_id"])
+
+    bot = type("B", (), {})()
+    bot.guilds = [guild]
+    bot.billing = Billing(allowed=False)
+    bot.settings = type("S", (), {"billing_reminder_max": 3})()
+    for name in ("send_upgrade_reminders", "_reminder_card", "_dm_owner", "_post_in_guild"):
+        setattr(bot, name, getattr(PulseNotifyBot, name).__get__(bot))
+
+    await bot.send_upgrade_reminders()
+
+    text = plain_text(owner.sent[0])
+    assert "trial has ended" in text and "Gaming Hub" in text
+    assert _link_urls(owner.sent[0]) == ["https://pulsenotify.duoplus.org/subscribe?guild_id=1"]
+    assert marked == [1]
 
 
 # ── !whitelist (owner-only text command) ────────────────────────────────
@@ -393,19 +504,6 @@ async def test_whitelist_remove_reports_a_server_that_was_not_whitelisted() -> N
     await cog.remove.callback(cog, ctx, "123")  # type: ignore[arg-type]
 
     assert "isn't whitelisted" in ctx.sent[0]
-
-
-async def test_a_paddle_rejection_is_shown_by_name_not_as_a_generic_error() -> None:
-    """Real case 2026-10-13: a PaddleError showed only "Something went wrong"."""
-    from billing.paddle import PaddleError
-    from commands.admin.billing import _report_error
-
-    interaction = FakeInteraction(FakeBot())
-    await _report_error(interaction, PaddleError("Paddle rejected the API key (403): not authorized to read price"))  # type: ignore[arg-type]
-
-    text = interaction.response.messages[0]["content"]
-    assert "not authorized to read price" in text
-    assert "Something went wrong" not in text
 
 
 # ── skipping accounts that can't send any alert ─────────────────────────

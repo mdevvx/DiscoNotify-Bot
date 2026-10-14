@@ -102,8 +102,9 @@ class Settings(BaseSettings):
 
     # Per-server subscriptions (billing/). Nothing is enforced until
     # BILLING_ENABLED=true — until then every server keeps full access and
-    # no trial clock starts. Card = Paddle (BILLING_PRICE_USD/month, recurring), crypto =
-    # NOWPayments (3/6/12 months prepaid); either can be left unset.
+    # no trial clock starts. Payments happen on the website
+    # (BILLING_SUBSCRIBE_URL); the bot only confirms them with Paddle (card)
+    # and NOWPayments (crypto), so their API keys are read-only use here.
     billing_enabled: bool = Field(default=False, alias="BILLING_ENABLED")
     # The monthly price per server, in USD — the one place it's set. Card
     # checkouts and crypto amounts (3/6/12 × this) both use it; existing
@@ -112,8 +113,15 @@ class Settings(BaseSettings):
     billing_trial_days: int = Field(default=7, alias="BILLING_TRIAL_DAYS")
     billing_grace_days: int = Field(default=3, alias="BILLING_GRACE_DAYS")
     billing_poll_interval_seconds: float = Field(default=60.0, alias="BILLING_POLL_INTERVAL_SECONDS")
+    # The website's payment and cancellation pages. The bot adds
+    # ?guild_id=<server ID> (or fills in a {guild_id} placeholder).
+    billing_subscribe_url: Optional[str] = Field(default=None, alias="BILLING_SUBSCRIBE_URL")
+    billing_cancel_url: Optional[str] = Field(default=None, alias="BILLING_CANCEL_URL")
+    # Upgrade reminders DM'd to the server owner once the trial or
+    # subscription has run out: right away, then every N days, at most M.
+    billing_reminder_every_days: int = Field(default=7, alias="BILLING_REMINDER_EVERY_DAYS")
+    billing_reminder_max: int = Field(default=3, alias="BILLING_REMINDER_MAX")
     paddle_api_key: Optional[str] = Field(default=None, alias="PADDLE_API_KEY")
-    paddle_price_id: Optional[str] = Field(default=None, alias="PADDLE_PRICE_ID")
     paddle_sandbox: bool = Field(default=False, alias="PADDLE_SANDBOX")
     nowpayments_api_key: Optional[str] = Field(default=None, alias="NOWPAYMENTS_API_KEY")
     nowpayments_sandbox: bool = Field(default=False, alias="NOWPAYMENTS_SANDBOX")

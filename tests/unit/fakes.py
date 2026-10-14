@@ -174,7 +174,7 @@ class FakeDatabase:
                 has_generated_id=True,
             ),
             "pulsenotify_billing": FakeTable(
-                unique_on=[("guild_id",)], defaults={"whitelisted": False, "paid_until": None}
+                unique_on=[("guild_id",)], defaults={"whitelisted": False, "paid_until": None, "reminders_sent": 0}
             ),
             "pulsenotify_bot_state": FakeTable(unique_on=[("key",)]),
             "pulsenotify_payments": FakeTable(

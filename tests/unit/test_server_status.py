@@ -279,7 +279,7 @@ def _details(reason: str, row: Dict[str, Any], *, allowed: bool = True, until: O
 def test_subscription_section_for_a_renewing_card() -> None:
     text = _details("paid", {"card_status": "active"}, until=_T + 20 * _DAY)
     assert "Paid until" in text and "renews automatically" in text
-    assert "Manage, renew or cancel: `/pulsenotify subscribe`" in text
+    assert "Cancel any time: `/pulsenotify cancel`" in text
 
 
 def test_subscription_section_for_a_cancelled_card() -> None:

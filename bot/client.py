@@ -24,6 +24,7 @@ from billing.paddle import PaddleClient, is_sandbox_key
 from billing.repository import BillingRepository
 from billing.service import BillingService
 from bot.events import handle_app_command_error, register_events
+from commands.admin.billing import subscribe_link
 from commands.pulsenotify_group import pulsenotify_group
 from config.settings import Settings
 from database.client import Database
@@ -63,9 +64,17 @@ _EXTENSIONS = (
 
 # Work even on a paused server or one without an active subscription:
 # toggle re-enables a paused server, status/help explain what's going on,
-# subscribe is how a server gets access. Bot-owner `global` commands are
+# subscribe/cancel link to the website. Bot-owner `global` commands are
 # never gated.
-_ALWAYS_ALLOWED = {"pulsenotify toggle", "pulsenotify status", "pulsenotify help", "pulsenotify subscribe"}
+_ALWAYS_ALLOWED = {
+    "pulsenotify toggle",
+    "pulsenotify status",
+    "pulsenotify help",
+    "pulsenotify subscribe",
+    "pulsenotify cancel",
+}
+# How often to look for servers whose owner is due an upgrade reminder.
+_REMINDER_CHECK_EVERY = datetime.timedelta(minutes=10)
 _OWNER_GROUP_PREFIX = "pulsenotify global "
 
 
@@ -111,6 +120,7 @@ class PulseNotifyCommandTree(app_commands.CommandTree):
                 *subscription_needed(row, price_label=bot.billing.price_label),
                 title="🔒 Subscription needed",
                 tone=cards.WARNING,
+                extra=subscribe_link(bot.billing, interaction.guild.id),
                 ephemeral=True,
             )
             return False
@@ -153,8 +163,11 @@ class PulseNotifyBot(commands.Bot):
             price_usd=settings.billing_price_usd,
             trial_days=settings.billing_trial_days,
             grace_days=settings.billing_grace_days,
+            subscribe_url=settings.billing_subscribe_url,
+            cancel_url=settings.billing_cancel_url,
+            reminder_every_days=settings.billing_reminder_every_days,
+            reminder_max=settings.billing_reminder_max,
             paddle=self._paddle_client(settings),
-            paddle_price_id=settings.paddle_price_id,
             nowpayments=(
                 NowPaymentsClient(settings.nowpayments_api_key, sandbox=settings.nowpayments_sandbox)
                 if settings.nowpayments_api_key
@@ -312,28 +325,85 @@ class PulseNotifyBot(commands.Bot):
         return await self.billing.allowed_guild_ids(enabled)
 
     async def _billing_loop(self) -> None:
+        last_reminder_check: Optional[datetime.datetime] = None
         while True:
             try:
                 await self.billing.poll_once()
             except Exception:
                 logger.exception("Billing poll failed.")
+            now = datetime.datetime.now(datetime.timezone.utc)
+            if not self.maintenance.active and (
+                last_reminder_check is None or now - last_reminder_check >= _REMINDER_CHECK_EVERY
+            ):
+                last_reminder_check = now
+                try:
+                    await self.send_upgrade_reminders()
+                except Exception:
+                    logger.exception("Sending upgrade reminders failed.")
             await asyncio.sleep(self.settings.billing_poll_interval_seconds)
 
+    async def send_upgrade_reminders(self) -> None:
+        """DMs the owner of every server whose trial or subscription has run
+        out (schedule: BillingService.reminders_due). If the owner's DMs are
+        closed, the reminder goes to the server's intro channel instead."""
+        guilds = {guild.id: guild for guild in self.guilds}
+        for row in await self.billing.reminders_due(guilds):
+            guild = guilds.get(int(row["guild_id"]))
+            if guild is None:
+                continue
+            view = self._reminder_card(guild, row)
+            delivered = await self._dm_owner(guild, view) or await self._post_in_guild(guild, view)
+            if not delivered:
+                logger.warning("Couldn't deliver the upgrade reminder for server %s anywhere.", guild.id)
+            await self.billing.mark_reminded(row)
+
+    def _reminder_card(self, guild: discord.Guild, row: Dict[str, Any]) -> discord.ui.LayoutView:
+        reminder = int(row.get("reminders_sent") or 0) + 1
+        title = "⏰ Your PulseNotify trial has ended" if not row.get("paid_until") else "⏰ Your PulseNotify subscription has ended"
+        lines = [f"Server: **{guild.name}**", *subscription_needed(row, price_label=self.billing.price_label)]
+        if reminder >= self.settings.billing_reminder_max:
+            lines.append("-# This is the last reminder — we won't message you about this again.")
+        return cards.card(*lines, title=title, tone=cards.WARNING, extra=subscribe_link(self.billing, guild.id))
+
+    async def _dm_owner(self, guild: discord.Guild, view: discord.ui.LayoutView) -> bool:
+        if guild.owner_id is None:
+            return False
+        try:
+            owner = guild.owner or await self.fetch_user(guild.owner_id)
+            await owner.send(view=view)
+            return True
+        except discord.HTTPException:
+            logger.info("Couldn't DM the owner of server %s (DMs closed?).", guild.id)
+            return False
+
+    async def _post_in_guild(self, guild: discord.Guild, view: discord.ui.LayoutView) -> bool:
+        from bot.onboarding import pick_intro_channel
+
+        channel = pick_intro_channel(guild)
+        if channel is None:
+            return False
+        try:
+            await channel.send(view=view, allowed_mentions=discord.AllowedMentions.none())
+            return True
+        except discord.HTTPException:
+            return False
+
     async def _announce_payment(self, payment: Dict[str, Any], access: Access) -> None:
-        """Posts "payment received" in the channel the payment was started from."""
-        channel_id = payment.get("channel_id")
-        if not channel_id:
-            return
-        channel = self.get_channel(int(channel_id)) or await self.fetch_channel(int(channel_id))
-        row = await self.billing.billing_row(int(payment["guild_id"])) or {}
+        """Posts "payment received" in the channel the payment was started
+        from, or — for payments made on the website — DMs the server owner
+        (falling back to the server's intro channel)."""
+        guild_id = int(payment["guild_id"])
+        row = await self.billing.billing_row(guild_id) or {}
+        thanks = f"Thanks <@{payment['requested_by']}>! " if payment.get("requested_by") else "Thank you! "
+        guild = self.get_guild(guild_id)
+        where = f" in **{guild.name}**" if guild is not None else ""
         if payment["provider"] == "paddle" and row.get("card_status") == "trialing":
             # Started during the free trial: card saved, nothing charged yet.
             first_charge = f"<t:{int(access.until.timestamp())}:D>" if access.until else "the end of the trial"
             view = cards.card(
-                f"Thanks <@{payment['requested_by']}>! Card subscription set up — the first "
-                f"{self.billing.price_label} charge is on "
-                f"{first_charge}, when the free trial ends.",
-                "Cancel before then with `/pulsenotify subscribe` → *Manage card subscription* and you pay nothing.",
+                f"{thanks}PulseNotify's card subscription{where} is set up — the first "
+                f"{self.billing.price_label} charge is on {first_charge}, when the free trial ends.",
+                "Cancel before then with `/pulsenotify cancel` and you pay nothing.",
                 title="✅ Subscription set up",
                 tone=cards.SUCCESS,
             )
@@ -341,12 +411,18 @@ class PulseNotifyBot(commands.Bot):
             until = f" — active until <t:{int(access.until.timestamp())}:D>" if access.until else ""
             method = "card" if payment["provider"] == "paddle" else "crypto"
             view = cards.card(
-                f"Thanks <@{payment['requested_by']}>! This server's PulseNotify subscription is active{until}.",
+                f"{thanks}PulseNotify's subscription{where} is active{until}.",
                 f"Paid by {method} · {payment['months']} month(s)",
                 title="✅ Payment received",
                 tone=cards.SUCCESS,
             )
-        await channel.send(view=view, allowed_mentions=discord.AllowedMentions.none())  # type: ignore[union-attr]
+
+        channel_id = payment.get("channel_id")
+        if channel_id:
+            channel = self.get_channel(int(channel_id)) or await self.fetch_channel(int(channel_id))
+            await channel.send(view=view, allowed_mentions=discord.AllowedMentions.none())  # type: ignore[union-attr]
+        elif guild is not None and not await self._dm_owner(guild, view):
+            await self._post_in_guild(guild, view)
 
     async def close(self) -> None:
         logger.info("Shutting down PulseNotify...")
