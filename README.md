@@ -80,7 +80,23 @@ Before any platform integration is built: verify that platform's *current* offic
 
 4. **Invite the bot**
 
-   Generate an invite URL in the Developer Portal with the `bot` and `applications.commands` scopes, and at least `Send Messages`, `Embed Links`, `Use Slash Commands`, `Manage Webhooks` (notifications are delivered through a per-channel webhook, not the bot's own user — see the Monitoring framework section below; without this permission, the bot falls back to sending as itself instead).
+   **Developer Portal → PulseNotify → Installation:** Installation Contexts = **Guild Install** only (the bot works inside servers); Install Link = "Discord Provided Link"; Default Install Settings → Guild Install → scopes **`bot`** + **`applications.commands`** and these permissions:
+
+   | Permission | Why |
+   |---|---|
+   | View Channels | See alert channels and where to post the welcome card |
+   | Send Messages | Welcome card, `!` command replies, and the fallback when a webhook can't be used |
+   | Manage Webhooks | Main alert delivery — through a per-channel webhook admins can rename and re-avatar |
+   | Embed Links | Link previews when an alert type's embed is switched off |
+   | Mention Everyone | Pinging @everyone and roles that aren't set as mentionable (without it alerts still post, the ping just doesn't notify) |
+
+   Permissions integer **`537021440`** — invite link (Application ID from *General Information*):
+   ```
+   https://discord.com/oauth2/authorize?client_id=YOUR_CLIENT_ID&scope=bot+applications.commands&permissions=537021440
+   ```
+   Not needed: Administrator, Manage Server, Read Message History, Attach Files, Manage Messages. Members' slash commands are gated by Manage Server on the member's side, not the bot's. Per-channel overrides: in each alert channel the bot needs View Channel, Send Messages and Manage Webhooks.
+
+   **Bot → Privileged Gateway Intents → Message Content Intent: on** — needed by the owner text commands (`!sync`, `!whitelist`, `!maintenance`). Once the bot is in 100+ servers Discord asks you to apply for it during verification.
 
 5. **Run it**
 
