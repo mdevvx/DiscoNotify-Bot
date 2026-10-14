@@ -31,6 +31,9 @@ def register_events(bot: "PulseNotifyBot") -> None:
     async def on_ready() -> None:
         bot.started_at = discord.utils.utcnow()
         logger.info("%s is online as %s (%d guild(s)).", constants.BOT_NAME, bot.user, len(bot.guilds))
+        if bot.maintenance.active:
+            # Restarted while in maintenance: show it from the first moment.
+            await bot.apply_presence()
 
     @bot.event
     async def on_guild_join(guild: discord.Guild) -> None:

@@ -120,10 +120,17 @@ class FakeCommand:
         self.qualified_name = qualified_name
 
 
+class FakeMaintenance:
+    def __init__(self, active: bool = False) -> None:
+        self.active = active
+        self.message = "Upgrading the database, back in 10 minutes."
+
+
 class FakeBot:
-    def __init__(self, *, allowed: bool = True, enabled: bool = True) -> None:
+    def __init__(self, *, allowed: bool = True, enabled: bool = True, maintenance: bool = False) -> None:
         self.guilds_repo = FakeGuildsRepo(enabled)
         self.billing = FakeBilling(allowed)
+        self.maintenance = FakeMaintenance(maintenance)
 
     async def is_owner(self, user: Any) -> bool:
         return user.id == _OWNER
@@ -162,8 +169,119 @@ async def _check(bot: FakeBot, command: str) -> "tuple[bool, FakeInteraction]":
 async def test_a_server_without_access_is_told_to_subscribe() -> None:
     allowed, interaction = await _check(FakeBot(allowed=False), "pulsenotify account-add")
 
+    reply = interaction.response.messages[0]
     assert allowed is False
-    assert "/pulsenotify subscribe" in interaction.response.messages[0]["content"]
+    assert reply["ephemeral"] is True
+    assert "Subscription needed" in reply["content"]
+    assert "/pulsenotify subscribe" in reply["content"] and "$1/month" in reply["content"]
+    assert "every setting is kept" in reply["content"]
+
+
+def test_subscription_needed_says_what_ended() -> None:
+    from billing.access import subscription_needed
+
+    trial = " ".join(subscription_needed({"trial_ends_at": "2026-10-20T13:51:56+00:00"}, price_label="$2.99"))
+    paid = " ".join(
+        subscription_needed(
+            {"trial_ends_at": "2026-10-20T13:51:56+00:00", "paid_until": "2026-11-20T00:00:00+00:00"}, price_label="$2.99"
+        )
+    )
+
+    assert "free trial ended on <t:" in trial
+    assert "subscription ended on <t:" in paid
+    assert "$2.99/month" in trial
+
+
+# ── maintenance mode ────────────────────────────────────────────────────
+
+
+async def test_maintenance_blocks_every_command_for_members() -> None:
+    for command in ("pulsenotify account-add", "pulsenotify status", "pulsenotify subscribe"):
+        allowed, interaction = await _check(FakeBot(maintenance=True), command)
+
+        reply = interaction.response.messages[0]
+        assert allowed is False
+        assert "under maintenance" in reply["content"]
+        assert "back in 10 minutes" in reply["content"]
+
+
+async def test_the_owner_can_still_use_commands_during_maintenance() -> None:
+    bot = FakeBot(maintenance=True)
+    interaction = FakeInteraction(bot, "pulsenotify account-add", user_id=_OWNER)
+
+    allowed = await PulseNotifyCommandTree.interaction_check(FakeTree(bot), interaction)  # type: ignore[arg-type]
+
+    assert allowed is True
+
+
+async def test_maintenance_pauses_monitoring_everywhere() -> None:
+    from bot.client import PulseNotifyBot
+
+    bot = FakeBot(maintenance=True)
+    allowed = await PulseNotifyBot._monitorable_guilds(bot, {1, 2, 3})  # type: ignore[arg-type]
+
+    assert allowed == set()
+
+
+async def test_maintenance_state_survives_a_restart() -> None:
+    from bot.maintenance import Maintenance
+    from database.repositories.bot_state import BotStateRepository
+
+    db = FakeDatabase()
+    first = Maintenance(BotStateRepository(db))  # type: ignore[arg-type]
+    await first.enable(message="Back soon", by=_OWNER)
+
+    after_restart = Maintenance(BotStateRepository(db))  # type: ignore[arg-type]
+    await after_restart.load()
+    assert after_restart.active and after_restart.message == "Back soon"
+
+    await after_restart.disable()
+    again = Maintenance(BotStateRepository(db))  # type: ignore[arg-type]
+    await again.load()
+    assert again.active is False
+
+
+async def test_a_missing_state_table_means_not_in_maintenance() -> None:
+    from bot.maintenance import Maintenance
+
+    class BrokenRepo:
+        async def get(self, key: str) -> Any:
+            raise RuntimeError("relation pulsenotify_bot_state does not exist")
+
+    state = Maintenance(BrokenRepo())  # type: ignore[arg-type]
+    await state.load()
+
+    assert state.active is False
+
+
+async def test_maintenance_on_asks_to_confirm_and_only_confirm_turns_it_on() -> None:
+    from commands.admin.maintenance import ConfirmMaintenanceView
+
+    class Recorder:
+        def __init__(self) -> None:
+            self.enabled_with: List[Any] = []
+            self.presence_updates = 0
+
+        async def enable(self, *, message: Any, by: int) -> None:
+            self.enabled_with.append((message, by))
+
+        async def apply_presence(self) -> None:
+            self.presence_updates += 1
+
+    recorder = Recorder()
+    bot = type("Bot", (), {"maintenance": recorder, "apply_presence": recorder.apply_presence})()
+    view = ConfirmMaintenanceView(bot, owner_id=_OWNER, message="Back soon")
+
+    cancel = FakeInteraction(FakeBot(), user_id=_OWNER)
+    await view.cancel(cancel)  # type: ignore[arg-type]
+    assert recorder.enabled_with == []
+
+    confirm = FakeInteraction(FakeBot(), user_id=_OWNER)
+    await view.confirm(confirm)  # type: ignore[arg-type]
+    assert recorder.enabled_with == [("Back soon", _OWNER)]
+    assert recorder.presence_updates == 1
+    assert "Maintenance mode is on" in confirm.response.edits[0]["content"]
+    assert await view.interaction_check(FakeInteraction(FakeBot(), user_id=5)) is False  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(

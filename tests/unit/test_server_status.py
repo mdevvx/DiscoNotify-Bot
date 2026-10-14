@@ -215,14 +215,17 @@ async def test_global_status_works_for_the_bot_owner_privately(db: FakeDatabase)
 # ── /pulsenotify help ───────────────────────────────────────────────────
 
 
-async def test_help_lists_nested_commands_by_full_name_for_the_owner(db: FakeDatabase) -> None:
+async def test_help_is_grouped_and_lists_owner_tools_for_the_owner(db: FakeDatabase) -> None:
     interaction = FakeInteraction(FakeBot(db), user_id=_OWNER_ID)
 
     await help_command.callback(interaction)  # type: ignore[arg-type]
 
     text = interaction.response.messages[0]["content"]
-    assert "**/pulsenotify global status**" in text
-    assert "**/pulsenotify status**" in text
+    for section in ("Get started", "Alerts", "Accounts", "Server", "Owner only"):
+        assert section in text
+    assert "`/pulsenotify account-add` 🛡️ — Start monitoring" in text
+    assert "`/pulsenotify global status`" in text
+    assert "`!maintenance on|off`" in text and "`!whitelist add|remove|list`" in text
 
 
 async def test_help_hides_owner_only_commands_from_everyone_else(db: FakeDatabase) -> None:
@@ -231,5 +234,101 @@ async def test_help_hides_owner_only_commands_from_everyone_else(db: FakeDatabas
     await help_command.callback(interaction)  # type: ignore[arg-type]
 
     text = interaction.response.messages[0]["content"]
-    assert "global status" not in text
-    assert "**/pulsenotify status**" in text
+    assert "global status" not in text and "Owner only" not in text and "maintenance" not in text
+    assert "`/pulsenotify status`" in text
+
+
+async def test_help_puts_subscribe_first_when_billing_is_on(db: FakeDatabase) -> None:
+    import discord
+
+    bot = FakeBot(db)
+    bot.billing = BillingService(BillingRepository(db), enabled=True)  # type: ignore[arg-type]
+    db.tables["pulsenotify_guilds"].rows.append({"guild_id": _GUILD_ID, "enabled": True})
+    interaction = FakeInteraction(bot)
+
+    await help_command.callback(interaction)  # type: ignore[arg-type]
+
+    view = interaction.response.messages[0]["view"]
+    first = [child for child in view.children if isinstance(child, discord.ui.Container)][0]
+    first_text = " ".join(item.content for item in first.walk_children() if isinstance(item, discord.ui.TextDisplay))
+    assert "Subscription" in first_text and "`/pulsenotify subscribe`" in first_text
+    assert "Free trial" in first_text  # this server's state
+
+
+async def test_help_has_no_subscribe_box_while_billing_is_off(db: FakeDatabase) -> None:
+    interaction = FakeInteraction(FakeBot(db))
+
+    await help_command.callback(interaction)  # type: ignore[arg-type]
+
+    assert "Subscription" not in interaction.response.messages[0]["content"]
+
+
+# ── subscription section + card colours ─────────────────────────────────
+
+_DAY = datetime.timedelta(days=1)
+_T = datetime.datetime(2026, 10, 14, 12, 0, tzinfo=datetime.timezone.utc)
+
+
+def _details(reason: str, row: Dict[str, Any], *, allowed: bool = True, until: Optional[datetime.datetime] = None) -> str:
+    from billing.access import Access, AccessReason, subscription_details
+
+    access = Access(allowed, AccessReason(reason), until)
+    return "\n".join(subscription_details(access, row, price_label="$2.99"))
+
+
+def test_subscription_section_for_a_renewing_card() -> None:
+    text = _details("paid", {"card_status": "active"}, until=_T + 20 * _DAY)
+    assert "Paid until" in text and "renews automatically" in text
+    assert "Manage, renew or cancel: `/pulsenotify subscribe`" in text
+
+
+def test_subscription_section_for_a_cancelled_card() -> None:
+    text = _details("paid", {"card_status": "active", "card_cancels_at": (_T + 20 * _DAY).isoformat()}, until=_T + 20 * _DAY)
+    assert "cancelled — no further charges" in text
+
+
+def test_subscription_section_during_the_trial_with_a_saved_card() -> None:
+    text = _details("trial", {"card_status": "trialing"}, until=_T + 3 * _DAY)
+    assert "first $2.99 charge when the trial ends" in text
+
+
+def test_subscription_section_for_crypto() -> None:
+    assert "Prepaid with crypto" in _details("paid", {"paid_until": (_T + 80 * _DAY).isoformat()}, until=_T + 80 * _DAY)
+
+
+def test_subscription_section_when_whitelisted_has_nothing_to_manage() -> None:
+    text = _details("whitelisted", {"whitelisted": True})
+    assert "Whitelisted" in text and "subscribe" not in text
+
+
+def test_subscription_section_when_expired_says_how_to_turn_alerts_back_on() -> None:
+    text = _details("expired", {}, allowed=False)
+    assert "Turn alerts back on: `/pulsenotify subscribe` — $2.99/month" in text
+
+
+async def test_status_shows_the_subscription_section_and_turns_red_without_access(db: FakeDatabase) -> None:
+    bot = FakeBot(db)
+    bot.billing = BillingService(BillingRepository(db), enabled=True)  # type: ignore[arg-type]
+    db.tables["pulsenotify_guilds"].rows.append({"guild_id": _GUILD_ID, "enabled": True})
+    db.tables["pulsenotify_billing"].rows.append({"guild_id": _GUILD_ID, "trial_ends_at": "2020-01-01T00:00:00+00:00"})
+    interaction = FakeInteraction(bot)
+
+    await status.callback(interaction)  # type: ignore[arg-type]
+
+    reply = interaction.response.messages[0]
+    assert "**💳 Subscription**" in reply["content"]
+    assert "Turn alerts back on" in reply["content"]
+    from config import constants
+
+    container = reply["view"].children[0]
+    assert container.accent_colour == constants.COLOR_LOGO_RED
+
+
+def test_normal_cards_are_white_and_errors_are_logo_red() -> None:
+    from config import constants
+    from ui import cards as ui_cards
+
+    assert ui_cards.card("ok").children[0].accent_colour == 0xFFFFFF
+    assert ui_cards.card("done", tone=ui_cards.SUCCESS).children[0].accent_colour == 0xFFFFFF
+    assert ui_cards.card("failed", tone=ui_cards.ERROR).children[0].accent_colour == constants.COLOR_LOGO_RED == 0xE2364A
+    assert ui_cards.card("careful", tone=ui_cards.WARNING).children[0].accent_colour == 0xE2364A

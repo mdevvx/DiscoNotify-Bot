@@ -17,7 +17,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from billing.access import Access
+from billing.access import Access, subscription_needed
+from bot.maintenance import Maintenance
 from billing.nowpayments import NowPaymentsClient
 from billing.paddle import PaddleClient, is_sandbox_key
 from billing.repository import BillingRepository
@@ -28,6 +29,7 @@ from config.settings import Settings
 from database.client import Database
 from database.repositories.accounts import PlatformAccountRepository
 from database.repositories.alert_configs import AlertConfigurationRepository
+from database.repositories.bot_state import BotStateRepository
 from database.repositories.channels import NotificationChannelRepository
 from database.repositories.guilds import GuildRepository
 from monitoring.manager import MonitoringManager
@@ -55,6 +57,7 @@ _EXTENSIONS = (
     "commands.accounts.account_commands",
     "commands.admin.billing",
     "commands.admin.whitelist",
+    "commands.admin.maintenance",
 )
 
 
@@ -74,12 +77,23 @@ class PulseNotifyCommandTree(app_commands.CommandTree):
         if interaction.guild is None:
             return True
 
+        bot = cast("PulseNotifyBot", self.client)
+        if bot.maintenance.active and not await bot.is_owner(interaction.user):
+            await cards.reply(
+                interaction,
+                bot.maintenance.message,
+                "Your settings are safe, and alerts resume automatically when it's over.",
+                title="🛠️ PulseNotify is under maintenance",
+                tone=cards.WARNING,
+                ephemeral=True,
+            )
+            return False
+
         command = interaction.command
         name = command.qualified_name if command is not None else ""
         if name in _ALWAYS_ALLOWED or name.startswith(_OWNER_GROUP_PREFIX):
             return True
 
-        bot = cast("PulseNotifyBot", self.client)
         enabled = await bot.guilds_repo.is_enabled(interaction.guild.id)
         if not enabled:
             await cards.error(
@@ -91,11 +105,13 @@ class PulseNotifyCommandTree(app_commands.CommandTree):
 
         access = await bot.billing.access(interaction.guild.id)
         if not access.allowed:
-            await cards.error(
+            row = await bot.billing.billing_row(interaction.guild.id)
+            await cards.reply(
                 interaction,
-                "This server's PulseNotify trial or subscription has ended, so monitoring is paused. "
-                f"An administrator can run `/pulsenotify subscribe` ({bot.billing.price_label}/month) — "
-                "all settings are kept.",
+                *subscription_needed(row, price_label=bot.billing.price_label),
+                title="🔒 Subscription needed",
+                tone=cards.WARNING,
+                ephemeral=True,
             )
             return False
 
@@ -127,6 +143,7 @@ class PulseNotifyBot(commands.Bot):
         self.accounts_repo = PlatformAccountRepository(self.database)
         self.channels_repo = NotificationChannelRepository(self.database)
         self.alert_configs_repo = AlertConfigurationRepository(self.database)
+        self.maintenance = Maintenance(BotStateRepository(self.database))
 
         self.notification_sender = NotificationSender(self, self.alert_configs_repo, self.channels_repo)
         self.monitoring = MonitoringManager(self.database, settings, notification_sink=self.notification_sender.handle)
@@ -158,6 +175,7 @@ class PulseNotifyBot(commands.Bot):
 
         await self.database.connect()
         logger.info("Connected to Supabase.")
+        await self.maintenance.load()
 
         await self._load_extensions()
         # Every extension above has now decorated its subcommand against
@@ -274,7 +292,22 @@ class PulseNotifyBot(commands.Bot):
             )
         return PaddleClient(settings.paddle_api_key, sandbox=sandbox)
 
+    async def apply_presence(self) -> None:
+        """The bot's status: "🛠️ Under maintenance" (Do Not Disturb) while
+        maintenance is on, otherwise the configured DISCORD_STATUS_TEXT."""
+        if self.maintenance.active:
+            await self.change_presence(
+                status=discord.Status.dnd, activity=discord.CustomActivity(name="🛠️ Under maintenance — back soon")
+            )
+            return
+        text = self.settings.discord_status_text
+        await self.change_presence(
+            status=discord.Status.online, activity=discord.CustomActivity(name=text) if text else None
+        )
+
     async def _monitorable_guilds(self, guild_ids: Set[int]) -> Set[int]:
+        if self.maintenance.active:
+            return set()  # maintenance pauses monitoring everywhere
         enabled = {guild_id for guild_id in guild_ids if await self.guilds_repo.is_enabled(guild_id)}
         return await self.billing.allowed_guild_ids(enabled)
 

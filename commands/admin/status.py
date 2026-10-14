@@ -20,7 +20,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from billing.access import describe_access
+from billing.access import subscription_details
 from commands.pulsenotify_group import global_group, pulsenotify_group
 from config import constants
 from database.repositories.events import EventRepository
@@ -68,13 +68,14 @@ async def status(interaction: discord.Interaction) -> None:
     state = "🟢 Monitoring **on**" if enabled else "🔴 Monitoring **paused** — `/pulsenotify toggle` to resume"
     overview = f"{state} · **{len(accounts)}** account(s) · **{len(channel_ids)}** alert channel(s)"
     billing = bot.billing  # type: ignore[attr-defined]
-    subscription = None
-    if billing.enabled:
-        subscription = describe_access(
-            await billing.access(guild.id), await billing.billing_row(guild.id), price_label=billing.price_label
-        )
-
     fields = []
+    has_access = True
+    if billing.enabled:
+        access = await billing.access(guild.id)
+        has_access = access.allowed
+        lines = subscription_details(access, await billing.billing_row(guild.id), price_label=billing.price_label)
+        fields.append(("💳 Subscription", "\n".join(lines)))
+
     for platform in _ordered_platforms(accounts):
         rows = [row for row in accounts if row["platform"] == platform]
         lines = [
@@ -93,7 +94,7 @@ async def status(interaction: discord.Interaction) -> None:
         label = _PLATFORM_LABELS.get(platform, platform.title())
         fields.append((f"{label} · {len(rows)}", "\n".join(lines)))
 
-    body = [overview] + ([subscription] if subscription else [])
+    body = [overview]
     if not accounts:
         body.append("No accounts monitored yet — add one with `/pulsenotify account-add`.")
 
@@ -101,7 +102,8 @@ async def status(interaction: discord.Interaction) -> None:
         interaction,
         *body,
         title=f"{guild.name} — {constants.BOT_NAME} status",
-        tone=cards.SUCCESS if enabled else cards.ERROR,
+        # Red when something needs attention: paused here, or no subscription.
+        tone=cards.SUCCESS if enabled and has_access else cards.WARNING,
         fields=fields,
         footer=_format_intervals(intervals, accounts),
     )

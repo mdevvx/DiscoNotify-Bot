@@ -92,3 +92,52 @@ def describe_access(access: Access, row: Optional[Dict[str, Any]], *, price_labe
 def _when(moment: Optional[datetime.datetime], style: str) -> str:
     """<t:…> — Discord renders it in each viewer's own timezone."""
     return f"<t:{int(moment.timestamp())}:{style}>" if moment else "soon"
+
+
+def subscription_needed(row: Optional[Dict[str, Any]], *, price_label: str) -> "list[str]":
+    """What a server without access sees when it runs a command: what ended
+    and when, that nothing is lost, and exactly how to get it back."""
+    row = row or {}
+    paid_until = parse_time(row.get("paid_until"))
+    trial_ends_at = parse_time(row.get("trial_ends_at"))
+    if paid_until is not None:
+        ended = f"This server's PulseNotify subscription ended on {_when(paid_until, 'D')}."
+    elif trial_ends_at is not None:
+        ended = f"This server's free trial ended on {_when(trial_ends_at, 'D')}."
+    else:
+        ended = "This server doesn't have an active PulseNotify subscription."
+    return [
+        ended,
+        "Alerts are paused, but **every setting is kept** — nothing needs setting up again.",
+        f"To switch it back on, a server admin (Manage Server) runs **`/pulsenotify subscribe`** — "
+        f"**{price_label}/month**, card or crypto. Alerts resume within about 2 minutes of paying.",
+    ]
+
+
+def subscription_details(access: Access, row: Optional[Dict[str, Any]], *, price_label: str) -> "list[str]":
+    """The Subscription section of /pulsenotify status: state, how it's
+    paid, and where to manage it."""
+    row = row or {}
+    lines = [describe_access(access, row, price_label=price_label)]
+    if access.reason in (AccessReason.WHITELISTED, AccessReason.BILLING_OFF):
+        return lines
+
+    card_status = row.get("card_status")
+    cancels_at = parse_time(row.get("card_cancels_at"))
+    if card_status in ("active", "trialing", "past_due"):
+        if cancels_at is not None:
+            lines.append(f"💳 Card subscription cancelled — no further charges; ends {_when(cancels_at, 'D')}")
+        elif card_status == "trialing":
+            lines.append(f"💳 Card saved — first {price_label} charge when the trial ends")
+        elif card_status == "past_due":
+            lines.append("💳 Card payment failed — Paddle is retrying; update the card to keep alerts running")
+        else:
+            lines.append(f"💳 Card subscription — {price_label}/month, renews automatically")
+    elif access.reason in (AccessReason.PAID, AccessReason.GRACE):
+        lines.append("🪙 Prepaid with crypto — renew before it ends to keep alerts running")
+
+    if access.allowed:
+        lines.append("Manage, renew or cancel: `/pulsenotify subscribe`")
+    else:
+        lines.append(f"Turn alerts back on: `/pulsenotify subscribe` — {price_label}/month, card or crypto")
+    return lines
