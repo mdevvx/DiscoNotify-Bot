@@ -39,6 +39,8 @@ from platforms.instagram.adapter import InstagramAdapter
 from platforms.instagram.client import InstagramClient
 from platforms.kick.adapter import KickAdapter
 from platforms.kick.client import KickClient
+from platforms.twitter.adapter import TwitterAdapter
+from platforms.twitter.client import TwitterClient
 from platforms.youtube.adapter import YouTubeAdapter
 from platforms.youtube.client import YouTubeClient
 from ui import cards
@@ -232,8 +234,8 @@ class PulseNotifyBot(commands.Bot):
         not stop the bot" rule. Each future platform follows this same
         if-key-present-register pattern.
 
-        Only finalized platforms are registered: YouTube, Kick, Instagram.
-        Twitch and X (Twitter) adapters exist under platforms/ but are held
+        Only finalized platforms are registered: YouTube, Kick, Instagram, X.
+        The Twitch adapter exists under platforms/ but is held
         back until finalized — see the matching note on _PLATFORM_CHOICES
         in commands/accounts/account_commands.py."""
         if self.settings.youtube_api_key:
@@ -276,6 +278,14 @@ class PulseNotifyBot(commands.Bot):
             logger.warning(
                 "INSTAGRAM_ACCESS_TOKEN/INSTAGRAM_BUSINESS_ACCOUNT_ID not set — Instagram monitoring is disabled."
             )
+
+        if self.settings.twitter_enabled:
+            twitter_client = TwitterClient(timeout_seconds=self.settings.monitoring_http_timeout_seconds)
+            self.monitoring.register_adapter(
+                TwitterAdapter(twitter_client, min_poll_interval_seconds=self.settings.twitter_min_poll_interval_seconds)
+            )
+        else:
+            logger.warning("TWITTER_ENABLED=false — X (Twitter) monitoring is disabled.")
 
     async def _resolve_owners(self) -> None:
         owner_ids = set(self.settings.discord_owner_ids)

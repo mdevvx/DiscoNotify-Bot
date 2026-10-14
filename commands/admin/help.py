@@ -29,7 +29,7 @@ _SECTIONS: Sequence[Tuple[str, Sequence[Tuple[str, str]]]] = (
     (
         "🚀 Get started",
         (
-            ("account-add", "Start monitoring a YouTube, Kick or Instagram account"),
+            ("account-add", "Start monitoring a YouTube, Kick, Instagram or X account"),
             ("status", "What's monitored in this server, and your subscription"),
         ),
     ),

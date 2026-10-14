@@ -43,10 +43,10 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Only platforms that are finalized (or actively being finalized) are
-# offered. Twitch and X (Twitter) have adapters under platforms/ but are
-# held back until they're finalized; re-adding one is a Choice here plus
-# its registration in bot/client.py's _register_platform_adapters().
+# Only platforms that are finalized are offered (PLATFORM_FORMS). Twitch has
+# an adapter under platforms/ but is held back until it's finalized;
+# re-adding it is an entry in PLATFORM_FORMS plus its registration in
+# bot/client.py's _register_platform_adapters().
 _PLATFORM_CHOICES = [app_commands.Choice(name=form.name, value=value) for value, form in PLATFORM_FORMS.items()]
 
 _STATUS_ICONS = {"active": "🟢", "invalid": "🔴", "error": "🟡"}

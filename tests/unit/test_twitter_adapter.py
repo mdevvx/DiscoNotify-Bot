@@ -1,98 +1,159 @@
-"""TwitterAdapter's own logic — the cursor/baseline behavior for
-fetch_updates (mirrors YouTubeAdapter's, since both are since-cursor
-content polls), driven through a fake TwitterClient (not real HTTP;
-that's covered separately in test_twitter_client.py)."""
+"""TwitterAdapter: adding an account, the baseline, new posts only, one
+fetch per account shared by every server, the interval that keeps X's
+30-per-15-minutes limit, and renamed handles."""
 
 from __future__ import annotations
 
+import time
 from typing import Any, Dict, List, Optional
 
 import pytest
 
+from events.models import EventType
 from platforms.base import AccountRef
 from platforms.twitter.adapter import TwitterAdapter
-from utils.errors import PermanentPlatformError
+from tests.unit.twitter_fixtures import post, retweet
+from utils.errors import PermanentPlatformError, RateLimitedError
 
-_ACCOUNT = AccountRef(platform="twitter", platform_account_id="123", username="Some User")
-
-
-def _tweet(tweet_id: str) -> Dict[str, Any]:
-    return {"id": tweet_id, "text": f"tweet {tweet_id}"}
+_ACCOUNT = AccountRef(platform="twitter", platform_account_id="11348282", username="NASA")
 
 
-class FakeTwitterClient:
+class FakeClient:
     def __init__(self) -> None:
-        self.user: Optional[Dict[str, Any]] = {"id": "123", "username": "someuser", "name": "Some User"}
-        self.tweets_by_since_id: Dict[Optional[str], List[Dict[str, Any]]] = {}
-        self.get_user_tweets_calls = 0
+        self.timelines: Dict[str, List[Dict[str, Any]]] = {}
+        self.fetched: List[str] = []
+        self.requests_remaining: Optional[int] = None
+        self.reset_in = 0.0
 
-    async def get_user_by_username(self, username: str):
-        return self.user
+    async def get_timeline(self, handle: str) -> List[Dict[str, Any]]:
+        self.fetched.append(handle)
+        return self.timelines.get(handle.lower(), [])
 
-    async def get_user_tweets(self, user_id: str, *, since_id=None, max_results: int = 5):
-        self.get_user_tweets_calls += 1
-        return self.tweets_by_since_id.get(since_id, [])
+    def seconds_until_reset(self) -> float:
+        return max(self.reset_in, 1.0)
 
     async def aclose(self) -> None:
         pass
 
 
-async def test_validate_account_resolves_a_handle_to_an_account_ref() -> None:
-    client = FakeTwitterClient()
-    adapter = TwitterAdapter(client)  # type: ignore[arg-type]
+class Clock:
+    def __init__(self) -> None:
+        self.now = 1000.0
 
-    ref = await adapter.validate_account("@SomeUser")
-
-    assert ref.platform == "twitter"
-    assert ref.platform_account_id == "123"
-    assert ref.username == "Some User"
+    def __call__(self) -> float:
+        return self.now
 
 
-async def test_validate_account_raises_permanent_error_when_not_found() -> None:
-    client = FakeTwitterClient()
-    client.user = None
-    adapter = TwitterAdapter(client)  # type: ignore[arg-type]
+def _adapter(client: FakeClient, clock: Optional[Clock] = None) -> TwitterAdapter:
+    return TwitterAdapter(client, clock=clock or Clock())  # type: ignore[arg-type]
 
+
+async def test_adding_an_account_resolves_the_handle_from_its_posts() -> None:
+    client = FakeClient()
+    client.timelines["nasa"] = [post("2")]
+
+    ref = await _adapter(client).validate_account("https://x.com/NASA")
+
+    assert ref == _ACCOUNT
+
+
+async def test_an_account_without_public_posts_cant_be_added() -> None:
     with pytest.raises(PermanentPlatformError):
-        await adapter.validate_account("nonexistent")
+        await _adapter(FakeClient()).validate_account("@nobody")
 
 
-async def test_first_poll_establishes_a_baseline_without_emitting_events() -> None:
-    client = FakeTwitterClient()
-    client.tweets_by_since_id[None] = [_tweet("3"), _tweet("2"), _tweet("1")]
-    adapter = TwitterAdapter(client)  # type: ignore[arg-type]
+async def test_the_first_check_is_a_baseline_without_alerts() -> None:
+    client = FakeClient()
+    client.timelines["nasa"] = [post("30"), retweet("40"), post("20")]
 
-    result = await adapter.fetch_updates(_ACCOUNT, cursor=None)
+    result = await _adapter(client).fetch_updates(_ACCOUNT, None)
 
-    assert result.items == []
-    assert result.next_cursor == "3"
+    assert result.items == [] and result.next_cursor == "40"
 
 
-async def test_subsequent_poll_returns_new_tweets_and_advances_cursor() -> None:
-    client = FakeTwitterClient()
-    client.tweets_by_since_id["1"] = [_tweet("3"), _tweet("2")]
-    adapter = TwitterAdapter(client)  # type: ignore[arg-type]
+async def test_an_account_that_never_posted_gets_its_first_post_alerted() -> None:
+    client = FakeClient()
+    clock = Clock()
+    adapter = _adapter(client, clock)
+    baseline = await adapter.fetch_updates(_ACCOUNT, None)
+    client.timelines["nasa"] = [post("5")]
+    clock.now += 3600
 
-    result = await adapter.fetch_updates(_ACCOUNT, cursor="1")
+    result = await adapter.fetch_updates(_ACCOUNT, baseline.next_cursor)
 
-    assert {t["id"] for t in result.items} == {"2", "3"}
-    assert result.next_cursor == "3"
+    assert baseline.next_cursor == "0"
+    assert [p["id_str"] for p in result.items] == ["5"]
 
 
-async def test_no_new_tweets_returns_empty_and_keeps_the_cursor() -> None:
-    client = FakeTwitterClient()
-    client.tweets_by_since_id["1"] = []
-    adapter = TwitterAdapter(client)  # type: ignore[arg-type]
+async def test_only_new_original_posts_are_alerted_oldest_first() -> None:
+    client = FakeClient()
+    client.timelines["nasa"] = [post("60"), retweet("55"), post("50", in_reply_to_status_id_str="1"), post("45"), post("30")]
+    adapter = _adapter(client)
 
-    result = await adapter.fetch_updates(_ACCOUNT, cursor="1")
+    result = await adapter.fetch_updates(_ACCOUNT, "40")
 
-    assert result.items == []
-    assert result.next_cursor == "1"
+    assert [p["id_str"] for p in result.items] == ["45", "60"]
+    assert result.next_cursor == "60"
+    event = adapter.normalize_event(_ACCOUNT, result.items[0])
+    assert event.event_type == EventType.POST_CREATED and event.url == "https://x.com/NASA/status/45"
+
+
+async def test_nothing_new_keeps_the_cursor() -> None:
+    client = FakeClient()
+    client.timelines["nasa"] = [post("30")]
+
+    result = await _adapter(client).fetch_updates(_ACCOUNT, "30")
+
+    assert result.items == [] and result.next_cursor == "30"
+
+
+async def test_one_fetch_is_shared_by_every_server_following_the_account() -> None:
+    client = FakeClient()
+    client.timelines["nasa"] = [post("30")]
+    clock = Clock()
+    adapter = _adapter(client, clock)
+    adapter.poll_interval_seconds(1)
+
+    for _server in range(3):
+        await adapter.fetch_updates(_ACCOUNT, "10")
+    clock.now += 61
+    await adapter.fetch_updates(_ACCOUNT, "30")
+
+    assert client.fetched == ["NASA", "NASA"]
+    assert adapter.take_request_count() == 2
+
+
+@pytest.mark.parametrize(("accounts", "interval"), [(0, 60.0), (1, 60.0), (10, 450.0), (50, 2250.0)])
+def test_interval_keeps_under_30_requests_per_15_minutes(accounts: int, interval: float) -> None:
+    assert _adapter(FakeClient()).poll_interval_seconds(accounts) == interval
+
+
+async def test_checks_pause_when_the_window_is_nearly_used_up_but_adding_still_works() -> None:
+    client = FakeClient()
+    client.timelines["nasa"] = [post("30")]
+    client.requests_remaining = 2
+    client.reset_in = 400
+
+    with pytest.raises(RateLimitedError) as exc_info:
+        await _adapter(client).fetch_updates(_ACCOUNT, "10")
+    ref = await _adapter(client).validate_account("NASA")  # the reserved requests
+
+    assert exc_info.value.retry_after == 400
+    assert ref == _ACCOUNT
+
+
+async def test_a_handle_now_owned_by_another_account_is_reported() -> None:
+    client = FakeClient()
+    client.timelines["nasa"] = [post("30", user={"id_str": "999", "screen_name": "NASA"})]
+
+    with pytest.raises(PermanentPlatformError, match="renamed"):
+        await _adapter(client).fetch_updates(_ACCOUNT, "10")
 
 
 async def test_get_live_status_is_never_expected_to_be_called() -> None:
-    client = FakeTwitterClient()
-    adapter = TwitterAdapter(client)  # type: ignore[arg-type]
-
     with pytest.raises(NotImplementedError):
-        await adapter.get_live_status(_ACCOUNT)
+        await _adapter(FakeClient()).get_live_status(_ACCOUNT)
+
+
+def test_the_real_clock_is_monotonic() -> None:
+    assert TwitterAdapter(FakeClient())._clock is time.monotonic  # type: ignore[arg-type]

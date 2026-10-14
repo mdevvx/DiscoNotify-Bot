@@ -33,9 +33,9 @@ logger = get_logger(__name__)
 
 _HEALTH_ICONS = {"healthy": "🟢", "degraded": "🟡", "error": "🔴", "disabled": "⚪"}
 _ACCOUNT_ICONS = {"active": "🟢", "error": "🟡", "invalid": "🔴"}
-_PLATFORM_NAMES = {"youtube": "YouTube", "kick": "Kick", "instagram": "Instagram"}
-_PLATFORM_LABELS = {"youtube": "▶️ YouTube", "kick": "🟩 Kick", "instagram": "📸 Instagram"}
-_PLATFORM_ORDER = ["youtube", "kick", "instagram"]
+_PLATFORM_NAMES = {"youtube": "YouTube", "kick": "Kick", "instagram": "Instagram", "twitter": "X"}
+_PLATFORM_LABELS = {"youtube": "▶️ YouTube", "kick": "🟩 Kick", "instagram": "📸 Instagram", "twitter": "𝕏 X"}
+_PLATFORM_ORDER = ["youtube", "kick", "instagram", "twitter"]
 # Keeps the card well inside Discord's 4,000-character limit for a message.
 _MAX_ACCOUNTS_PER_PLATFORM = 15
 _MAX_ERROR_LENGTH = 120
@@ -170,6 +170,8 @@ def account_url(platform: str, platform_account_id: str, username: str) -> Optio
         return f"https://kick.com/{handle}"
     if platform == "instagram":
         return f"https://www.instagram.com/{handle}/"
+    if platform == "twitter":
+        return f"https://x.com/{handle}"
     return None
 
 

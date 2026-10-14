@@ -1,89 +1,125 @@
-"""X (Twitter) API v2 adapter — new-post detection (Phase 7).
+"""X (Twitter) adapter — new-post alerts from X's public embedded timeline
+(see client.py). Free: no API key, no login.
 
-API research (2026-09-15), verified against X's current developer
-documentation and pricing pages, not scraped/undocumented endpoints — see
-[[project-platform-api-policy]] / README.md for the standing policy this
-follows.
+The one constraint is X's limit of 30 timeline requests per 15 minutes per
+IP address. So:
+- each X account is fetched once per check and shared by every server that
+  follows it;
+- the check interval stretches with the number of distinct accounts, using
+  about 20 of the 30 requests (a request sometimes counts twice, and some
+  are left for adding accounts):
+  45s per account — 10 accounts → every 7.5 min, 50 → every 37.5 min;
+- when X says the window is (nearly) used up, the platform waits for the
+  reset instead of hitting 429s.
 
-**This is the one platform in this project with a real, unavoidable
-dollar cost — read this before enabling it.** X discontinued its free API
-tier in February 2026. As of this research, reading posts is billed
-pay-per-use (roughly $0.005 per post read, capped at 2,000,000 reads/month)
-with no free allowance; a legacy fixed-price Basic plan ($200/month) still
-exists but only for pre-existing subscribers, not new signups. There is no
-way to use this adapter without a paid X API plan — setting
-TWITTER_BEARER_TOKEN is an explicit opt-in to that cost, unlike every
-other platform in this project (all free). Cost scales directly with how
-many accounts you monitor and how often (MONITORING_CONTENT_POLL_INTERVAL_SECONDS)
-— budget accordingly before adding accounts.
-
-| Feature            | Method                                   | Cost/call         | Notes |
-|----------------------|---------------------------------------------|--------------------|-------|
-| Handle resolution    | GET /2/users/by/username/{username}         | billed as a read   | No target-account authorization needed — this reads public profile data. |
-| New posts            | GET /2/users/{id}/tweets (since_id cursor)  | billed per post returned | Retweets/replies excluded to match POST_CREATED's semantics and to avoid paying to re-read content that isn't a new original post. Requests the API's minimum page size (5) per poll. |
-
-Credentials: TWITTER_BEARER_TOKEN, a static app-only Bearer token
-generated once in the X Developer Portal — no OAuth dance or per-account
-authorization needed (this only ever reads public posts).
-
-No adapter-level rate limiting is implemented beyond the framework's
-generic per-platform RateLimiter (MONITORING_RATE_LIMIT_REQUESTS/
-_PERIOD_SECONDS): unlike YouTube's hard daily quota wall, X's constraint
-here is the operator's own budget, not a platform-side limit this code can
-safely auto-throttle against without knowing that budget — see the cost
-callout above instead.
-
-Live status / Spaces detection was not evaluated this phase — the spec's
-X/Twitter integration is about new-post alerts, matching what "post" means
-for this platform.
+Only original posts are alerted (quote posts included; retweets and replies
+left out). Private, suspended and never-posted accounts can't be added. The
+timeline is fetched by @handle; if the account renames, it has to be
+re-added.
 """
 
 from __future__ import annotations
 
-from typing import Any, ClassVar, FrozenSet, Optional
+import time
+from dataclasses import dataclass
+from typing import Any, Callable, ClassVar, Dict, FrozenSet, List, Optional
 
 from events.models import NormalizedEvent
 from platforms.base import AccountRef, Capability, FetchResult, LiveStatus, PlatformAdapter
 from platforms.twitter import parser
-from platforms.twitter.client import TwitterClient
-from utils.errors import PermanentPlatformError
+from platforms.twitter.client import TwitterClient, require_posts
+from utils.errors import PermanentPlatformError, RateLimitedError
+from utils.logger import get_logger
 
-_PAGE_SIZE = 5  # the minimum X's API allows — no reason to pay for more per poll
+logger = get_logger(__name__)
+
+_WINDOW_SECONDS = 900
+_REQUESTS_PER_WINDOW_FOR_CHECKS = 20
+# Requests kept back in each window so adding an account still works.
+_RESERVED_FOR_ADDING = 2
+# Cursor for an account with no posts yet: everything it posts is new.
+_EMPTY_CURSOR = "0"
+
+
+@dataclass
+class _Snapshot:
+    fetched_at: float
+    posts: List[Dict[str, Any]]
 
 
 class TwitterAdapter(PlatformAdapter):
     platform: ClassVar[str] = "twitter"
     capabilities: ClassVar[FrozenSet[Capability]] = frozenset({Capability.POSTS})
+    counts_own_requests: ClassVar[bool] = True
 
-    def __init__(self, client: TwitterClient) -> None:
+    def __init__(
+        self,
+        client: TwitterClient,
+        *,
+        min_poll_interval_seconds: float = 60.0,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._client = client
+        self._min_poll_interval = min_poll_interval_seconds
+        self._poll_interval = min_poll_interval_seconds
+        self._clock = clock
+        self._snapshots: Dict[str, _Snapshot] = {}
 
     async def aclose(self) -> None:
         await self._client.aclose()
 
+    def poll_interval_seconds(self, distinct_account_count: int) -> Optional[float]:
+        accounts = max(distinct_account_count, 1)
+        self._poll_interval = max(self._min_poll_interval, _WINDOW_SECONDS * accounts / _REQUESTS_PER_WINDOW_FOR_CHECKS)
+        return self._poll_interval
+
     async def validate_account(self, identifier: str) -> AccountRef:
         handle = parser.parse_identifier(identifier)
-        user = await self._client.get_user_by_username(handle)
-        if user is None:
-            raise PermanentPlatformError(f"No X account found for {identifier!r}")
-        return parser.user_to_account_ref(user)
+        posts = await self._fetch(handle, reserve=0)
+        ref = parser.user_to_account_ref(require_posts(posts, handle))
+        self._snapshots[ref.platform_account_id] = _Snapshot(self._clock(), posts)
+        return ref
 
     async def fetch_updates(self, account: AccountRef, cursor: Optional[str]) -> FetchResult:
-        tweets = await self._client.get_user_tweets(account.platform_account_id, since_id=cursor, max_results=_PAGE_SIZE)
-        if not tweets:
-            return FetchResult(items=[], next_cursor=cursor)
-
-        newest_id = tweets[0]["id"]  # newest-first, matching YouTube's uploads-playlist ordering
+        posts = await self._posts_for(account)
+        newest = max((int(post["id_str"]) for post in posts), default=None)
         if cursor is None:
-            # First-ever poll for this account: establish a baseline
-            # without notifying about (and paying to read, repeatedly,
-            # were this not gated) the account's entire recent history.
-            return FetchResult(items=[], next_cursor=newest_id)
+            # Just added: everything already there is history, not news.
+            return FetchResult(items=[], next_cursor=str(newest) if newest is not None else _EMPTY_CURSOR)
 
-        return FetchResult(items=tweets, next_cursor=newest_id)
+        new = [post for post in parser.original_posts(posts) if int(post["id_str"]) > int(cursor)]
+        next_cursor = str(max(newest, int(cursor))) if newest is not None else cursor
+        return FetchResult(items=new, next_cursor=next_cursor)
 
     async def get_live_status(self, account: AccountRef) -> Optional[LiveStatus]:
         raise NotImplementedError("TwitterAdapter declares no live-status capability — the worker never calls this.")
 
     def normalize_event(self, account: AccountRef, raw_item: Any) -> NormalizedEvent:
         return parser.normalize_tweet(account, raw_item)
+
+    async def _posts_for(self, account: AccountRef) -> List[Dict[str, Any]]:
+        """One fetch per account per check, shared by every server that
+        follows it."""
+        key = account.platform_account_id
+        snapshot = self._snapshots.get(key)
+        if snapshot is not None and self._clock() - snapshot.fetched_at < self._poll_interval / 2:
+            return snapshot.posts
+
+        posts = await self._fetch(account.username, reserve=_RESERVED_FOR_ADDING)
+        owner = next((post.get("user") or {} for post in posts), {})
+        if owner.get("id_str") and str(owner["id_str"]) != key:
+            raise PermanentPlatformError(
+                f"@{account.username} now belongs to a different X account — the monitored account was renamed. "
+                "Remove it and add it again under its new handle."
+            )
+        self._snapshots[key] = _Snapshot(self._clock(), posts)
+        return posts
+
+    async def _fetch(self, handle: str, *, reserve: int) -> List[Dict[str, Any]]:
+        remaining = self._client.requests_remaining
+        if remaining is not None and remaining <= reserve and self._client.seconds_until_reset() > 1:
+            raise RateLimitedError(
+                "X timeline requests for this 15-minute window are used up", retry_after=self._client.seconds_until_reset()
+            )
+        self._count_request()
+        return await self._client.get_timeline(handle)

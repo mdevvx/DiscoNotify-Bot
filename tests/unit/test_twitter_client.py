@@ -1,172 +1,82 @@
-"""TwitterClient's error classification (status code -> the right
-PlatformError subclass), driven through httpx.MockTransport so no real
-network call is ever made."""
+"""TwitterClient: reading X's embedded timeline page and its rate-limit
+headers, through httpx.MockTransport (no real network)."""
 
 from __future__ import annotations
 
-import json
 import time
+from typing import List
 
 import httpx
 import pytest
 
-from platforms.twitter.client import TwitterClient
+from platforms.twitter.client import TwitterClient, require_posts
+from tests.unit.twitter_fixtures import page, post, retweet
 from utils.errors import PermanentPlatformError, RateLimitedError, TransientPlatformError
 
 
 def _client_with(handler) -> TwitterClient:
-    return TwitterClient("fake-bearer-token", transport=httpx.MockTransport(handler))
+    return TwitterClient(transport=httpx.MockTransport(handler))
 
 
-def _json_response(status: int, body: dict, headers: dict | None = None) -> httpx.Response:
-    return httpx.Response(status, content=json.dumps(body), headers=headers or {})
-
-
-async def test_get_user_by_username_returns_the_user() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return _json_response(200, {"data": {"id": "123", "username": "someuser"}})
-
-    client = _client_with(handler)
-    user = await client.get_user_by_username("someuser")
-
-    assert user == {"id": "123", "username": "someuser"}
-
-
-async def test_get_user_by_username_returns_none_when_not_found() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return _json_response(200, {"errors": [{"title": "Not Found Error"}]})
-
-    client = _client_with(handler)
-    user = await client.get_user_by_username("nonexistent")
-
-    assert user is None
-
-
-async def test_request_sends_bearer_token_header() -> None:
-    seen_headers = {}
+async def test_reads_the_posts_and_the_rate_limit_headers() -> None:
+    seen: List[httpx.Request] = []
+    reset_at = time.time() + 600
 
     def handler(request: httpx.Request) -> httpx.Response:
-        seen_headers.update(dict(request.headers))
-        return _json_response(200, {"data": {"id": "1"}})
+        seen.append(request)
+        headers = {"x-rate-limit-remaining": "23", "x-rate-limit-reset": str(reset_at)}
+        return httpx.Response(200, text=page([post("2"), retweet("1")]), headers=headers)
 
     client = _client_with(handler)
-    await client.get_user_by_username("someuser")
+    posts = await client.get_timeline("NASA")
 
-    assert seen_headers["authorization"] == "Bearer fake-bearer-token"
-
-
-async def test_get_user_tweets_returns_the_list() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return _json_response(200, {"data": [{"id": "2"}, {"id": "1"}]})
-
-    client = _client_with(handler)
-    tweets = await client.get_user_tweets("123")
-
-    assert tweets == [{"id": "2"}, {"id": "1"}]
+    assert [p["id_str"] for p in posts] == ["2", "1"]
+    assert seen[0].url.path == "/srv/timeline-profile/screen-name/NASA"
+    assert "Mozilla" in seen[0].headers["User-Agent"]
+    assert client.requests_remaining == 23
+    assert 590 < client.seconds_until_reset() <= 600
 
 
-async def test_get_user_tweets_returns_empty_list_when_no_data() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return _json_response(200, {"meta": {"result_count": 0}})
+async def test_429_waits_for_the_window_to_reset() -> None:
+    reset_at = time.time() + 300
+    client = _client_with(
+        lambda r: httpx.Response(429, text="Rate limit exceeded", headers={"x-rate-limit-reset": str(reset_at), "x-rate-limit-remaining": "0"})
+    )
 
-    client = _client_with(handler)
-    tweets = await client.get_user_tweets("123")
-
-    assert tweets == []
-
-
-async def test_get_user_tweets_sends_since_id_and_excludes_retweets_and_replies() -> None:
-    seen_params = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen_params.update(dict(request.url.params))
-        return _json_response(200, {"data": []})
-
-    client = _client_with(handler)
-    await client.get_user_tweets("123", since_id="999")
-
-    assert seen_params["since_id"] == "999"
-    assert seen_params["exclude"] == "retweets,replies"
-
-
-async def test_get_user_tweets_omits_since_id_on_first_poll() -> None:
-    seen_params = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen_params.update(dict(request.url.params))
-        return _json_response(200, {"data": []})
-
-    client = _client_with(handler)
-    await client.get_user_tweets("123", since_id=None)
-
-    assert "since_id" not in seen_params
-
-
-async def test_rate_limited_raises_with_retry_after_from_reset_header() -> None:
-    reset_at = int(time.time()) + 45
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return _json_response(429, {"title": "Too Many Requests"}, headers={"x-rate-limit-reset": str(reset_at)})
-
-    client = _client_with(handler)
     with pytest.raises(RateLimitedError) as exc_info:
-        await client.get_user_by_username("someuser")
+        await client.get_timeline("NASA")
 
-    assert exc_info.value.retry_after is not None
-    assert 0 < exc_info.value.retry_after <= 45
-
-
-async def test_rate_limited_without_reset_header_falls_back_to_a_default_wait() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return _json_response(429, {"title": "Too Many Requests"})
-
-    client = _client_with(handler)
-    with pytest.raises(RateLimitedError) as exc_info:
-        await client.get_user_by_username("someuser")
-
-    assert exc_info.value.retry_after is not None
+    assert 290 < exc_info.value.retry_after <= 300
 
 
-async def test_bad_request_raises_permanent_error() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return _json_response(400, {"title": "Invalid Request", "detail": "bad params"})
+async def test_an_unknown_account_has_no_posts_and_cant_be_added() -> None:
+    client = _client_with(lambda r: httpx.Response(200, text=page([])))
 
-    client = _client_with(handler)
-    with pytest.raises(PermanentPlatformError):
-        await client.get_user_by_username("not valid")
+    posts = await client.get_timeline("nobody_here")
+
+    assert posts == []
+    with pytest.raises(PermanentPlatformError, match="Couldn't find public posts"):
+        require_posts(posts, "nobody_here")
 
 
-async def test_unauthorized_raises_transient_error() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return _json_response(401, {"title": "Unauthorized"})
+async def test_a_changed_page_is_a_temporary_error_not_a_bad_account() -> None:
+    client = _client_with(lambda r: httpx.Response(200, text="<html>something else</html>"))
 
-    client = _client_with(handler)
+    with pytest.raises(TransientPlatformError, match="page format changed"):
+        await client.get_timeline("NASA")
+
+
+async def test_server_errors_and_timeouts_are_temporary() -> None:
+    def timeout(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("timed out", request=request)
+
     with pytest.raises(TransientPlatformError):
-        await client.get_user_by_username("someuser")
-
-
-async def test_not_found_status_raises_permanent_error() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return _json_response(404, {"title": "Not Found Error"})
-
-    client = _client_with(handler)
-    with pytest.raises(PermanentPlatformError):
-        await client.get_user_by_username("someuser")
-
-
-async def test_server_error_raises_transient_error() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(500, content="internal error")
-
-    client = _client_with(handler)
+        await _client_with(lambda r: httpx.Response(503)).get_timeline("NASA")
     with pytest.raises(TransientPlatformError):
-        await client.get_user_by_username("someuser")
+        await _client_with(timeout).get_timeline("NASA")
 
 
-async def test_timeout_raises_transient_error() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectTimeout("timed out", request=request)
+def test_the_profile_comes_from_the_accounts_own_post_not_a_retweeted_one() -> None:
+    other = post("9", user={"id_str": "1", "screen_name": "Someone"})
 
-    client = _client_with(handler)
-    with pytest.raises(TransientPlatformError):
-        await client.get_user_by_username("someuser")
+    assert require_posts([other, post("8")], "nasa")["id_str"] == "11348282"

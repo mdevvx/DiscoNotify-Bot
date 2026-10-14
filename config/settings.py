@@ -46,11 +46,11 @@ class Settings(BaseSettings):
     supabase_key: str = Field(..., min_length=1, alias="SUPABASE_KEY")
 
     # Platform credentials are intentionally optional in the foundation phase.
-    # X API v2 (Phase 7) — a static app-only Bearer token from the X
-    # Developer Portal, not a key/secret pair (see platforms/twitter/adapter.py
-    # for why, and the real per-read cost: X has no free read tier as of
-    # 2026).
-    twitter_bearer_token: Optional[str] = Field(default=None, alias="TWITTER_BEARER_TOKEN")
+    # X (Twitter) needs no key — see platforms/twitter/adapter.py. The check
+    # interval stretches by itself with the number of accounts (X allows
+    # 30 timeline requests per 15 minutes); this is the fastest it goes.
+    twitter_enabled: bool = Field(default=True, alias="TWITTER_ENABLED")
+    twitter_min_poll_interval_seconds: float = Field(default=60.0, alias="TWITTER_MIN_POLL_INTERVAL_SECONDS")
     youtube_api_key: Optional[str] = Field(default=None, alias="YOUTUBE_API_KEY")
     twitch_client_id: Optional[str] = Field(default=None, alias="TWITCH_CLIENT_ID")
     twitch_client_secret: Optional[str] = Field(default=None, alias="TWITCH_CLIENT_SECRET")

@@ -64,6 +64,7 @@ _STYLES: Dict[str, _PlatformStyle] = {
     "instagram": _PlatformStyle(
         name="Instagram", color=0xE1306C, button_label="Open on Instagram", footers={}, description_label="Caption"
     ),
+    "twitter": _PlatformStyle(name="X", color=0x1D9BF0, button_label="Open on X", footers={}, description_label="Post"),
 }
 
 _HEADLINES: Dict[EventType, str] = {
@@ -209,6 +210,8 @@ def _account_url(event: NormalizedEvent) -> Optional[str]:
         return f"https://kick.com/{event.account_username.lstrip('@')}"
     if event.platform == "instagram":
         return f"https://www.instagram.com/{event.account_username.lstrip('@')}/"
+    if event.platform == "twitter":
+        return f"https://x.com/{event.account_username.lstrip('@')}"
     return None
 
 
