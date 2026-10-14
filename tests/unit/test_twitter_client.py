@@ -28,13 +28,29 @@ async def test_reads_the_posts_and_the_rate_limit_headers() -> None:
         return httpx.Response(200, text=page([post("2"), retweet("1")]), headers=headers)
 
     client = _client_with(handler)
-    posts = await client.get_timeline("NASA")
+    posts = await client.get_timeline_by_handle("NASA")
+    await client.get_timeline_by_id("11348282")
 
     assert [p["id_str"] for p in posts] == ["2", "1"]
     assert seen[0].url.path == "/srv/timeline-profile/screen-name/NASA"
+    assert seen[1].url.path == "/srv/timeline-profile/user-id/11348282"
     assert "Mozilla" in seen[0].headers["User-Agent"]
-    assert client.requests_remaining == 23
-    assert 590 < client.seconds_until_reset() <= 600
+    assert client.requests_remaining("handle") == 23 and client.requests_remaining("id") == 23
+    assert 590 < client.seconds_until_reset("id") <= 600
+
+
+async def test_the_two_lookup_kinds_have_separate_limits() -> None:
+    reset_at = time.time() + 600
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        remaining = "0" if "screen-name" in request.url.path else "29"
+        return httpx.Response(200, text=page([post("1")]), headers={"x-rate-limit-remaining": remaining, "x-rate-limit-reset": str(reset_at)})
+
+    client = _client_with(handler)
+    await client.get_timeline_by_handle("NASA")
+    await client.get_timeline_by_id("1")
+
+    assert client.requests_remaining("handle") == 0 and client.requests_remaining("id") == 29
 
 
 async def test_429_waits_for_the_window_to_reset() -> None:
@@ -43,8 +59,8 @@ async def test_429_waits_for_the_window_to_reset() -> None:
         lambda r: httpx.Response(429, text="Rate limit exceeded", headers={"x-rate-limit-reset": str(reset_at), "x-rate-limit-remaining": "0"})
     )
 
-    with pytest.raises(RateLimitedError) as exc_info:
-        await client.get_timeline("NASA")
+    with pytest.raises(RateLimitedError, match="try again in about 5 minutes") as exc_info:
+        await client.get_timeline_by_handle("NASA")
 
     assert 290 < exc_info.value.retry_after <= 300
 
@@ -52,7 +68,7 @@ async def test_429_waits_for_the_window_to_reset() -> None:
 async def test_an_unknown_account_has_no_posts_and_cant_be_added() -> None:
     client = _client_with(lambda r: httpx.Response(200, text=page([])))
 
-    posts = await client.get_timeline("nobody_here")
+    posts = await client.get_timeline_by_handle("nobody_here")
 
     assert posts == []
     with pytest.raises(PermanentPlatformError, match="Couldn't find public posts"):
@@ -63,7 +79,7 @@ async def test_a_changed_page_is_a_temporary_error_not_a_bad_account() -> None:
     client = _client_with(lambda r: httpx.Response(200, text="<html>something else</html>"))
 
     with pytest.raises(TransientPlatformError, match="page format changed"):
-        await client.get_timeline("NASA")
+        await client.get_timeline_by_id("11348282")
 
 
 async def test_server_errors_and_timeouts_are_temporary() -> None:
@@ -71,9 +87,9 @@ async def test_server_errors_and_timeouts_are_temporary() -> None:
         raise httpx.ReadTimeout("timed out", request=request)
 
     with pytest.raises(TransientPlatformError):
-        await _client_with(lambda r: httpx.Response(503)).get_timeline("NASA")
+        await _client_with(lambda r: httpx.Response(503)).get_timeline_by_id("11348282")
     with pytest.raises(TransientPlatformError):
-        await _client_with(timeout).get_timeline("NASA")
+        await _client_with(timeout).get_timeline_by_id("11348282")
 
 
 def test_the_profile_comes_from_the_accounts_own_post_not_a_retweeted_one() -> None:

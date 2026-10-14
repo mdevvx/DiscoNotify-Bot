@@ -371,7 +371,7 @@ Credentials: `KICK_CLIENT_ID`/`KICK_CLIENT_SECRET`, an app access token via OAut
 
 Alerts for new **original posts** (quote posts included; retweets and replies left out) from any public X account. **No API key and no cost** — the bot reads the account's public embedded timeline (the feed X provides for embedding a profile on websites), which returns its latest ~20 posts with text, photos/video previews, name and avatar.
 
-**Check speed:** X allows 30 timeline requests per 15 minutes. Each X account is fetched once per check no matter how many servers follow it, and the interval stretches with the number of different X accounts to use about 20 of those 30 (a request sometimes counts twice, and some are kept for adding accounts):
+**Check speed:** X allows 30 timeline requests per 15 minutes per IP address, counted **separately** for lookups by @handle and by user ID. Adding an account looks it up by @handle; routine checks read it by user ID — so checks never use up what adding needs. Each X account is fetched once per check no matter how many servers follow it, and the interval stretches with the number of different X accounts to use about 20 of those 30 (a request sometimes counts twice):
 
 | Different X accounts | Checked every |
 |---|---|
@@ -379,12 +379,12 @@ Alerts for new **original posts** (quote posts included; retweets and replies le
 | 10 | 7.5 minutes |
 | 50 | 37.5 minutes |
 
-When X reports the window is used up, X checks pause until it resets (other platforms aren't affected).
+When X reports a window is used up, that kind of request waits for the reset (other platforms aren't affected). Adding an account while X is busy says "try again in about N minutes" and adds nothing. On a host whose IP address is shared with other apps (e.g. Railway), others' requests count too — a static outbound IP gives the bot the full limit.
 
 **Notes**
 - Added by @handle or profile URL. Private, suspended and never-posted accounts can't be added.
 - A newly added account's existing posts are never alerted; an account with no posts gets its first one alerted.
-- The timeline is fetched by @handle: if the account renames, it's reported as an error — remove it and add it again.
+- Checks go by the account's user ID, so an account that changes its @handle keeps working (alerts link to the new handle).
 - `TWITTER_ENABLED=false` turns X off.
 
 ## Instagram adapter (platforms/instagram/)

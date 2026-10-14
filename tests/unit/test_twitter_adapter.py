@@ -19,17 +19,30 @@ _ACCOUNT = AccountRef(platform="twitter", platform_account_id="11348282", userna
 
 
 class FakeClient:
+    """Timelines keyed by lower-case @handle; by-ID lookups find the same
+    timeline through its owner's ID."""
+
     def __init__(self) -> None:
         self.timelines: Dict[str, List[Dict[str, Any]]] = {}
         self.fetched: List[str] = []
-        self.requests_remaining: Optional[int] = None
+        self.remaining: Dict[str, Optional[int]] = {}
         self.reset_in = 0.0
 
-    async def get_timeline(self, handle: str) -> List[Dict[str, Any]]:
-        self.fetched.append(handle)
+    async def get_timeline_by_handle(self, handle: str) -> List[Dict[str, Any]]:
+        self.fetched.append(f"@{handle}")
         return self.timelines.get(handle.lower(), [])
 
-    def seconds_until_reset(self) -> float:
+    async def get_timeline_by_id(self, user_id: str) -> List[Dict[str, Any]]:
+        self.fetched.append(user_id)
+        for posts in self.timelines.values():
+            if posts and posts[0]["user"]["id_str"] == user_id:
+                return posts
+        return []
+
+    def requests_remaining(self, kind: str) -> Optional[int]:
+        return self.remaining.get(kind)
+
+    def seconds_until_reset(self, kind: str) -> float:
         return max(self.reset_in, 1.0)
 
     async def aclose(self) -> None:
@@ -119,7 +132,7 @@ async def test_one_fetch_is_shared_by_every_server_following_the_account() -> No
     clock.now += 61
     await adapter.fetch_updates(_ACCOUNT, "30")
 
-    assert client.fetched == ["NASA", "NASA"]
+    assert client.fetched == ["11348282", "11348282"]  # by user ID, not @handle
     assert adapter.take_request_count() == 2
 
 
@@ -128,26 +141,38 @@ def test_interval_keeps_under_30_requests_per_15_minutes(accounts: int, interval
     assert _adapter(FakeClient()).poll_interval_seconds(accounts) == interval
 
 
-async def test_checks_pause_when_the_window_is_nearly_used_up_but_adding_still_works() -> None:
+async def test_checks_pause_when_their_window_is_used_up_but_adding_has_its_own() -> None:
     client = FakeClient()
     client.timelines["nasa"] = [post("30")]
-    client.requests_remaining = 2
+    client.remaining = {"id": 1, "handle": 25}
     client.reset_in = 400
 
     with pytest.raises(RateLimitedError) as exc_info:
         await _adapter(client).fetch_updates(_ACCOUNT, "10")
-    ref = await _adapter(client).validate_account("NASA")  # the reserved requests
+    ref = await _adapter(client).validate_account("NASA")
 
     assert exc_info.value.retry_after == 400
+    assert "try again in about 7 minutes" in str(exc_info.value)
     assert ref == _ACCOUNT
 
 
-async def test_a_handle_now_owned_by_another_account_is_reported() -> None:
+async def test_adding_says_when_to_try_again_when_x_is_busy() -> None:
     client = FakeClient()
-    client.timelines["nasa"] = [post("30", user={"id_str": "999", "screen_name": "NASA"})]
+    client.remaining = {"handle": 0}
+    client.reset_in = 60
 
-    with pytest.raises(PermanentPlatformError, match="renamed"):
-        await _adapter(client).fetch_updates(_ACCOUNT, "10")
+    with pytest.raises(RateLimitedError, match="try again in about 1 minute$"):
+        await _adapter(client).validate_account("NASA")
+
+
+async def test_an_account_that_changes_its_handle_keeps_working() -> None:
+    client = FakeClient()
+    client.timelines["nasa_new"] = [post("30", user={**post("0")["user"], "screen_name": "NASA_new"})]
+
+    result = await _adapter(client).fetch_updates(_ACCOUNT, "10")
+
+    assert [p["id_str"] for p in result.items] == ["30"]
+    assert _adapter(client).normalize_event(_ACCOUNT, result.items[0]).url == "https://x.com/NASA_new/status/30"
 
 
 async def test_get_live_status_is_never_expected_to_be_called() -> None:

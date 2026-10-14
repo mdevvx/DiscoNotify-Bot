@@ -1,21 +1,21 @@
 """X (Twitter) adapter — new-post alerts from X's public embedded timeline
 (see client.py). Free: no API key, no login.
 
-The one constraint is X's limit of 30 timeline requests per 15 minutes per
-IP address. So:
+The one constraint is X's limit of 30 requests per 15 minutes per IP
+address — counted separately for lookups by @handle and by user ID. So:
+- routine checks read the timeline by user ID; adding an account looks it
+  up by @handle — checks never use up what adding needs, and an account
+  that changes its @handle keeps working;
 - each X account is fetched once per check and shared by every server that
   follows it;
 - the check interval stretches with the number of distinct accounts, using
-  about 20 of the 30 requests (a request sometimes counts twice, and some
-  are left for adding accounts):
-  45s per account — 10 accounts → every 7.5 min, 50 → every 37.5 min;
-- when X says the window is (nearly) used up, the platform waits for the
-  reset instead of hitting 429s.
+  about 20 of the 30 (a request sometimes counts twice): 45s per account —
+  10 accounts → every 7.5 min, 50 → every 37.5 min;
+- when X says a window is (nearly) used up, that kind of request waits for
+  the reset instead of hitting 429s.
 
 Only original posts are alerted (quote posts included; retweets and replies
-left out). Private, suspended and never-posted accounts can't be added. The
-timeline is fetched by @handle; if the account renames, it has to be
-re-added.
+left out). Private, suspended and never-posted accounts can't be added.
 """
 
 from __future__ import annotations
@@ -27,16 +27,15 @@ from typing import Any, Callable, ClassVar, Dict, FrozenSet, List, Optional
 from events.models import NormalizedEvent
 from platforms.base import AccountRef, Capability, FetchResult, LiveStatus, PlatformAdapter
 from platforms.twitter import parser
-from platforms.twitter.client import TwitterClient, require_posts
-from utils.errors import PermanentPlatformError, RateLimitedError
+from platforms.twitter.client import BY_HANDLE, BY_ID, TwitterClient, busy_error, require_posts
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 _WINDOW_SECONDS = 900
 _REQUESTS_PER_WINDOW_FOR_CHECKS = 20
-# Requests kept back in each window so adding an account still works.
-_RESERVED_FOR_ADDING = 2
+# Left unused in the checks' window, since a request sometimes counts twice.
+_KEEP_SPARE = 1
 # Cursor for an account with no posts yet: everything it posts is new.
 _EMPTY_CURSOR = "0"
 
@@ -75,7 +74,9 @@ class TwitterAdapter(PlatformAdapter):
 
     async def validate_account(self, identifier: str) -> AccountRef:
         handle = parser.parse_identifier(identifier)
-        posts = await self._fetch(handle, reserve=0)
+        self._check_window(BY_HANDLE, reserve=0)
+        self._count_request()
+        posts = await self._client.get_timeline_by_handle(handle)
         ref = parser.user_to_account_ref(require_posts(posts, handle))
         self._snapshots[ref.platform_account_id] = _Snapshot(self._clock(), posts)
         return ref
@@ -105,21 +106,13 @@ class TwitterAdapter(PlatformAdapter):
         if snapshot is not None and self._clock() - snapshot.fetched_at < self._poll_interval / 2:
             return snapshot.posts
 
-        posts = await self._fetch(account.username, reserve=_RESERVED_FOR_ADDING)
-        owner = next((post.get("user") or {} for post in posts), {})
-        if owner.get("id_str") and str(owner["id_str"]) != key:
-            raise PermanentPlatformError(
-                f"@{account.username} now belongs to a different X account — the monitored account was renamed. "
-                "Remove it and add it again under its new handle."
-            )
+        self._check_window(BY_ID, reserve=_KEEP_SPARE)
+        self._count_request()
+        posts = await self._client.get_timeline_by_id(key)
         self._snapshots[key] = _Snapshot(self._clock(), posts)
         return posts
 
-    async def _fetch(self, handle: str, *, reserve: int) -> List[Dict[str, Any]]:
-        remaining = self._client.requests_remaining
-        if remaining is not None and remaining <= reserve and self._client.seconds_until_reset() > 1:
-            raise RateLimitedError(
-                "X timeline requests for this 15-minute window are used up", retry_after=self._client.seconds_until_reset()
-            )
-        self._count_request()
-        return await self._client.get_timeline(handle)
+    def _check_window(self, kind: str, *, reserve: int) -> None:
+        remaining = self._client.requests_remaining(kind)
+        if remaining is not None and remaining <= reserve:
+            raise busy_error(self._client.seconds_until_reset(kind))

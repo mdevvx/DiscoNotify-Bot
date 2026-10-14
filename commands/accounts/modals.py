@@ -23,7 +23,7 @@ from events.models import EventType, NormalizedEvent
 from notifications.templates import MAX_TEMPLATE_LENGTH, PLACEHOLDERS, format_role_mention, render_custom_message
 from platforms.base import event_types_for_capabilities
 from ui import cards
-from utils.errors import PermanentPlatformError, PlatformError
+from utils.errors import PermanentPlatformError, PlatformError, RateLimitedError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -184,6 +184,9 @@ class AddAccountModal(_Form):
             account_ref = await adapter.validate_account(identifier)
         except PermanentPlatformError as exc:
             await cards.error(interaction, f"Couldn't find that {form.name} account: {exc}")
+            return
+        except RateLimitedError as exc:
+            await cards.error(interaction, f"Couldn't check that {form.name} account yet — {exc}. Nothing was added.")
             return
         except PlatformError as exc:
             # The platform answered, but not about this account — an expired
