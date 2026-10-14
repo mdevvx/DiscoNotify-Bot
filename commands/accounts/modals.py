@@ -23,7 +23,7 @@ from events.models import EventType, NormalizedEvent
 from notifications.templates import MAX_TEMPLATE_LENGTH, PLACEHOLDERS, format_role_mention, render_custom_message
 from platforms.base import event_types_for_capabilities
 from ui import cards
-from utils.errors import PermanentPlatformError
+from utils.errors import PermanentPlatformError, PlatformError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -183,6 +183,13 @@ class AddAccountModal(_Form):
             account_ref = await adapter.validate_account(identifier)
         except PermanentPlatformError as exc:
             await cards.error(interaction, f"Couldn't find that {form.name} account: {exc}")
+            return
+        except PlatformError as exc:
+            # The platform answered, but not about this account — an expired
+            # or blocked token, a missing permission, a rate limit. Say which:
+            # "couldn't reach" hid e.g. Meta refusing the bot's token (2026-10-14).
+            logger.warning("Validating %s account %r for guild %s failed: %s", self.platform, identifier, interaction.guild.id, exc)
+            await cards.error(interaction, f"{form.name} isn't available right now — {exc}")
             return
         except Exception:
             logger.exception("Error validating %s account %r for guild %s", self.platform, identifier, interaction.guild.id)

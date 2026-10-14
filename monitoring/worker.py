@@ -95,7 +95,8 @@ class AccountWorker:
 
     async def _fetch_updates(self):
         await self._rate_limiter.acquire()
-        self._health_tracker.record_request()
+        if not self._adapter.counts_own_requests:
+            self._health_tracker.record_request()
         return await self._adapter.fetch_updates(self._account_ref, self._cursor)
 
     async def _poll_live_status(self) -> None:
@@ -162,7 +163,8 @@ class AccountWorker:
 
     async def _get_live_status(self):
         await self._rate_limiter.acquire()
-        self._health_tracker.record_request()
+        if not self._adapter.counts_own_requests:
+            self._health_tracker.record_request()
         return await self._adapter.get_live_status(self._account_ref)
 
     async def _handle_failure(self, exc: Exception) -> None:

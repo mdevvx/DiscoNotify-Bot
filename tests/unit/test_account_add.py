@@ -239,3 +239,16 @@ async def test_a_form_error_shows_an_error_card_instead_of_discords_generic_mess
 def test_form_title_uses_the_right_article() -> None:
     assert AddAccountModal("instagram").title == "Add an Instagram account"
     assert AddAccountModal("youtube").title == "Add a YouTube account"
+
+
+async def test_a_token_or_permission_problem_is_named_not_hidden(db: FakeDatabase) -> None:
+    """Regression test: Meta refusing the bot's own token showed only
+    "Couldn't reach Instagram right now", with nothing to act on."""
+    from utils.errors import TransientPlatformError
+
+    error = TransientPlatformError("Instagram access token is missing a permission: Cannot call API for app")
+    interaction = await _submit(db, adapter=FakeAdapter(error=error))
+
+    message = interaction.followup.messages[0]["content"]
+    assert "missing a permission" in message
+    assert await interaction.client.accounts_repo.list_by_guild(1) == []

@@ -40,12 +40,16 @@ class PlatformScheduler:
         health_tracker: PlatformHealthTracker,
         submit_event: Callable[[NormalizedEvent], Awaitable[None]],
         guild_filter: Optional[Callable[[Set[int]], Awaitable[Set[int]]]] = None,
+        muted_accounts: Optional[Callable[[Set[str]], Awaitable[Set[str]]]] = None,
     ) -> None:
         self._adapter = adapter
         # Which servers may be monitored right now (not paused with
         # /pulsenotify toggle, and with billing access) — see
         # MonitoringManager.guild_filter. None = every server.
         self._guild_filter = guild_filter
+        # Accounts whose every alert type is switched off — checking them
+        # would spend API calls on alerts nobody receives.
+        self._muted_accounts = muted_accounts
         self._default_poll_interval = poll_interval_seconds
         self._poll_interval = poll_interval_seconds
         self._account_repo = account_repo
@@ -86,6 +90,8 @@ class PlatformScheduler:
     async def _run_loop(self) -> None:
         while not self._stop_event.is_set():
             await self._poll_all()
+            if self._adapter.counts_own_requests:
+                self._health_tracker.record_requests(self._adapter.take_request_count())
             await self._health_tracker.flush()
             self._update_poll_interval()
             try:
@@ -141,6 +147,12 @@ class PlatformScheduler:
                 # A failing check must not stop monitoring for servers that
                 # are entitled to it — keep everyone this cycle.
                 logger.warning("Server filter failed for %s; polling every account this cycle.", self._adapter.platform, exc_info=True)
+        if self._muted_accounts is not None and rows:
+            try:
+                muted = await self._muted_accounts({row["id"] for row in rows})
+                rows = [row for row in rows if row["id"] not in muted]
+            except Exception:
+                logger.warning("Alert-settings check failed for %s; polling every account this cycle.", self._adapter.platform, exc_info=True)
         current_ids = {row["id"] for row in rows}
 
         for stale_id in set(self._workers) - current_ids:

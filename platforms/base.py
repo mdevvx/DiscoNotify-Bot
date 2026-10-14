@@ -123,8 +123,23 @@ class PlatformAdapter(abc.ABC):
     platform: ClassVar[str]
     capabilities: ClassVar[FrozenSet[Capability]]
 
+    # Adapters that serve several accounts from one shared/cached API call
+    # (YouTube, Kick, Instagram) count the calls they really make, so the
+    # health stats show actual usage rather than one request per account
+    # per tick. The worker skips its own per-call counting for them.
+    counts_own_requests: ClassVar[bool] = False
+
     def supports(self, capability: Capability) -> bool:
         return capability in self.capabilities
+
+    def _count_request(self, count: int = 1) -> None:
+        self._request_count = getattr(self, "_request_count", 0) + count
+
+    def take_request_count(self) -> int:
+        """Real API calls made since the last call to this (then resets)."""
+        count = getattr(self, "_request_count", 0)
+        self._request_count = 0
+        return count
 
     def poll_interval_seconds(self, distinct_account_count: int) -> Optional[float]:
         """The scheduler cadence this adapter wants, given how many distinct

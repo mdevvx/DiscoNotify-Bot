@@ -16,6 +16,7 @@ from config.settings import Settings
 from database.client import Database
 from database.models import PlatformHealthRow
 from database.repositories.accounts import PlatformAccountRepository
+from database.repositories.alert_configs import AlertConfigurationRepository
 from database.repositories.events import EventRepository
 from database.repositories.live_states import LiveStateRepository
 from database.repositories.platform_health import PlatformHealthRepository
@@ -52,6 +53,7 @@ class MonitoringManager:
         self._account_repo = PlatformAccountRepository(database)
         self._live_state_repo = LiveStateRepository(database)
         self._health_repo = PlatformHealthRepository(database)
+        self._alert_config_repo = AlertConfigurationRepository(database)
         self._event_processor = EventProcessor(
             EventRepository(database),
             notification_sink or _log_only_sink,
@@ -104,6 +106,7 @@ class MonitoringManager:
             health_tracker=health_tracker,
             submit_event=self._event_processor.submit,
             guild_filter=self._filter_guilds,
+            muted_accounts=self._alert_config_repo.accounts_with_every_alert_off,
         )
         self._adapters[adapter.platform] = adapter
         logger.info("Registered %s platform adapter.", adapter.platform)

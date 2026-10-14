@@ -54,6 +54,7 @@ class _Snapshot:
 class KickAdapter(PlatformAdapter):
     platform: ClassVar[str] = "kick"
     capabilities: ClassVar[FrozenSet[Capability]] = frozenset({Capability.LIVE_STATUS})
+    counts_own_requests: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -111,6 +112,7 @@ class KickAdapter(PlatformAdapter):
             ids = sorted(self._known_ids)
             live: Dict[str, Dict[str, Any]] = {}
             for start in range(0, len(ids), MAX_IDS_PER_CALL):
+                self._count_request()
                 for item in await self._client.get_livestreams(ids[start : start + MAX_IDS_PER_CALL]):
                     live[str(item.get("broadcaster_user_id"))] = item
             self._snapshot = _Snapshot(fetched_at=self._clock(), queried=set(ids), live=live)

@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Set
 
 from database.client import Database, is_unique_violation
 from database.models import AlertConfigurationRow
@@ -60,6 +60,19 @@ class AlertConfigurationRepository:
             .execute()
         )
         return result.data[0] if result.data else None
+
+    async def accounts_with_every_alert_off(self, account_ids: Iterable[str]) -> Set[str]:
+        """Of these accounts, the ones that have alert settings and every one
+        of them is switched off. An account with no settings at all isn't
+        included — the sender treats "no settings" as "alerts on"."""
+        ids = list(account_ids)
+        if not ids:
+            return set()
+        result = await self._db.client.table(_TABLE).select("account_id,enabled").in_("account_id", ids).execute()
+        any_on: Dict[str, bool] = {}
+        for row in result.data:
+            any_on[row["account_id"]] = any_on.get(row["account_id"], False) or bool(row["enabled"])
+        return {account_id for account_id, on in any_on.items() if not on}
 
     async def list_for_guild(self, guild_id: int) -> List[AlertConfigurationRow]:
         result = await self._db.client.table(_TABLE).select("*").eq("guild_id", guild_id).execute()

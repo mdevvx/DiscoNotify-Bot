@@ -86,6 +86,7 @@ class YouTubeAdapter(PlatformAdapter):
     capabilities: ClassVar[FrozenSet[Capability]] = frozenset(
         {Capability.VIDEOS, Capability.SHORTS, Capability.LIVE_STATUS}
     )
+    counts_own_requests: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -229,6 +230,7 @@ class YouTubeAdapter(PlatformAdapter):
         if not await self._budget.try_acquire(cost=_LIST_COST):
             self._log_budget_exhausted(account)
             return None
+        self._count_request()
         playlist_items = await self._client.list_uploads(playlist_id, max_results=_UPLOADS_PAGE_SIZE)
         page_ids = [parser.playlist_item_video_id(item) for item in playlist_items]
 
@@ -248,6 +250,7 @@ class YouTubeAdapter(PlatformAdapter):
             if not await self._budget.try_acquire(cost=_LIST_COST):
                 self._log_budget_exhausted(account)
                 return None
+            self._count_request()
             for video in await self._client.get_videos(to_fetch):
                 videos[video["id"]] = video
 
@@ -281,6 +284,7 @@ class YouTubeAdapter(PlatformAdapter):
         if not await self._budget.try_acquire(cost=_LIST_COST):
             self._log_budget_exhausted(account)
             return None
+        self._count_request()
         channel = await self._client.get_channel(channel_id=account.platform_account_id)
         if channel is None:
             raise PermanentPlatformError(f"YouTube channel {account.platform_account_id} no longer exists")

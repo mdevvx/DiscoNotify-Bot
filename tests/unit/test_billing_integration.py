@@ -288,3 +288,37 @@ async def test_a_paddle_rejection_is_shown_by_name_not_as_a_generic_error() -> N
     text = interaction.response.messages[0]["content"]
     assert "not authorized to read price" in text
     assert "Something went wrong" not in text
+
+
+# ── skipping accounts that can't send any alert ─────────────────────────
+
+
+async def test_accounts_with_every_alert_off_are_not_polled() -> None:
+    db = FakeDatabase()
+    _seed_account(db, "acc-on", guild_id=1)
+    _seed_account(db, "acc-off", guild_id=1)
+    scheduler = _make_scheduler(db, FakeAdapter(), [])
+
+    async def muted(account_ids: Set[str]) -> Set[str]:
+        return {"acc-off"} & account_ids
+
+    scheduler._muted_accounts = muted
+    await scheduler._sync_workers()
+
+    assert set(scheduler._workers) == {"acc-on"}
+
+
+async def test_every_alert_off_means_configs_exist_and_none_are_on() -> None:
+    from database.repositories.alert_configs import AlertConfigurationRepository
+
+    db = FakeDatabase()
+    repo = AlertConfigurationRepository(db)  # type: ignore[arg-type]
+    await repo.seed_defaults(1, "all-off", ["video_published", "short_published"])
+    await repo.seed_defaults(1, "one-on", ["video_published", "short_published"])
+    for row in db.tables["pulsenotify_alert_configurations"].rows:
+        if row["account_id"] == "all-off" or row["event_type"] == "short_published":
+            row["enabled"] = False
+
+    muted = await repo.accounts_with_every_alert_off({"all-off", "one-on", "no-settings"})
+
+    assert muted == {"all-off"}  # "no-settings" has no rows: the sender treats that as alerts on

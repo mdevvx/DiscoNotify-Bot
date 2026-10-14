@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import time
+import datetime
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -62,8 +63,16 @@ class Clock:
         return self.now
 
 
+_NOW = datetime.datetime(2026, 10, 14, 12, 0, tzinfo=datetime.timezone.utc)
+
+
 def _make_adapter(client: FakeInstagramClient, clock: Optional[Clock] = None, **kwargs: Any) -> InstagramAdapter:
+    kwargs.setdefault("wall_clock", lambda: _NOW)
     return InstagramAdapter(client, clock=clock or Clock(), **kwargs)  # type: ignore[arg-type]
+
+
+def _posted(ago: datetime.timedelta) -> str:
+    return (_NOW - ago).strftime("%Y-%m-%dT%H:%M:%S+0000")
 
 
 def _next_tick(adapter: InstagramAdapter, clock: Clock) -> None:
@@ -202,8 +211,9 @@ async def test_two_guilds_on_the_same_account_share_one_lookup_per_tick() -> Non
     assert client.seen_usernames == ["somecreator"]
 
 
-async def test_the_next_tick_looks_up_again() -> None:
+async def test_an_active_account_is_looked_up_every_tick() -> None:
     client = FakeInstagramClient()
+    client.discovery["media"] = [_media("m1", _posted(datetime.timedelta(minutes=20)))]
     clock = Clock()
     adapter = _make_adapter(client, clock)
 
@@ -310,3 +320,72 @@ async def test_an_account_added_before_its_first_post_still_announces_that_post(
     result = await adapter.fetch_updates(_ACCOUNT, cursor=baseline.next_cursor)
 
     assert [item["id"] for item in result.items] == ["first"]
+
+
+# ── adaptive cadence (fewer API calls for quiet accounts) ───────────────
+
+
+async def _lookups_over(adapter: InstagramAdapter, clock: Clock, client: FakeInstagramClient, seconds: float) -> int:
+    """How many real lookups happen over `seconds` of scheduler ticks."""
+    adapter.poll_interval_seconds(1)  # 30s ticks
+    start = len(client.seen_usernames)
+    elapsed = 0.0
+    while elapsed < seconds:
+        await adapter.fetch_updates(_ACCOUNT, cursor="m1|2026-01-01T00:00:00+0000")
+        clock.now += 30
+        elapsed += 30
+    return len(client.seen_usernames) - start
+
+
+@pytest.mark.parametrize(
+    "last_post_ago, expected_lookups_per_hour",
+    [
+        (datetime.timedelta(minutes=20), 120),  # active: every 30s tick
+        (datetime.timedelta(hours=3), 30),  # every 2 minutes
+        (datetime.timedelta(days=9), 15),  # quiet: every 4 minutes
+    ],
+)
+async def test_quieter_accounts_are_looked_up_less_often(last_post_ago: datetime.timedelta, expected_lookups_per_hour: int) -> None:
+    client = FakeInstagramClient()
+    client.discovery["media"] = [_media("m1", _posted(last_post_ago))]
+    clock = Clock()
+    adapter = _make_adapter(client, clock)
+
+    assert await _lookups_over(adapter, clock, client, 3600) == expected_lookups_per_hour
+
+
+async def test_an_account_with_no_posts_is_treated_as_quiet() -> None:
+    adapter = _make_adapter(FakeInstagramClient())
+    adapter.poll_interval_seconds(1)
+
+    assert adapter.interval_for({"media": []}) == 240.0
+
+
+async def test_a_new_post_brings_a_quiet_account_back_to_full_speed() -> None:
+    client = FakeInstagramClient()
+    client.discovery["media"] = [_media("m1", _posted(datetime.timedelta(days=9)))]
+    clock = Clock()
+    adapter = _make_adapter(client, clock)
+    adapter.poll_interval_seconds(1)
+
+    await adapter.fetch_updates(_ACCOUNT, cursor=None)
+    client.discovery["media"] = [_media("m2", _posted(datetime.timedelta(minutes=1)))] + client.discovery["media"]
+    clock.now += 240  # the quiet account's next due lookup sees the new post
+    result = await adapter.fetch_updates(_ACCOUNT, cursor="m1|" + _posted(datetime.timedelta(days=9)))
+
+    assert [item["id"] for item in result.items] == ["m2"]
+    # Back to every 30s tick (the first tick is the same instant as the lookup above).
+    assert await _lookups_over(adapter, clock, client, 300) == 9
+
+
+async def test_instagram_counts_only_real_lookups() -> None:
+    client = FakeInstagramClient()
+    client.discovery["media"] = [_media("m1", _posted(datetime.timedelta(days=9)))]
+    clock = Clock()
+    adapter = _make_adapter(client, clock)
+
+    lookups = await _lookups_over(adapter, clock, client, 600)
+
+    assert adapter.counts_own_requests is True
+    assert adapter.take_request_count() == lookups == 3  # not one per tick
+    assert adapter.take_request_count() == 0

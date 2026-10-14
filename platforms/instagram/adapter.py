@@ -72,9 +72,20 @@ class _Snapshot:
     discovery: Dict[str, Any]
 
 
+# Adaptive cadence: how recently an account posted decides how often it's
+# actually looked up — (posted within, check at least this far apart).
+# Anything quieter (or with no posts) is checked every _QUIET_INTERVAL.
+_ACTIVITY_TIERS: Tuple[Tuple[datetime.timedelta, float], ...] = (
+    (datetime.timedelta(hours=1), 0.0),  # the scheduler's normal interval
+    (datetime.timedelta(hours=6), 120.0),
+)
+_QUIET_INTERVAL = 240.0
+
+
 class InstagramAdapter(PlatformAdapter):
     platform: ClassVar[str] = "instagram"
     capabilities: ClassVar[FrozenSet[Capability]] = frozenset({Capability.POSTS})
+    counts_own_requests: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -83,9 +94,11 @@ class InstagramAdapter(PlatformAdapter):
         hourly_call_limit: int = 200,
         min_poll_interval_seconds: float = 30.0,
         clock: Callable[[], float] = time.monotonic,
+        wall_clock: Callable[[], datetime.datetime] = lambda: datetime.datetime.now(datetime.timezone.utc),
     ) -> None:
         self._client = client
         self._clock = clock
+        self._wall_clock = wall_clock
         self._usable_calls_per_hour = max(hourly_call_limit * _BUDGET_HEADROOM, 1.0)
         self._budget = RateLimiter(max_requests=max(int(self._usable_calls_per_hour), 1), period_seconds=3600)
         self._min_poll_interval = min_poll_interval_seconds
@@ -154,6 +167,7 @@ class InstagramAdapter(PlatformAdapter):
         # Counted against the budget but never blocked by it — adding an
         # account is a one-off, interactive action.
         await self._budget.try_acquire()
+        self._count_request()
         discovery = await self._client.get_business_discovery(username)
         if discovery is None:
             raise PermanentPlatformError(
@@ -203,18 +217,38 @@ class InstagramAdapter(PlatformAdapter):
     def normalize_event(self, account: AccountRef, raw_item: Any) -> NormalizedEvent:
         return parser.normalize_media(account, raw_item)
 
+    def interval_for(self, discovery: Dict[str, Any]) -> float:
+        """How far apart this account's lookups should be, from how recently
+        it last posted: within the hour → the normal interval, within 6 hours
+        → 2 minutes, quieter (or no posts) → 4 minutes. Never faster than the
+        scheduler's budget-sized interval."""
+        newest = _newest_post_time(discovery)
+        if newest is not None:
+            quiet_for = self._wall_clock() - newest
+            for posted_within, interval in _ACTIVITY_TIERS:
+                if quiet_for < posted_within:
+                    return max(self._poll_interval, interval)
+        return max(self._poll_interval, _QUIET_INTERVAL)
+
+    def _due(self, snapshot: "_Snapshot") -> bool:
+        # Half a tick of slack so a check lines up with the scheduler's ticks
+        # instead of slipping to the one after.
+        age = self._clock() - snapshot.fetched_at
+        return age >= self.interval_for(snapshot.discovery) - self._poll_interval / 2
+
     async def _get_snapshot(self, account: AccountRef) -> Optional[_Snapshot]:
         # Keyed by username: Business Discovery has no by-ID lookup, so
         # account.username (not platform_account_id) is the query key.
         key = account.username.lower()
         async with self._locks.setdefault(key, asyncio.Lock()):
             cached = self._snapshots.get(key)
-            if cached is not None and self._clock() - cached.fetched_at < self._poll_interval / 2:
+            if cached is not None and not self._due(cached):
                 return cached
 
             if not await self._budget.try_acquire():
                 logger.warning("Skipping Instagram check for %s — hourly call budget used up.", account.username)
                 return None
+            self._count_request()
             discovery = await self._client.get_business_discovery(account.username)
             if discovery is None:
                 raise PermanentPlatformError(
@@ -231,6 +265,19 @@ def _empty_baseline_cursor() -> str:
     timestamp format Meta uses, so it compares correctly as a string."""
     now = datetime.datetime.now(datetime.timezone.utc)
     return f"{_CURSOR_SEPARATOR}{now.strftime('%Y-%m-%dT%H:%M:%S+0000')}"
+
+
+def _newest_post_time(discovery: Dict[str, Any]) -> Optional[datetime.datetime]:
+    times = []
+    for item in discovery.get("media", []):
+        value = item.get("timestamp")
+        if not value:
+            continue
+        try:
+            times.append(datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%S%z"))
+        except ValueError:
+            continue
+    return max(times) if times else None
 
 
 def _make_cursor(media: Dict[str, Any]) -> str:

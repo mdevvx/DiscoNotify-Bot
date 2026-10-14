@@ -42,6 +42,11 @@ class PlatformHealthTracker:
         alongside RateLimiter.acquire())."""
         self._pending_requests += 1
 
+    def record_requests(self, count: int) -> None:
+        """Several requests at once — e.g. an adapter's own count of the real
+        API calls it made this cycle."""
+        self._pending_requests += max(count, 0)
+
     async def flush(self) -> None:
         if self._pending_requests:
             await self._repo.increment_requests(self._platform, by=self._pending_requests)

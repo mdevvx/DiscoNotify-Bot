@@ -23,10 +23,10 @@ import httpx
 from utils.errors import PermanentPlatformError, RateLimitedError, TransientPlatformError
 
 _BASE_URL = "https://graph.facebook.com/v26.0"
-# The most recent media items fetched per call. One call costs the same no
-# matter the page size, and a bigger page means a burst of posts between
-# two checks is still caught.
-_MEDIA_PAGE_SIZE = 10
+# The most recent media items fetched per call. Meta's usage counts
+# processing time as well as calls, so the page is kept small — 5 posts
+# between two checks (minutes apart) is already an unusual burst.
+_MEDIA_PAGE_SIZE = 5
 _MEDIA_FIELDS = "id,caption,timestamp,media_type,media_product_type,media_url,thumbnail_url,permalink"
 
 # Meta's rate-limit error codes: 4 (app), 17 (user), 32 (page), 613
