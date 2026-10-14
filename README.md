@@ -382,7 +382,7 @@ Alerts for new **original posts** (quote posts included; retweets and replies le
 When X reports a window is used up, that kind of request waits for the reset (other platforms aren't affected). Adding an account while X is busy says "try again in about N minutes" and adds nothing. On a host whose IP address is shared with other apps (e.g. Railway), others' requests count too — a static outbound IP gives the bot the full limit.
 
 **Notes**
-- Added by @handle or profile URL. Private, suspended and never-posted accounts can't be added.
+- Added by @handle or profile URL. The handle is turned into the account's ID with FxTwitter's free public API (api.fxtwitter.com — the service behind fxtwitter.com link previews), then read by ID, so adding works even when other apps on a shared host IP have used up X's by-@handle limit; if FxTwitter is down, X is asked by @handle instead. Private, suspended and never-posted accounts can't be added.
 - A newly added account's existing posts are never alerted; an account with no posts gets its first one alerted.
 - Checks go by the account's user ID, so an account that changes its @handle keeps working (alerts link to the new handle).
 - `TWITTER_ENABLED=false` turns X off.

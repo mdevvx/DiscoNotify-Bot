@@ -28,6 +28,7 @@ from events.models import NormalizedEvent
 from platforms.base import AccountRef, Capability, FetchResult, LiveStatus, PlatformAdapter
 from platforms.twitter import parser
 from platforms.twitter.client import BY_HANDLE, BY_ID, TwitterClient, busy_error, require_posts
+from utils.errors import PermanentPlatformError, TransientPlatformError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -73,10 +74,25 @@ class TwitterAdapter(PlatformAdapter):
         return self._poll_interval
 
     async def validate_account(self, identifier: str) -> AccountRef:
+        """@handle → ID through FxTwitter, then the timeline by ID (the
+        checks' window, which a shared host IP leaves mostly free). Falls
+        back to X's by-@handle timeline if FxTwitter is down."""
         handle = parser.parse_identifier(identifier)
-        self._check_window(BY_HANDLE, reserve=0)
-        self._count_request()
-        posts = await self._client.get_timeline_by_handle(handle)
+        try:
+            user = await self._client.lookup_user(handle)
+        except TransientPlatformError as exc:
+            logger.warning("FxTwitter lookup failed (%s) — looking @%s up on X instead.", exc, handle)
+            self._check_window(BY_HANDLE, reserve=0)
+            self._count_request()
+            posts = await self._client.get_timeline_by_handle(handle)
+        else:
+            if user is None:
+                raise PermanentPlatformError(f"There's no X account @{handle} — check the handle.")
+            if user.get("protected"):
+                raise PermanentPlatformError(f"@{handle} is a private account — its posts can't be read.")
+            self._check_window(BY_ID, reserve=0)
+            self._count_request()
+            posts = await self._client.get_timeline_by_id(str(user["id"]))
         ref = parser.user_to_account_ref(require_posts(posts, handle))
         self._snapshots[ref.platform_account_id] = _Snapshot(self._clock(), posts)
         return ref

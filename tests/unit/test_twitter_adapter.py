@@ -13,7 +13,7 @@ from events.models import EventType
 from platforms.base import AccountRef
 from platforms.twitter.adapter import TwitterAdapter
 from tests.unit.twitter_fixtures import post, retweet
-from utils.errors import PermanentPlatformError, RateLimitedError
+from utils.errors import PermanentPlatformError, RateLimitedError, TransientPlatformError
 
 _ACCOUNT = AccountRef(platform="twitter", platform_account_id="11348282", username="NASA")
 
@@ -27,6 +27,20 @@ class FakeClient:
         self.fetched: List[str] = []
         self.remaining: Dict[str, Optional[int]] = {}
         self.reset_in = 0.0
+        self.lookup_down = False
+        self.protected: set = set()
+
+    async def lookup_user(self, handle: str) -> Optional[Dict[str, Any]]:
+        """FxTwitter: finds the account from its timeline's owner."""
+        if self.lookup_down:
+            raise TransientPlatformError("FxTwitter lookup error 503")
+        posts = self.timelines.get(handle.lower())
+        if handle.lower() in self.protected:
+            return {"id": "77", "screen_name": handle, "protected": True}
+        if not posts:
+            return None
+        user = posts[0]["user"]
+        return {"id": user["id_str"], "screen_name": user["screen_name"], "protected": False}
 
     async def get_timeline_by_handle(self, handle: str) -> List[Dict[str, Any]]:
         self.fetched.append(f"@{handle}")
@@ -61,18 +75,40 @@ def _adapter(client: FakeClient, clock: Optional[Clock] = None) -> TwitterAdapte
     return TwitterAdapter(client, clock=clock or Clock())  # type: ignore[arg-type]
 
 
-async def test_adding_an_account_resolves_the_handle_from_its_posts() -> None:
+async def test_adding_an_account_looks_it_up_then_reads_it_by_id() -> None:
+    """Never touches X's by-@handle window, which other apps on a shared
+    host IP (Railway) kept using up (2026-10-15)."""
     client = FakeClient()
     client.timelines["nasa"] = [post("2")]
+    client.remaining = {"handle": 0}
 
     ref = await _adapter(client).validate_account("https://x.com/NASA")
 
     assert ref == _ACCOUNT
+    assert client.fetched == ["11348282"]
 
 
-async def test_an_account_without_public_posts_cant_be_added() -> None:
-    with pytest.raises(PermanentPlatformError):
+async def test_an_unknown_account_cant_be_added() -> None:
+    with pytest.raises(PermanentPlatformError, match="no X account @nobody"):
         await _adapter(FakeClient()).validate_account("@nobody")
+
+
+async def test_a_private_account_cant_be_added() -> None:
+    client = FakeClient()
+    client.protected.add("secret")
+
+    with pytest.raises(PermanentPlatformError, match="private"):
+        await _adapter(client).validate_account("@secret")
+
+
+async def test_if_the_lookup_service_is_down_x_is_asked_by_handle() -> None:
+    client = FakeClient()
+    client.timelines["nasa"] = [post("2")]
+    client.lookup_down = True
+
+    ref = await _adapter(client).validate_account("NASA")
+
+    assert ref == _ACCOUNT and client.fetched == ["@NASA"]
 
 
 async def test_the_first_check_is_a_baseline_without_alerts() -> None:
@@ -141,7 +177,7 @@ def test_interval_keeps_under_30_requests_per_15_minutes(accounts: int, interval
     assert _adapter(FakeClient()).poll_interval_seconds(accounts) == interval
 
 
-async def test_checks_pause_when_their_window_is_used_up_but_adding_has_its_own() -> None:
+async def test_checks_pause_when_their_window_is_nearly_used_up_but_adding_still_works() -> None:
     client = FakeClient()
     client.timelines["nasa"] = [post("30")]
     client.remaining = {"id": 1, "handle": 25}
@@ -158,6 +194,7 @@ async def test_checks_pause_when_their_window_is_used_up_but_adding_has_its_own(
 
 async def test_adding_says_when_to_try_again_when_x_is_busy() -> None:
     client = FakeClient()
+    client.lookup_down = True
     client.remaining = {"handle": 0}
     client.reset_in = 60
 

@@ -96,3 +96,21 @@ def test_the_profile_comes_from_the_accounts_own_post_not_a_retweeted_one() -> N
     other = post("9", user={"id_str": "1", "screen_name": "Someone"})
 
     assert require_posts([other, post("8")], "nasa")["id_str"] == "11348282"
+
+
+async def test_lookup_finds_the_account_or_none_for_a_missing_one() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "api.fxtwitter.com"
+        if request.url.path == "/NASA":
+            return httpx.Response(200, json={"code": 200, "user": {"id": "11348282", "screen_name": "NASA", "protected": False}})
+        return httpx.Response(302, headers={"location": "https://github.com/FxEmbed/FxEmbed"})
+
+    client = _client_with(handler)
+
+    assert (await client.lookup_user("NASA"))["id"] == "11348282"
+    assert await client.lookup_user("nobody") is None
+
+
+async def test_lookup_service_errors_are_temporary() -> None:
+    with pytest.raises(TransientPlatformError):
+        await _client_with(lambda r: httpx.Response(503)).lookup_user("NASA")

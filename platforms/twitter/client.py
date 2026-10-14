@@ -24,6 +24,7 @@ import httpx
 from utils.errors import PermanentPlatformError, RateLimitedError, TransientPlatformError
 
 _BASE_URL = "https://syndication.twitter.com"
+_FXTWITTER_URL = "https://api.fxtwitter.com"
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"
 )
@@ -55,6 +56,26 @@ class TwitterClient:
 
     async def aclose(self) -> None:
         await self._http.aclose()
+
+    async def lookup_user(self, handle: str) -> Optional[Dict[str, Any]]:
+        """@handle → the account's ID, name and avatar via FxTwitter's free
+        public API (api.fxtwitter.com, the service behind fxtwitter.com link
+        previews) — so adding an account doesn't depend on X's @handle
+        window, which other apps on a shared host IP can use up. None if the
+        account doesn't exist (FxTwitter answers that with a redirect)."""
+        try:
+            response = await self._http.get(f"{_FXTWITTER_URL}/{handle}", follow_redirects=False)
+        except httpx.HTTPError as exc:
+            raise TransientPlatformError(f"FxTwitter lookup failed for @{handle}: {exc}") from exc
+        if response.status_code in (301, 302, 404):
+            return None
+        if response.status_code != 200:
+            raise TransientPlatformError(f"FxTwitter lookup error {response.status_code} for @{handle}")
+        try:
+            user = response.json().get("user") or {}
+        except ValueError as exc:
+            raise TransientPlatformError(f"FxTwitter lookup for @{handle} couldn't be read") from exc
+        return user if user.get("id") else None
 
     async def get_timeline_by_handle(self, handle: str) -> List[Dict[str, Any]]:
         """For adding an account (its user ID isn't known yet)."""
