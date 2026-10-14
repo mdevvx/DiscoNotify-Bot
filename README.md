@@ -2,7 +2,7 @@
 
 A multi-tenant Discord bot that watches social/streaming accounts (YouTube, Twitch, Kick, X/Twitter, Instagram, Facebook, TikTok) and posts alerts to Discord when they post or go live. Every server's configuration — accounts, channels, alert settings, enabled/disabled state — is fully isolated by `guild_id`.
 
-**Platforms currently offered:** YouTube, Kick, Instagram, X (Twitter). A Twitch adapter exists under `platforms/` but is held back (not registered, not in `/pulsenotify account-add`) until it's finalized.
+**Platforms currently offered:** YouTube, Kick, Instagram, X (Twitter). **On hold:** Twitch (an adapter exists under `platforms/` but isn't registered or offered in `/pulsenotify account-add`) and TikTok (no adapter yet).
 
 This is being built in phases. **Phases 1–6 are complete, Phase 7 is partially complete, and Phase 8 is partially complete.** YouTube, Twitch, Kick, X/Twitter, and Instagram are all working end-to-end: `/pulsenotify account-add` registers an account, the monitoring framework polls it, and real Discord notifications go out for new videos/Shorts (YouTube), new posts (X/Twitter, Instagram), and live start/end (YouTube, Twitch, Kick). Facebook and TikTok have **no adapter** — see the Phase 7 section below for why: neither platform offers an official way to monitor an account that hasn't individually authorized this app. Per-account alert configuration (which event types notify, embeds, role mentions) can now be viewed and changed entirely via slash commands — see the Commands section.
 
@@ -16,7 +16,7 @@ This is being built in phases. **Phases 1–6 are complete, Phase 7 is partially
 | 4 | YouTube adapter, `/pulsenotify account-add\|account-remove\|account-list`, notification embeds + sender | ✅ Done |
 | 5 | Twitch adapter (live/offline detection) | ✅ Done |
 | 6 | Kick adapter (live/offline detection) | ✅ Done |
-| 7 | X/Twitter, Instagram, Facebook, TikTok adapters | ⚠️ Partial — X/Twitter and Instagram done (with real caveats, see below); Facebook and TikTok have no official path and were **not built** |
+| 7 | X/Twitter, Instagram, Facebook, TikTok adapters | ⚠️ Partial — X/Twitter (free, no key) and Instagram done; Facebook not built; TikTok on hold |
 | 8 | `/pulsenotify alerts` (per-event-type enabled/embed toggles + viewing), `/pulsenotify account-set-mention` (role mentions), `/pulsenotify account-info` (view full config incl. custom message) | ⚠️ Partial — analytics and general admin tooling deliberately **skipped**, at the user's explicit choice (2026-09-15) |
 
 ### Platform API policy (applies to every platform integration)
