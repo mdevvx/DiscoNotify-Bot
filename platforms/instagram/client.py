@@ -14,7 +14,6 @@ account invalid the moment the operator's token expires.
 
 from __future__ import annotations
 
-import datetime
 import json
 from typing import Any, Dict, List, Optional
 

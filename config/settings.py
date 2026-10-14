@@ -98,6 +98,10 @@ class Settings(BaseSettings):
     # platform's API as a whole.
     monitoring_health_degraded_after: int = Field(default=3, alias="MONITORING_HEALTH_DEGRADED_AFTER")
     monitoring_health_error_after: int = Field(default=8, alias="MONITORING_HEALTH_ERROR_AFTER")
+    # Most accounts one server can monitor. YouTube's daily quota, Instagram's
+    # hourly calls and X's request window are shared by every server — this
+    # stops one server from using them up for everyone.
+    max_accounts_per_server: int = Field(default=25, ge=1, alias="MAX_ACCOUNTS_PER_SERVER")
     monitoring_http_timeout_seconds: float = Field(default=15.0, alias="MONITORING_HTTP_TIMEOUT_SECONDS")
 
     # Per-server subscriptions (billing/). Nothing is enforced until

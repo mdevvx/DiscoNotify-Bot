@@ -114,3 +114,33 @@ async def test_lookup_finds_the_account_or_none_for_a_missing_one() -> None:
 async def test_lookup_service_errors_are_temporary() -> None:
     with pytest.raises(TransientPlatformError):
         await _client_with(lambda r: httpx.Response(503)).lookup_user("NASA")
+
+
+async def test_fxtwitter_posts_are_converted_to_the_timeline_shape() -> None:
+    status = {
+        "id": "2110162914594443689",
+        "created_at": "Wed Oct 14 00:16:58 +0000 2026",
+        "text": "Who wants $100? https://cooked.com/promotions",
+        "author": {"id": "2008104784159805440", "screen_name": "Cookedcom", "name": "Cooked", "avatar_url": "https://pbs.twimg.com/a_200x200.jpg"},
+        "media": {"photos": [{"type": "photo", "url": "https://pbs.twimg.com/media/HUjN.jpg?name=orig"}]},
+        "quote": None,
+        "replying_to": None,
+        "reposted_by": None,
+    }
+    video = {**status, "id": "2", "media": {"videos": [{"type": "video", "thumbnail_url": "https://pbs.twimg.com/thumb.jpg"}]}}
+    repost = {**status, "id": "3", "reposted_by": {"screen_name": "Cookedcom"}, "media": {}}
+    client = _client_with(lambda r: httpx.Response(200, json={"code": 200, "results": [status, video, repost]}))
+
+    posts = await client.get_recent_posts_fx("Cookedcom")
+
+    from platforms.base import AccountRef
+    from platforms.twitter import parser
+
+    ref = AccountRef(platform="twitter", platform_account_id="2008104784159805440", username="Cookedcom")
+    event = parser.normalize_tweet(ref, posts[0])
+    assert event.url == "https://x.com/Cookedcom/status/2110162914594443689"
+    assert event.description == "Who wants $100? https://cooked.com/promotions"
+    assert event.thumbnail_url == "https://pbs.twimg.com/media/HUjN.jpg?name=orig"
+    assert event.author == "Cooked" and event.published_at is not None
+    assert parser.normalize_tweet(ref, posts[1]).thumbnail_url == "https://pbs.twimg.com/thumb.jpg"
+    assert [p["id_str"] for p in parser.original_posts(posts)] == ["2", "2110162914594443689"]  # repost left out

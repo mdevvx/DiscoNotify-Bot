@@ -87,11 +87,13 @@ class FakeClient:
         self.channels_repo = NotificationChannelRepository(db)  # type: ignore[arg-type]
         self.monitoring = FakeMonitoring(adapter)
         self.notification_sender = FakeSender()
+        self.settings = type("S", (), {"max_accounts_per_server": 25})()
 
 
 class FakeInteraction:
     def __init__(self, db: FakeDatabase, adapter: Optional[FakeAdapter] = None) -> None:
         self.guild = FakeGuild()
+        self.user = FakeUser(100)
         self.guild_id = self.guild.id
         self.client = FakeClient(db, adapter)
         self.response = FakeResponse()
@@ -177,6 +179,20 @@ async def test_adding_the_same_account_twice_says_so(db: FakeDatabase) -> None:
     interaction = await _submit(db)
 
     assert "already being monitored" in interaction.followup.messages[0]["content"]
+
+
+async def test_a_server_at_its_account_limit_cant_add_more(db: FakeDatabase) -> None:
+    """Shared API limits (YouTube quota, Instagram calls, X window) must not
+    be used up by one server."""
+    for n in range(25):
+        db.tables["pulsenotify_platform_accounts"].rows.append(
+            {"id": f"acc-{n}", "guild_id": 1, "platform": "youtube", "platform_account_id": f"UC{n}", "username": f"c{n}"}
+        )
+
+    interaction = await _submit(db)
+
+    assert "already monitors 25 accounts" in interaction.response.messages[0]["content"]
+    assert len(db.tables["pulsenotify_platform_accounts"].rows) == 25
 
 
 async def test_a_blank_identifier_is_refused(db: FakeDatabase) -> None:

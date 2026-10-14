@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, ClassVar, Dict, FrozenSet, List, Optional
+from typing import Any, Callable, ClassVar, Dict, FrozenSet, List, Optional, Set
 
 from events.models import NormalizedEvent
 from platforms.base import AccountRef, Capability, FetchResult, LiveStatus, PlatformAdapter
@@ -64,6 +64,9 @@ class TwitterAdapter(PlatformAdapter):
         self._poll_interval = min_poll_interval_seconds
         self._clock = clock
         self._snapshots: Dict[str, _Snapshot] = {}
+        # Accounts whose X embedded timeline came back empty although they
+        # post — read from FxTwitter instead (for this run of the bot).
+        self._embed_empty: Set[str] = set()
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -93,6 +96,13 @@ class TwitterAdapter(PlatformAdapter):
             self._check_window(BY_ID, reserve=0)
             self._count_request()
             posts = await self._client.get_timeline_by_id(str(user["id"]))
+            if not posts:
+                # X's embedded timeline is empty for some accounts that do
+                # post (seen for newer accounts) — read them from FxTwitter.
+                self._count_request()
+                posts = await self._client.get_recent_posts_fx(str(user.get("screen_name") or handle))
+                if posts:
+                    self._embed_empty.add(str(user["id"]))
         ref = parser.user_to_account_ref(require_posts(posts, handle))
         self._snapshots[ref.platform_account_id] = _Snapshot(self._clock(), posts)
         return ref
@@ -122,11 +132,24 @@ class TwitterAdapter(PlatformAdapter):
         if snapshot is not None and self._clock() - snapshot.fetched_at < self._poll_interval / 2:
             return snapshot.posts
 
-        self._check_window(BY_ID, reserve=_KEEP_SPARE)
-        self._count_request()
-        posts = await self._client.get_timeline_by_id(key)
+        if key in self._embed_empty:
+            posts = await self._fx_posts(account)
+        else:
+            self._check_window(BY_ID, reserve=_KEEP_SPARE)
+            self._count_request()
+            posts = await self._client.get_timeline_by_id(key)
+            if not posts:
+                posts = await self._fx_posts(account)
+                if posts:
+                    self._embed_empty.add(key)
         self._snapshots[key] = _Snapshot(self._clock(), posts)
         return posts
+
+    async def _fx_posts(self, account: AccountRef) -> List[Dict[str, Any]]:
+        self._count_request()
+        posts = await self._client.get_recent_posts_fx(account.username)
+        # FxTwitter goes by @handle — only trust posts by this account's ID.
+        return [post for post in posts if str((post.get("user") or {}).get("id_str")) == account.platform_account_id]
 
     def _check_window(self, kind: str, *, reserve: int) -> None:
         remaining = self._client.requests_remaining(kind)

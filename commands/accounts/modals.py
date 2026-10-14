@@ -86,6 +86,37 @@ def _shared_value(configs: Sequence[Dict[str, Any]], key: str) -> Any:
     return values.pop() if len(values) == 1 else None
 
 
+def mention_refusal(
+    interaction: discord.Interaction, *, role_id: Optional[int] = None, text: str = ""
+) -> Optional[str]:
+    """Why this person may not make the bot ping that, or None if they may.
+
+    The bot has the Mention Everyone permission, so without this check a
+    Manage Server member who can't ping @everyone/@here or a locked
+    (non-mentionable) role themselves could make the bot do it for them.
+    Same rule as Discord's own: only people with Mention Everyone (or
+    Administrator) may set those up."""
+    guild = interaction.guild
+    perms = getattr(interaction.user, "guild_permissions", None)
+    if perms is not None and (perms.mention_everyone or perms.administrator):
+        return None
+    needs = None
+    if guild is not None and role_id == guild.id:
+        needs = "@everyone"
+    elif "@everyone" in text or "@here" in text:
+        needs = "@everyone or @here"
+    elif role_id is not None and guild is not None:
+        role = guild.get_role(role_id)
+        if role is not None and not role.mentionable:
+            needs = f"the {role.name} role (it's set to not be mentionable)"
+    if needs is None:
+        return None
+    return (
+        f"You need Discord's **Mention @everyone, @here and All Roles** permission to make alerts ping {needs}. "
+        "Ask someone who has it, or pick a different role."
+    )
+
+
 class _Form(discord.ui.Modal):
     """Base for every form here. discord.py's default on_error only logs to
     the console, so a failing submit showed Discord's generic "Something
@@ -156,6 +187,18 @@ class AddAccountModal(_Form):
         bot = interaction.client
         form = PLATFORM_FORMS[self.platform]
         identifier = identifier.strip()
+        refusal = mention_refusal(interaction, role_id=role_id)
+        if refusal:
+            await cards.error(interaction, refusal)
+            return
+        limit = getattr(getattr(bot, "settings", None), "max_accounts_per_server", None)
+        if limit is not None and len(await bot.accounts_repo.list_by_guild(interaction.guild.id)) >= limit:  # type: ignore[attr-defined]
+            await cards.error(
+                interaction,
+                f"This server already monitors {limit} accounts, the most allowed. "
+                "Remove one with `/pulsenotify account-remove` to add another.",
+            )
+            return
         if not identifier:
             await cards.error(interaction, f"Enter a {form.account_label}.")
             return
@@ -275,6 +318,10 @@ class CustomMessageModal(_Form):
         row = self.row
         scoped_type = None if event_type == _ALL_EVENT_TYPES else event_type
         clearing = not message.strip()
+        refusal = None if clearing else mention_refusal(interaction, text=message)
+        if refusal:
+            await cards.error(interaction, refusal)
+            return
 
         updated = await interaction.client.alert_configs_repo.set_custom_message(  # type: ignore[attr-defined]
             row["id"], None if clearing else message, event_type=scoped_type
@@ -375,6 +422,10 @@ class MentionModal(_Form):
             role_id = interaction.guild.id  # the @everyone role's ID is the server's ID
         elif mode == _MENTION_NONE:
             role_id = None
+        refusal = mention_refusal(interaction, role_id=role_id)
+        if refusal:
+            await cards.error(interaction, refusal)
+            return
 
         scoped_type = None if event_type == _ALL_EVENT_TYPES else event_type
         updated = await interaction.client.alert_configs_repo.set_mention_role(  # type: ignore[attr-defined]

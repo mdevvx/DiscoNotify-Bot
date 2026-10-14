@@ -52,7 +52,17 @@ class FakeFollowup:
         self.messages.append(_record(view, ephemeral=ephemeral, allowed_mentions=allowed_mentions))
 
 
+class FakePermissions:
+    def __init__(self, *, mention_everyone: bool = True, administrator: bool = False) -> None:
+        self.mention_everyone = mention_everyone
+        self.administrator = administrator
+
+
 class FakeUser:
-    def __init__(self, user_id: int) -> None:
+    """A server member. Has Mention Everyone by default, so tests that set
+    @everyone/@here mentions pass the permission check unless they opt out."""
+
+    def __init__(self, user_id: int, *, mention_everyone: bool = True) -> None:
         self.id = user_id
         self.mention = f"<@{user_id}>"
+        self.guild_permissions = FakePermissions(mention_everyone=mention_everyone)

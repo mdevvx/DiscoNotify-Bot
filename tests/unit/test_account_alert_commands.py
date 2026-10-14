@@ -18,9 +18,20 @@ from tests.unit.fake_interactions import FakeFollowup, FakeResponse, FakeUser
 from tests.unit.fakes import FakeDatabase
 
 
+class FakeRole:
+    def __init__(self, role_id: int, *, mentionable: bool) -> None:
+        self.id = role_id
+        self.name = "Staff"
+        self.mentionable = mentionable
+
+
 class FakeGuild:
     def __init__(self, guild_id: int) -> None:
         self.id = guild_id
+        self.roles = {555: FakeRole(555, mentionable=True), 777: FakeRole(777, mentionable=False)}
+
+    def get_role(self, role_id: int) -> Any:
+        return self.roles.get(role_id)
 
 
 class FakeClient:
@@ -150,6 +161,46 @@ async def test_set_mention_everyone_confirms_with_a_single_at_sign(db: FakeDatab
     assert "@everyone" in confirmation["content"]
     assert "<@&1>" not in confirmation["content"]
     assert confirmation["allowed_mentions"].everyone is False  # the confirmation itself never pings
+
+
+@pytest.mark.parametrize(("mode", "role_id"), [("everyone", None), ("role", 777)])
+async def test_only_members_who_may_ping_everyone_can_set_everyone_or_a_locked_role(
+    db: FakeDatabase, mode: str, role_id: Any
+) -> None:
+    """The bot has Mention Everyone, so a Manage Server member without it
+    mustn't be able to make the bot mass-ping on their behalf."""
+    from tests.unit.fake_interactions import FakeUser
+
+    interaction, account_id, modal = await _open_modal(account_set_mention, db)
+    interaction.user = FakeUser(100, mention_everyone=False)
+
+    await modal.apply(interaction, mode=mode, role_id=role_id, event_type="__all__")
+
+    assert (await _config(interaction, account_id, "video_published"))["mention_role_id"] is None
+    assert "Mention @everyone, @here and All Roles" in interaction.response.messages[0]["content"]
+
+
+async def test_a_normal_mentionable_role_needs_no_extra_permission(db: FakeDatabase) -> None:
+    from tests.unit.fake_interactions import FakeUser
+
+    interaction, account_id, modal = await _open_modal(account_set_mention, db)
+    interaction.user = FakeUser(100, mention_everyone=False)
+
+    await modal.apply(interaction, mode="role", role_id=555, event_type="__all__")
+
+    assert (await _config(interaction, account_id, "video_published"))["mention_role_id"] == 555
+
+
+async def test_a_custom_message_with_here_needs_the_permission(db: FakeDatabase) -> None:
+    from tests.unit.fake_interactions import FakeUser
+
+    interaction, account_id, modal = await _open_modal(account_set_message, db)
+    interaction.user = FakeUser(100, mention_everyone=False)
+
+    await modal.apply(interaction, message="@here {creator} is live!", event_type="__all__")
+
+    assert (await _config(interaction, account_id, "video_published"))["custom_message"] is None
+    assert "Mention @everyone" in interaction.response.messages[0]["content"]
 
 
 async def test_set_mention_nobody_clears_it(db: FakeDatabase) -> None:

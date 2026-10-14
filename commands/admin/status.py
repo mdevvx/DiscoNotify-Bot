@@ -17,7 +17,6 @@ import datetime
 from typing import Any, Dict, List, Optional, Sequence
 
 import discord
-from discord import app_commands
 from discord.ext import commands
 
 from billing.access import subscription_details
@@ -36,8 +35,10 @@ _ACCOUNT_ICONS = {"active": "🟢", "error": "🟡", "invalid": "🔴"}
 _PLATFORM_NAMES = {"youtube": "YouTube", "kick": "Kick", "instagram": "Instagram", "twitter": "X"}
 _PLATFORM_LABELS = {"youtube": "▶️ YouTube", "kick": "🟩 Kick", "instagram": "📸 Instagram", "twitter": "𝕏 X"}
 _PLATFORM_ORDER = ["youtube", "kick", "instagram", "twitter"]
-# Keeps the card well inside Discord's 4,000-character limit for a message.
 _MAX_ACCOUNTS_PER_PLATFORM = 15
+# Discord's limit is 4,000 characters of text per message; leave headroom.
+_TEXT_BUDGET = 3800
+_MORE_LINE_ROOM = 80  # kept free for each platform's "…and N more" line
 _MAX_ERROR_LENGTH = 120
 
 
@@ -76,10 +77,16 @@ async def status(interaction: discord.Interaction) -> None:
         lines = subscription_details(access, await billing.billing_row(guild.id), price_label=billing.price_label)
         fields.append(("💳 Subscription", "\n".join(lines)))
 
+    # Discord rejects a message over 4,000 characters, so account lines are
+    # added only while they fit (25 accounts with long error notes came to
+    # ~7,500); the rest are counted and pointed to /pulsenotify account-list.
+    budget = _TEXT_BUDGET - len(overview) - sum(len(name) + len(value) for name, value in fields)
+    budget -= len(guild.name) + len(_format_intervals(intervals, accounts)) + 100
     for platform in _ordered_platforms(accounts):
         rows = [row for row in accounts if row["platform"] == platform]
-        lines = [
-            format_account_line(
+        lines: List[str] = []
+        for row in rows[:_MAX_ACCOUNTS_PER_PLATFORM]:
+            line = format_account_line(
                 row,
                 guild_id=guild.id,
                 channels=channels_by_account.get(row["id"], []),
@@ -87,12 +94,18 @@ async def status(interaction: discord.Interaction) -> None:
                 live_state=live_states.get(row["id"]),
                 last_alert_at=last_alerts.get(row["id"]),
             )
-            for row in rows[:_MAX_ACCOUNTS_PER_PLATFORM]
-        ]
-        if len(rows) > _MAX_ACCOUNTS_PER_PLATFORM:
-            lines.append(f"-# …and {len(rows) - _MAX_ACCOUNTS_PER_PLATFORM} more — `/pulsenotify account-list`")
+            if len(line) + 1 > budget - _MORE_LINE_ROOM:
+                break
+            lines.append(line)
+            budget -= len(line) + 1
+        if len(rows) > len(lines):
+            more = f"-# …and {len(rows) - len(lines)} more — `/pulsenotify account-list`"
+            lines.append(more)
+            budget -= len(more) + 1
         label = _PLATFORM_LABELS.get(platform, platform.title())
-        fields.append((f"{label} · {len(rows)}", "\n".join(lines)))
+        heading = f"{label} · {len(rows)}"
+        budget -= len(heading)
+        fields.append((heading, "\n".join(lines)))
 
     body = [overview]
     if not accounts:

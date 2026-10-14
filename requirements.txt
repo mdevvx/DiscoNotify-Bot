@@ -1,10 +1,13 @@
-discord.py>=2.6.0  # modals with Label, select menus and channel/role pickers
+# Exact versions the test suite passes with — upgrade deliberately (pip-audit, then run the tests).
+discord.py==2.7.1  # modals with Label, select menus and channel/role pickers
 # 2.16.0+ specifically: earlier versions reject Supabase's newer
 # sb_secret_.../sb_publishable_... API keys with "Invalid API key" (they
 # validate against a JWT-shaped regex that only matches the legacy
 # anon/service_role key format).
-supabase>=2.16.0
-pydantic>=2.7.0
-pydantic-settings>=2.4.0
-python-dotenv>=1.0.0
-httpx>=0.27.0
+supabase==2.31.0
+pydantic==2.13.5
+pydantic-settings==2.15.0
+python-dotenv==1.2.3
+httpx==0.28.1
+# Pulled in by supabase; 2.15.0 fixes PYSEC-2026-4141 / PYSEC-2026-4183.
+pyjwt>=2.15.0

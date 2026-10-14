@@ -29,6 +29,12 @@ class FakeClient:
         self.reset_in = 0.0
         self.lookup_down = False
         self.protected: set = set()
+        self.fx_posts: Dict[str, List[Dict[str, Any]]] = {}
+        self.users: Dict[str, Dict[str, Any]] = {}
+
+    async def get_recent_posts_fx(self, handle: str) -> List[Dict[str, Any]]:
+        self.fetched.append(f"fx:{handle}")
+        return self.fx_posts.get(handle.lower(), [])
 
     async def lookup_user(self, handle: str) -> Optional[Dict[str, Any]]:
         """FxTwitter: finds the account from its timeline's owner."""
@@ -37,6 +43,8 @@ class FakeClient:
         posts = self.timelines.get(handle.lower())
         if handle.lower() in self.protected:
             return {"id": "77", "screen_name": handle, "protected": True}
+        if handle.lower() in self.users:
+            return self.users[handle.lower()]
         if not posts:
             return None
         user = posts[0]["user"]
@@ -219,3 +227,53 @@ async def test_get_live_status_is_never_expected_to_be_called() -> None:
 
 def test_the_real_clock_is_monotonic() -> None:
     assert TwitterAdapter(FakeClient())._clock is time.monotonic  # type: ignore[arg-type]
+
+
+_COOKED = {"id_str": "2008104784159805440", "screen_name": "Cookedcom", "name": "Cooked"}
+_COOKED_REF = AccountRef(platform="twitter", platform_account_id="2008104784159805440", username="Cookedcom")
+
+
+def _cooked_client() -> FakeClient:
+    """X's embedded timeline is empty for @Cookedcom although it posts
+    (real case 2026-10-15); FxTwitter has its posts."""
+    client = FakeClient()
+    client.users["cookedcom"] = {"id": _COOKED["id_str"], "screen_name": "Cookedcom", "protected": False}
+    client.fx_posts["cookedcom"] = [post("200", user=_COOKED), post("190", user=_COOKED)]
+    return client
+
+
+async def test_an_account_with_an_empty_x_timeline_is_added_from_fxtwitter() -> None:
+    client = _cooked_client()
+
+    ref = await _adapter(client).validate_account("@Cookedcom")
+
+    assert ref == _COOKED_REF
+    assert client.fetched == ["2008104784159805440", "fx:Cookedcom"]
+
+
+async def test_such_an_account_is_then_checked_on_fxtwitter_only() -> None:
+    client = _cooked_client()
+    clock = Clock()
+    adapter = _adapter(client, clock)
+    await adapter.validate_account("@Cookedcom")
+    client.fx_posts["cookedcom"].insert(0, post("210", user=_COOKED))
+    client.fetched.clear()
+    clock.now += 3600
+
+    result = await adapter.fetch_updates(_COOKED_REF, "200")
+
+    assert [p["id_str"] for p in result.items] == ["210"]
+    assert client.fetched == ["fx:Cookedcom"]  # X's empty timeline isn't asked again
+
+
+async def test_fxtwitter_posts_by_another_account_are_ignored() -> None:
+    """FxTwitter goes by @handle; if the handle now belongs to someone else,
+    their posts must not be alerted as this account's."""
+    client = _cooked_client()
+    client.fx_posts["cookedcom"] = [post("300", user={"id_str": "1", "screen_name": "Cookedcom"})]
+    adapter = _adapter(client)
+    adapter._embed_empty.add(_COOKED_REF.platform_account_id)
+
+    result = await adapter.fetch_updates(_COOKED_REF, "200")
+
+    assert result.items == []

@@ -332,3 +332,24 @@ def test_normal_cards_are_white_and_errors_are_logo_red() -> None:
     assert ui_cards.card("done", tone=ui_cards.SUCCESS).children[0].accent_colour == 0xFFFFFF
     assert ui_cards.card("failed", tone=ui_cards.ERROR).children[0].accent_colour == constants.COLOR_LOGO_RED == 0xE2364A
     assert ui_cards.card("careful", tone=ui_cards.WARNING).children[0].accent_colour == 0xE2364A
+
+
+async def test_status_with_many_long_accounts_stays_under_discords_limit(db: FakeDatabase) -> None:
+    """25 accounts with long names and error notes came to ~7,500 characters
+    — Discord rejects anything over 4,000, so the command failed."""
+    import discord
+
+    bot = FakeBot(db)
+    for i, platform in enumerate(["youtube"] * 10 + ["kick"] * 5 + ["instagram"] * 5 + ["twitter"] * 5):
+        row = await bot.accounts_repo.add(_GUILD_ID, platform, f"id{i}" * 8, f"@a_very_long_creator_name_{i:02d}")
+        db.tables["pulsenotify_platform_accounts"].rows[-1].update(status="error", last_error="something went wrong " * 10)
+        channel = await bot.channels_repo.get_or_create(_GUILD_ID, 10**17 + i, name=f"alerts-{i}")
+        await bot.channels_repo.link_account(_GUILD_ID, row["id"], channel["id"])
+    interaction = FakeInteraction(bot)
+
+    await status.callback(interaction)  # type: ignore[arg-type]
+
+    view = interaction.response.messages[0]["view"]
+    total = sum(len(item.content) for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay))
+    assert total <= 4000
+    assert "more — `/pulsenotify account-list`" in interaction.response.messages[0]["content"]

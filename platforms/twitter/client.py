@@ -77,6 +77,28 @@ class TwitterClient:
             raise TransientPlatformError(f"FxTwitter lookup for @{handle} couldn't be read") from exc
         return user if user.get("id") else None
 
+    async def get_recent_posts_fx(self, handle: str) -> List[Dict[str, Any]]:
+        """The account's latest posts from FxTwitter
+        (api.fxtwitter.com/2/profile/{handle}/statuses), converted to the
+        same shape as X's embedded timeline. Used for accounts whose X
+        embedded timeline comes back empty — seen for some newer accounts
+        (2026-10-15: @Cookedcom, 627 posts, empty embed)."""
+        try:
+            response = await self._http.get(f"{_FXTWITTER_URL}/2/profile/{handle}/statuses", follow_redirects=False)
+        except httpx.HTTPError as exc:
+            raise TransientPlatformError(f"FxTwitter posts request failed for @{handle}: {exc}") from exc
+        if response.status_code in (301, 302, 404):
+            return []
+        if response.status_code == 429:
+            raise busy_error(_DEFAULT_RATE_LIMIT_WAIT_SECONDS / 3)
+        if response.status_code != 200:
+            raise TransientPlatformError(f"FxTwitter posts error {response.status_code} for @{handle}")
+        try:
+            results = response.json().get("results") or []
+        except ValueError as exc:
+            raise TransientPlatformError(f"FxTwitter posts for @{handle} couldn't be read") from exc
+        return [_from_fxtwitter(status) for status in results if status.get("id")]
+
     async def get_timeline_by_handle(self, handle: str) -> List[Dict[str, Any]]:
         """For adding an account (its user ID isn't known yet)."""
         return await self._get(BY_HANDLE, f"/srv/timeline-profile/screen-name/{handle}", f"@{handle}")
@@ -160,3 +182,36 @@ def require_posts(posts: List[Dict[str, Any]], handle: str) -> Dict[str, Any]:
         if str(user.get("screen_name", "")).lower() == handle.lower():
             return user
     return posts[0].get("user") or {}
+
+
+def _from_fxtwitter(status: Dict[str, Any]) -> Dict[str, Any]:
+    """An FxTwitter status in X's embedded-timeline shape, so one parser
+    handles both. FxTwitter's text already has real links instead of t.co
+    and no trailing media link."""
+    author = status.get("author") or {}
+    media = status.get("media") or {}
+    items = []
+    for photo in media.get("photos") or []:
+        items.append({"type": "photo", "media_url_https": photo.get("url")})
+    for video in media.get("videos") or []:
+        items.append({"type": video.get("type") or "video", "media_url_https": video.get("thumbnail_url")})
+    post: Dict[str, Any] = {
+        "id_str": str(status["id"]),
+        "created_at": status.get("created_at"),
+        "full_text": status.get("text") or "",
+        "user": {
+            "id_str": str(author.get("id") or ""),
+            "screen_name": author.get("screen_name"),
+            "name": author.get("name"),
+            "profile_image_url_https": author.get("avatar_url"),
+        },
+        "entities": {},
+        "is_quote_status": bool(status.get("quote")),
+    }
+    if items:
+        post["extended_entities"] = {"media": items}
+    if status.get("reposted_by"):
+        post["retweeted_status"] = {"by": status["reposted_by"]}
+    if status.get("replying_to"):
+        post["in_reply_to_status_id_str"] = str(status.get("replying_to_status") or "reply")
+    return post
