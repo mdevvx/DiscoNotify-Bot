@@ -2,7 +2,7 @@
 
 A multi-tenant Discord bot that watches social/streaming accounts (YouTube, Twitch, Kick, X/Twitter, Instagram, Facebook, TikTok) and posts alerts to Discord when they post or go live. Every server's configuration — accounts, channels, alert settings, enabled/disabled state — is fully isolated by `guild_id`.
 
-**Platforms currently offered:** YouTube, Kick, Instagram, X (Twitter). **On hold:** Twitch (an adapter exists under `platforms/` but isn't registered or offered in `/pulsenotify account-add`) and TikTok (no adapter yet).
+**Platforms currently offered:** YouTube, Kick, Instagram, Twitter / X. **On hold:** Twitch (an adapter exists under `platforms/` but isn't registered or offered in `/pulsenotify account-add`) and TikTok (no adapter yet).
 
 This is being built in phases. **Phases 1–6 are complete, Phase 7 is partially complete, and Phase 8 is partially complete.** YouTube, Twitch, Kick, X/Twitter, and Instagram are all working end-to-end: `/pulsenotify account-add` registers an account, the monitoring framework polls it, and real Discord notifications go out for new videos/Shorts (YouTube), new posts (X/Twitter, Instagram), and live start/end (YouTube, Twitch, Kick). Facebook and TikTok have **no adapter** — see the Phase 7 section below for why: neither platform offers an official way to monitor an account that hasn't individually authorized this app. Per-account alert configuration (which event types notify, embeds, role mentions) can now be viewed and changed entirely via slash commands — see the Commands section.
 
@@ -25,7 +25,7 @@ Before any platform integration is built: verify that platform's *current* offic
 
 - **YouTube** is polled, not pushed (WebSub needs a public HTTPS endpoint this project doesn't have yet). Since 2026-10-12 every check, live status included, costs at most 2 quota units, so it can poll as fast as every 30s — see the YouTube adapter section below.
 - **Twitch (Phase 5) and Kick (Phase 6)** were deliberate polling choices too, also with sign-off where the tradeoff was real: EventSub-style webhooks are the "correct" push-based approach for both, but need a public HTTPS endpoint this project doesn't have; Twitch's EventSub WebSocket transport (which would avoid that) turned out to require a *user* access token capped far too low for monitoring arbitrary streamers, so it isn't viable at all. Polling is cheap enough on both platforms' free app-token tiers that there's no quota pressure forcing the webhook infrastructure question the way there was for YouTube.
-- **X/Twitter** is free and needs no key, but X limits how often timelines can be read, so each X account is checked less often as more accounts are added (see the X (Twitter) adapter section).
+- **X/Twitter** is free and needs no key, but X limits how often timelines can be read, so each X account is checked less often as more accounts are added (see the Twitter / X adapter section).
 - **Instagram** uses Meta's official Business Discovery API: it works for any public Business/Creator account (not personal ones), needs the operator's own Meta app + Facebook Page + professional Instagram account, and needs no App Review for the operator's own use. See the Instagram adapter section below.
 - **Facebook and TikTok (Phase 7) have no adapter.** Both platforms' official APIs are built entirely around a creator/Page connecting *their own* account to your app — the opposite of monitoring one you don't control — with no Instagram-Business-Discovery-style exception for either. Facebook's closest equivalent ("Page Public Content Access") requires Meta Business Verification and is scoped to "analyze/display" use cases with no guarantee a notification bot qualifies; TikTok's developer platform has no discovery/monitoring surface at all. Revisit if either platform's policy changes.
 
@@ -57,7 +57,7 @@ Before any platform integration is built: verify that platform's *current* offic
    - `YOUTUBE_API_KEY` — a plain API key (not OAuth) from the [Google Cloud Console](https://console.cloud.google.com/apis/credentials) with the YouTube Data API v3 enabled.
    - `TWITCH_CLIENT_ID` / `TWITCH_CLIENT_SECRET` — from a [Twitch app](https://dev.twitch.tv/console/apps).
    - `KICK_CLIENT_ID` / `KICK_CLIENT_SECRET` — from a [Kick app](https://kick.com/settings/developer).
-   - X (Twitter) needs no key — it's on by default (`TWITTER_ENABLED`); see the X (Twitter) adapter section.
+   - X (Twitter) needs no key — it's on by default (`TWITTER_ENABLED`); see the Twitter / X adapter section.
    - `INSTAGRAM_ACCESS_TOKEN` / `INSTAGRAM_BUSINESS_ACCOUNT_ID` — a non-expiring Page token + the IG user ID of your *own* Instagram professional account. Step-by-step in "Instagram setup" below.
    - There's no Facebook or TikTok key to set — neither has an adapter (see the Phase 7 section above).
 
@@ -226,7 +226,7 @@ platforms/
   youtube/               the first concrete adapter — client.py (HTTP), parser.py (pure JSON->shapes), adapter.py (ties them together + quota budgeting)
   twitch/                 live/offline only — app-token polling, no adapter-level quota budgeting needed (see Twitch adapter section)
   kick/                   live/offline only — same shape as twitch/, one endpoint does both identifier resolution and live status
-  twitter/                new posts (no key needed) — see X (Twitter) adapter section
+  twitter/                new posts (no key needed) — see Twitter / X adapter section
   instagram/              new posts + Reels via Business Discovery — see the Instagram adapter section and its setup steps
 monitoring/
   manager.py            single start()/stop() entry point; owns one PlatformScheduler per registered adapter
@@ -367,7 +367,7 @@ Credentials: `KICK_CLIENT_ID`/`KICK_CLIENT_SECRET`, an app access token via OAut
 
 **Kick exposes no per-session stream ID.** `platforms/kick/parser.py` builds one from the broadcaster and the stream's start time — stable for the whole session, different for the next. Without it, every session of a channel shared one dedup key and only the first "stream ended" alert ever went out (fixed 2026-10-12; `monitoring/worker.py` also falls back to the session's start time for any platform without stream IDs).
 
-## X (Twitter) adapter (platforms/twitter/)
+## Twitter / X adapter (platforms/twitter/)
 
 Alerts for new **original posts** (quote posts included; retweets and replies left out) from any public X account. **No API key and no cost** — the bot reads the account's public embedded timeline (the feed X provides for embedding a profile on websites), which returns its latest ~20 posts with text, photos/video previews, name and avatar.
 

@@ -101,7 +101,7 @@ def intro_card(bot: Any, access: Optional[Access]) -> discord.ui.LayoutView:
         )
     return cards.card(
         f"{constants.BOT_NAME} posts an alert in your server the moment a creator uploads, goes live or posts — "
-        "**YouTube** (videos, Shorts, live streams), **Kick** (live streams), **Instagram** (posts, Reels) and **X** (posts).",
+        "**YouTube** (videos, Shorts, live streams), **Kick** (live streams), **Instagram** (posts, Reels) and **Twitter / X** (posts).",
         title=f"👋 Thanks for adding {constants.BOT_NAME}!",
         fields=fields,
         footer="In alert channels the bot needs View Channel, Send Messages and Manage Webhooks",

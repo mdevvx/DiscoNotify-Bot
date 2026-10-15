@@ -101,7 +101,7 @@ async def test_adding_an_account_uses_fxtwitter_without_touching_xs_limits() -> 
     assert client.fetched == ["fx:NASA"]
 
 async def test_an_unknown_account_cant_be_added() -> None:
-    with pytest.raises(PermanentPlatformError, match="no X account @nobody"):
+    with pytest.raises(PermanentPlatformError, match="no Twitter / X account @nobody"):
         await _adapter(FakeClient()).validate_account("@nobody")
 
 

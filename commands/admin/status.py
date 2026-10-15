@@ -32,8 +32,8 @@ logger = get_logger(__name__)
 
 _HEALTH_ICONS = {"healthy": "🟢", "degraded": "🟡", "error": "🔴", "disabled": "⚪"}
 _ACCOUNT_ICONS = {"active": "🟢", "error": "🟡", "invalid": "🔴"}
-_PLATFORM_NAMES = {"youtube": "YouTube", "kick": "Kick", "instagram": "Instagram", "twitter": "X"}
-_PLATFORM_LABELS = {"youtube": "▶️ YouTube", "kick": "🟩 Kick", "instagram": "📸 Instagram", "twitter": "𝕏 X"}
+_PLATFORM_NAMES = {"youtube": "YouTube", "kick": "Kick", "instagram": "Instagram", "twitter": "Twitter / X"}
+_PLATFORM_LABELS = {"youtube": "▶️ YouTube", "kick": "🟩 Kick", "instagram": "📸 Instagram", "twitter": "𝕏 Twitter / X"}
 _PLATFORM_ORDER = ["youtube", "kick", "instagram", "twitter"]
 _MAX_ACCOUNTS_PER_PLATFORM = 15
 # Discord's limit is 4,000 characters of text per message; leave headroom.

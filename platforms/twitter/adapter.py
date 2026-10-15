@@ -86,7 +86,7 @@ class TwitterAdapter(PlatformAdapter):
             posts = await self._client.get_timeline_by_handle(handle)
         else:
             if user is None:
-                raise PermanentPlatformError(f"There's no X account @{handle} — check the handle.")
+                raise PermanentPlatformError(f"There's no Twitter / X account @{handle} — check the handle.")
             if user.get("protected"):
                 raise PermanentPlatformError(f"@{handle} is a private account — its posts can't be read.")
             ref = AccountRef(platform="twitter", platform_account_id=str(user["id"]), username=str(user.get("screen_name") or handle))

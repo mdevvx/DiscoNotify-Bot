@@ -57,7 +57,7 @@ PLATFORM_FORMS: Dict[str, PlatformForm] = {
     "instagram": PlatformForm(
         "Instagram", "Instagram account", "Username or instagram.com URL (Business/Creator only)"
     ),
-    "twitter": PlatformForm("X (Twitter)", "X account", "@handle or x.com profile URL"),
+    "twitter": PlatformForm("Twitter / X", "Twitter / X account", "@handle or x.com / twitter.com profile URL"),
 }
 
 
