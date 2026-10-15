@@ -1,18 +1,17 @@
 """X (Twitter) adapter — new-post alerts from X's public embedded timeline
 (see client.py). Free: no API key, no login.
 
-The one constraint is X's limit of 30 requests per 15 minutes per IP
-address — counted separately for lookups by @handle and by user ID. So:
-- routine checks read the timeline by user ID; adding an account looks it
-  up by @handle — checks never use up what adding needs, and an account
-  that changes its @handle keeps working;
-- each X account is fetched once per check and shared by every server that
-  follows it;
-- the check interval stretches with the number of distinct accounts, using
-  about 20 of the 30 (a request sometimes counts twice): 45s per account —
-  10 accounts → every 7.5 min, 50 → every 37.5 min;
-- when X says a window is (nearly) used up, that kind of request waits for
-  the reset instead of hitting 429s.
+Where posts come from:
+- FxTwitter (api.fxtwitter.com, free, no key) is the main source — for
+  looking up an @handle and for each account's latest posts. It's current
+  and doesn't share X's per-IP limits with other apps on a shared host.
+- X's public embedded timeline (client.py) is the backup, read by user ID:
+  30 requests per 15 minutes per IP, counted separately for @handle and
+  user-ID lookups. When X says a window is used up, that backup waits for
+  the reset.
+- Each X account is fetched once per check and shared by every server that
+  follows it; the interval is 45s × the number of distinct accounts
+  (60s floor) — 10 accounts → every 7.5 min, 50 → every 37.5 min.
 
 Only original posts are alerted (quote posts included; retweets and replies
 left out). Private, suspended and never-posted accounts can't be added.
@@ -22,13 +21,13 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, ClassVar, Dict, FrozenSet, List, Optional, Set
+from typing import Any, Callable, ClassVar, Dict, FrozenSet, List, Optional
 
 from events.models import NormalizedEvent
 from platforms.base import AccountRef, Capability, FetchResult, LiveStatus, PlatformAdapter
 from platforms.twitter import parser
 from platforms.twitter.client import BY_HANDLE, BY_ID, TwitterClient, busy_error, require_posts
-from utils.errors import PermanentPlatformError, TransientPlatformError
+from utils.errors import PermanentPlatformError, PlatformError, TransientPlatformError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -64,9 +63,6 @@ class TwitterAdapter(PlatformAdapter):
         self._poll_interval = min_poll_interval_seconds
         self._clock = clock
         self._snapshots: Dict[str, _Snapshot] = {}
-        # Accounts whose X embedded timeline came back empty although they
-        # post — read from FxTwitter instead (for this run of the bot).
-        self._embed_empty: Set[str] = set()
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -77,9 +73,9 @@ class TwitterAdapter(PlatformAdapter):
         return self._poll_interval
 
     async def validate_account(self, identifier: str) -> AccountRef:
-        """@handle → ID through FxTwitter, then the timeline by ID (the
-        checks' window, which a shared host IP leaves mostly free). Falls
-        back to X's by-@handle timeline if FxTwitter is down."""
+        """@handle → account through FxTwitter, then its posts from FxTwitter
+        (X's embedded timeline as the backup). Falls back to X entirely if
+        FxTwitter is down."""
         handle = parser.parse_identifier(identifier)
         try:
             user = await self._client.lookup_user(handle)
@@ -93,16 +89,8 @@ class TwitterAdapter(PlatformAdapter):
                 raise PermanentPlatformError(f"There's no X account @{handle} — check the handle.")
             if user.get("protected"):
                 raise PermanentPlatformError(f"@{handle} is a private account — its posts can't be read.")
-            self._check_window(BY_ID, reserve=0)
-            self._count_request()
-            posts = await self._client.get_timeline_by_id(str(user["id"]))
-            if not posts:
-                # X's embedded timeline is empty for some accounts that do
-                # post (seen for newer accounts) — read them from FxTwitter.
-                self._count_request()
-                posts = await self._client.get_recent_posts_fx(str(user.get("screen_name") or handle))
-                if posts:
-                    self._embed_empty.add(str(user["id"]))
+            ref = AccountRef(platform="twitter", platform_account_id=str(user["id"]), username=str(user.get("screen_name") or handle))
+            posts = await self._fetch_posts(ref)
         ref = parser.user_to_account_ref(require_posts(posts, handle))
         self._snapshots[ref.platform_account_id] = _Snapshot(self._clock(), posts)
         return ref
@@ -131,25 +119,30 @@ class TwitterAdapter(PlatformAdapter):
         snapshot = self._snapshots.get(key)
         if snapshot is not None and self._clock() - snapshot.fetched_at < self._poll_interval / 2:
             return snapshot.posts
-
-        if key in self._embed_empty:
-            posts = await self._fx_posts(account)
-        else:
-            self._check_window(BY_ID, reserve=_KEEP_SPARE)
-            self._count_request()
-            posts = await self._client.get_timeline_by_id(key)
-            if not posts:
-                posts = await self._fx_posts(account)
-                if posts:
-                    self._embed_empty.add(key)
+        posts = await self._fetch_posts(account)
         self._snapshots[key] = _Snapshot(self._clock(), posts)
         return posts
 
-    async def _fx_posts(self, account: AccountRef) -> List[Dict[str, Any]]:
-        self._count_request()
-        posts = await self._client.get_recent_posts_fx(account.username)
+    async def _fetch_posts(self, account: AccountRef) -> List[Dict[str, Any]]:
+        """FxTwitter first: it's current (X's embedded timeline was ~10 hours
+        behind for @elonmusk and empty for @Cookedcom on 2026-10-15) and
+        isn't the X limit other apps on a shared host IP (Railway) use up.
+        X's embedded timeline by user ID is the backup — when FxTwitter
+        fails, or returns nothing for this account (e.g. it changed its
+        @handle, since FxTwitter goes by handle)."""
+        try:
+            self._count_request()
+            posts = await self._client.get_recent_posts_fx(account.username)
+        except PlatformError as exc:
+            logger.info("FxTwitter posts failed for @%s (%s) — using X's timeline.", account.username, exc)
+            posts = []
         # FxTwitter goes by @handle — only trust posts by this account's ID.
-        return [post for post in posts if str((post.get("user") or {}).get("id_str")) == account.platform_account_id]
+        own = [post for post in posts if str((post.get("user") or {}).get("id_str")) == account.platform_account_id]
+        if own:
+            return own
+        self._check_window(BY_ID, reserve=_KEEP_SPARE)
+        self._count_request()
+        return await self._client.get_timeline_by_id(account.platform_account_id)
 
     def _check_window(self, kind: str, *, reserve: int) -> None:
         remaining = self._client.requests_remaining(kind)

@@ -135,6 +135,16 @@ class InstagramClient:
                 f"Instagram access token is invalid or expired — generate a new one (see README): {message}"
             )
 
+        if code in _PERMISSION_CODES and "on behalf of user" in str(message):
+            # Meta refuses the Facebook account itself for this app — even
+            # debug_token fails — not a missing scope (seen 2026-10-13/15).
+            raise TransientPlatformError(
+                "Meta is refusing the Facebook account behind INSTAGRAM_ACCESS_TOKEN for this app — most likely the "
+                "Meta app isn't in Live mode (App Dashboard → switch Development to Live); otherwise the account "
+                "removed the app (Facebook Settings → Business integrations), has a security checkpoint to clear, "
+                f"or Meta restricted the app (App Dashboard alerts): {message}"
+            )
+
         if code in _PERMISSION_CODES:
             raise TransientPlatformError(
                 f"Instagram access token is missing a permission (Business Discovery needs instagram_basic, "

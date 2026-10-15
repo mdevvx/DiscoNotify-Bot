@@ -418,6 +418,8 @@ You need your own Instagram **Business or Creator** account linked to a **Facebo
 6. **Extend it** — the step that matters: paste the token into the Access Token Debugger (developers.facebook.com/tools/debug/accesstoken) → *Extend Access Token*.
 7. **Page token + account ID**: in the Explorer, with the **extended** token, run `me/accounts?fields=name,access_token,instagram_business_account`. The Page's `access_token` → `INSTAGRAM_ACCESS_TOKEN`; `instagram_business_account.id` → `INSTAGRAM_BUSINESS_ACCOUNT_ID`.
 
+8. **Switch the Meta app to Live mode** (the toggle at the top of the App Dashboard). While the app is in *Development* mode the token can be rejected outright — every call, even `GET /me`, fails with "Cannot call API for app … on behalf of user" (seen 2026-10-13 and 2026-10-15; fixed by going Live). If that error ever comes back, check the app's mode first.
+
 A Page token fetched with an extended user token **doesn't expire**. Fetched with the short-lived one, it expires within hours — the startup check warns about exactly that. Meta's separate *data access* window (about 90 days) is renewed whenever you generate a token through the app again; the startup check warns two weeks before it ends.
 
 ## Facebook and TikTok (no adapter)

@@ -33,8 +33,13 @@ class FakeClient:
         self.users: Dict[str, Dict[str, Any]] = {}
 
     async def get_recent_posts_fx(self, handle: str) -> List[Dict[str, Any]]:
+        """FxTwitter: has the same posts as X unless a test says otherwise."""
         self.fetched.append(f"fx:{handle}")
-        return self.fx_posts.get(handle.lower(), [])
+        if self.lookup_down:
+            raise TransientPlatformError("FxTwitter posts error 503")
+        if handle.lower() in self.fx_posts:
+            return self.fx_posts[handle.lower()]
+        return self.timelines.get(handle.lower(), [])
 
     async def lookup_user(self, handle: str) -> Optional[Dict[str, Any]]:
         """FxTwitter: finds the account from its timeline's owner."""
@@ -83,18 +88,17 @@ def _adapter(client: FakeClient, clock: Optional[Clock] = None) -> TwitterAdapte
     return TwitterAdapter(client, clock=clock or Clock())  # type: ignore[arg-type]
 
 
-async def test_adding_an_account_looks_it_up_then_reads_it_by_id() -> None:
-    """Never touches X's by-@handle window, which other apps on a shared
-    host IP (Railway) kept using up (2026-10-15)."""
+async def test_adding_an_account_uses_fxtwitter_without_touching_xs_limits() -> None:
+    """Never touches X's windows, which other apps on a shared host IP
+    (Railway) kept using up (2026-10-15)."""
     client = FakeClient()
     client.timelines["nasa"] = [post("2")]
-    client.remaining = {"handle": 0}
+    client.remaining = {"handle": 0, "id": 0}
 
     ref = await _adapter(client).validate_account("https://x.com/NASA")
 
     assert ref == _ACCOUNT
-    assert client.fetched == ["11348282"]
-
+    assert client.fetched == ["fx:NASA"]
 
 async def test_an_unknown_account_cant_be_added() -> None:
     with pytest.raises(PermanentPlatformError, match="no X account @nobody"):
@@ -176,29 +180,40 @@ async def test_one_fetch_is_shared_by_every_server_following_the_account() -> No
     clock.now += 61
     await adapter.fetch_updates(_ACCOUNT, "30")
 
-    assert client.fetched == ["11348282", "11348282"]  # by user ID, not @handle
+    assert client.fetched == ["fx:NASA", "fx:NASA"]
     assert adapter.take_request_count() == 2
-
 
 @pytest.mark.parametrize(("accounts", "interval"), [(0, 60.0), (1, 60.0), (10, 450.0), (50, 2250.0)])
 def test_interval_keeps_under_30_requests_per_15_minutes(accounts: int, interval: float) -> None:
     assert _adapter(FakeClient()).poll_interval_seconds(accounts) == interval
 
 
-async def test_checks_pause_when_their_window_is_nearly_used_up_but_adding_still_works() -> None:
+async def test_x_limits_dont_stop_checks_while_fxtwitter_works() -> None:
+    """Real case 2026-10-15: on Railway X's windows stayed used up and X
+    checks were paused for an hour — FxTwitter doesn't share those limits."""
     client = FakeClient()
-    client.timelines["nasa"] = [post("30")]
-    client.remaining = {"id": 1, "handle": 25}
+    client.timelines["nasa"] = [post("40"), post("30")]
+    client.remaining = {"handle": 0, "id": 0}
     client.reset_in = 400
 
-    with pytest.raises(RateLimitedError) as exc_info:
-        await _adapter(client).fetch_updates(_ACCOUNT, "10")
-    ref = await _adapter(client).validate_account("NASA")
+    result = await _adapter(client).fetch_updates(_ACCOUNT, "30")
 
-    assert exc_info.value.retry_after == 400
-    assert "try again in about 7 minutes" in str(exc_info.value)
-    assert ref == _ACCOUNT
+    assert [p["id_str"] for p in result.items] == ["40"]
 
+
+async def test_if_fxtwitter_fails_x_is_the_backup_and_respects_its_limit() -> None:
+    client = FakeClient()
+    client.timelines["nasa"] = [post("40"), post("30")]
+    client.lookup_down = True
+
+    result = await _adapter(client).fetch_updates(_ACCOUNT, "30")
+    client.remaining = {"id": 1}
+    client.reset_in = 400
+    with pytest.raises(RateLimitedError):
+        await _adapter(client).fetch_updates(_ACCOUNT, "30")
+
+    assert [p["id_str"] for p in result.items] == ["40"]
+    assert client.fetched[:2] == ["fx:NASA", "11348282"]
 
 async def test_adding_says_when_to_try_again_when_x_is_busy() -> None:
     client = FakeClient()
@@ -248,8 +263,7 @@ async def test_an_account_with_an_empty_x_timeline_is_added_from_fxtwitter() -> 
     ref = await _adapter(client).validate_account("@Cookedcom")
 
     assert ref == _COOKED_REF
-    assert client.fetched == ["2008104784159805440", "fx:Cookedcom"]
-
+    assert client.fetched == ["fx:Cookedcom"]
 
 async def test_such_an_account_is_then_checked_on_fxtwitter_only() -> None:
     client = _cooked_client()
@@ -268,12 +282,12 @@ async def test_such_an_account_is_then_checked_on_fxtwitter_only() -> None:
 
 async def test_fxtwitter_posts_by_another_account_are_ignored() -> None:
     """FxTwitter goes by @handle; if the handle now belongs to someone else,
-    their posts must not be alerted as this account's."""
+    their posts must not be alerted as this account's — X by ID is used."""
     client = _cooked_client()
     client.fx_posts["cookedcom"] = [post("300", user={"id_str": "1", "screen_name": "Cookedcom"})]
-    adapter = _adapter(client)
-    adapter._embed_empty.add(_COOKED_REF.platform_account_id)
 
-    result = await adapter.fetch_updates(_COOKED_REF, "200")
+    result = await _adapter(client).fetch_updates(_COOKED_REF, "200")
 
     assert result.items == []
+    assert client.fetched == ["fx:Cookedcom", "2008104784159805440"]
+

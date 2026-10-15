@@ -107,6 +107,20 @@ async def test_missing_permission_is_not_blamed_on_the_account() -> None:
     assert "instagram_manage_insights" in str(exc_info.value)
 
 
+async def test_meta_refusing_the_facebook_account_is_named_not_called_a_missing_permission() -> None:
+    """Real case 2026-10-15: even debug_token failed with code 200 "Cannot
+    call API for app … on behalf of user" — no scope can fix that."""
+    client = _client_with(
+        lambda request: _graph_error(200, "Cannot call API for app 2034048970642813 on behalf of user 122100050523507847")
+    )
+
+    with pytest.raises(TransientPlatformError) as exc_info:
+        await client.get_business_discovery("somecreator")
+
+    assert "Meta is refusing the Facebook account" in str(exc_info.value)
+    assert "missing a permission" not in str(exc_info.value)
+
+
 @pytest.mark.parametrize("code", [4, 17, 32, 613, 80002])
 async def test_meta_rate_limit_codes_raise_rate_limited(code: int) -> None:
     client = _client_with(lambda request: _graph_error(code, "Application request limit reached"))
