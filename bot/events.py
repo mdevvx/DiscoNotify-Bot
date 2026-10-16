@@ -34,12 +34,25 @@ def register_events(bot: "PulseNotifyBot") -> None:
         if bot.maintenance.active:
             # Restarted while in maintenance: show it from the first moment.
             await bot.apply_presence()
+        try:
+            await bot.guilds_repo.sync_presence(guild.id for guild in bot.guilds)
+        except Exception:
+            logger.warning("Couldn't sync which servers the bot is in.", exc_info=True)
+
+    @bot.event
+    async def on_guild_available(guild: discord.Guild) -> None:
+        # Back after a Discord outage — the bot is still in it.
+        try:
+            await bot.guilds_repo.set_present(guild.id, True)
+        except Exception:
+            logger.warning("Couldn't mark server %s as present.", guild.id, exc_info=True)
 
     @bot.event
     async def on_guild_join(guild: discord.Guild) -> None:
         logger.info("Joined guild: %s (%s)", guild.name, guild.id)
         # Ensures a row (and warm cache entry) exists for this guild immediately.
         await bot.guilds_repo.is_enabled(guild.id)
+        await bot.guilds_repo.set_present(guild.id, True)
         # Commands available right away, trial started, intro posted.
         await onboarding.on_join(bot, guild)
 
@@ -48,6 +61,10 @@ def register_events(bot: "PulseNotifyBot") -> None:
         # Configuration is retained on removal so re-adding the bot restores
         # it, rather than forcing admins to reconfigure from scratch.
         logger.info("Removed from guild: %s (%s). Configuration retained.", guild.name, guild.id)
+        try:
+            await bot.guilds_repo.set_present(guild.id, False)
+        except Exception:
+            logger.warning("Couldn't mark server %s as removed.", guild.id, exc_info=True)
 
     @bot.event
     async def on_command_error(ctx: commands.Context, error: commands.CommandError) -> None:

@@ -8,7 +8,7 @@ ever loads rows across guilds and filters in application code.
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Iterable
 
 from database.client import Database, is_unique_violation
 from utils.logger import get_logger
@@ -49,6 +49,24 @@ class GuildRepository:
             .execute()
         )
         self._enabled_cache[guild_id] = enabled
+
+    async def set_present(self, guild_id: int, present: bool) -> None:
+        """Whether the bot is in this server now. Settings are kept either
+        way; the website's server list uses this."""
+        await self._get_or_create(guild_id)
+        await self._db.client.table(_TABLE).update({"bot_present": present}).eq("guild_id", guild_id).execute()
+
+    async def sync_presence(self, present_ids: Iterable[int]) -> None:
+        """At startup: servers the bot is in are present, every other known
+        server is not. Only rows that changed are written."""
+        present = set(present_ids)
+        rows = (await self._db.client.table(_TABLE).select("guild_id, bot_present").execute()).data
+        known = {int(row["guild_id"]): bool(row.get("bot_present", True)) for row in rows}
+        for guild_id in present - known.keys():
+            await self.set_present(guild_id, True)
+        for guild_id, was_present in known.items():
+            if was_present != (guild_id in present):
+                await self.set_present(guild_id, guild_id in present)
 
     async def _get_or_create(self, guild_id: int) -> Dict[str, Any]:
         result = await self._db.client.table(_TABLE).select("*").eq("guild_id", guild_id).execute()

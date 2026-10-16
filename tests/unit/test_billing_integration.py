@@ -102,6 +102,14 @@ class FakeBilling:
         self.portal_for: List[int] = []
         self.payer: Optional[int] = 5
         self.checkout_error: Optional[Exception] = None
+        self.website: Optional[str] = None  # set to simulate "subscribing happens on the website"
+        self.website_links: List[Dict[str, Any]] = []
+
+    async def website_subscribe_url(self, guild_id: int, *, user_id: Any = None, channel_id: Any = None, guild_name: Any = None) -> Any:
+        if not self.website:
+            return None
+        self.website_links.append({"guild_id": guild_id, "user_id": user_id, "channel_id": channel_id, "guild_name": guild_name})
+        return f"{self.website}?t=signed.token"
 
     def subscribe_url(self, guild_id: int) -> Any:
         return f"{self.site}?guild_id={guild_id}" if self.site else None
@@ -167,6 +175,7 @@ class FakeBot:
 
 class FakeGuild:
     id = 1
+    name = "Custom Bots"
 
 
 class FakeInteraction:
@@ -370,6 +379,33 @@ async def test_subscribe_creates_a_card_checkout_for_this_server_and_links_crypt
     assert "`/pulsenotify cancel`" in reply["content"]
 
 
+async def test_subscribe_in_website_mode_gives_one_signed_link_and_creates_no_checkout() -> None:
+    bot = FakeBot()
+    bot.billing.website = "https://pulsenotify.duoplus.org/subscribe"
+    interaction = FakeInteraction(bot)
+
+    await subscribe.callback(interaction)  # type: ignore[arg-type]
+
+    reply = interaction.response.messages[0]
+    assert reply["ephemeral"] is True
+    assert _link_urls(reply["view"]) == ["https://pulsenotify.duoplus.org/subscribe?t=signed.token"]
+    assert bot.billing.checkouts == []  # the website creates the checkout
+    assert bot.billing.website_links == [{"guild_id": 1, "user_id": 5, "channel_id": 555, "guild_name": "Custom Bots"}]
+    assert "website" in reply["content"] and "works for 30 minutes" in reply["content"]
+
+
+async def test_website_mode_adds_no_second_subscription_button_for_a_running_card_subscription() -> None:
+    bot = FakeBot()
+    bot.billing.website = "https://pulsenotify.duoplus.org/subscribe"
+    bot.billing.reason = AccessReason.PAID
+    bot.billing.row = {"card_status": "active", "card_customer_id": "cus_1"}
+    interaction = FakeInteraction(bot)
+
+    await subscribe.callback(interaction)  # type: ignore[arg-type]
+
+    assert _link_urls(interaction.response.messages[0]["view"]) == [] and bot.billing.website_links == []
+
+
 async def test_subscribe_without_card_or_crypto_set_up_says_it_isnt_ready() -> None:
     bot = FakeBot()
     bot.billing.card_available = False
@@ -519,6 +555,7 @@ async def test_the_server_owner_is_dmed_an_upgrade_reminder_with_the_link() -> N
     bot.guilds = [guild]
     bot.billing = Billing(allowed=False)
     bot.settings = type("S", (), {"billing_reminder_max": 3})()
+    bot.billing.website = None
     for name in ("send_upgrade_reminders", "_reminder_card", "_dm_owner", "_post_in_guild"):
         setattr(bot, name, getattr(PulseNotifyBot, name).__get__(bot))
 

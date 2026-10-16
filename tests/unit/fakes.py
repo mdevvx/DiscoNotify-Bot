@@ -150,7 +150,7 @@ class FakeDatabase:
 
     def __init__(self) -> None:
         self.tables: Dict[str, FakeTable] = {
-            "pulsenotify_guilds": FakeTable(unique_on=[("guild_id",)], defaults={"enabled": True}),
+            "pulsenotify_guilds": FakeTable(unique_on=[("guild_id",)], defaults={"enabled": True, "bot_present": True}),
             "pulsenotify_platform_accounts": FakeTable(
                 unique_on=[("id",), ("guild_id", "platform", "platform_account_id")],
                 defaults={"enabled": True, "status": "active", "consecutive_failures": 0, "content_cursor": None},

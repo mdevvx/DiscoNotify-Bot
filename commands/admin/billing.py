@@ -53,10 +53,16 @@ def _link(label: str, url: str, emoji: str) -> discord.ui.Button:
     return discord.ui.Button(style=discord.ButtonStyle.link, label=label, url=url, emoji=emoji)
 
 
-async def subscribe_buttons(billing: BillingService, guild_id: int) -> List[discord.ui.Item]:
-    """Link buttons for subscribing this server — a fresh card checkout and
-    the website's crypto page. For messages sent without a command to report
+async def subscribe_buttons(
+    billing: BillingService, guild_id: int, guild_name: Optional[str] = None
+) -> List[discord.ui.Item]:
+    """Link buttons for subscribing this server — the website's subscribe page
+    when subscribing happens there, otherwise a fresh card checkout and the
+    website's crypto page. For messages sent without a command to report
     errors to (the reminder DMs): a failure just leaves that button out."""
+    website_url = await billing.website_subscribe_url(guild_id, guild_name=guild_name)
+    if website_url:
+        return [discord.ui.ActionRow(_link(f"Subscribe on the website — {billing.price_label}/month", website_url, "⭐"))]
     buttons: List[discord.ui.Button] = []
     if billing.card_available:
         try:
@@ -123,8 +129,23 @@ async def subscribe(interaction: discord.Interaction) -> None:
     lines.append(f"**{billing.price_label}/month** per server — every feature and platform.")
     buttons: List[discord.ui.Button] = []
     already_subscribed = card_is_live(row) and not (row or {}).get("card_cancels_at")
+    website_url = None if already_subscribed else await billing.website_subscribe_url(
+        guild_id,
+        user_id=interaction.user.id,
+        channel_id=interaction.channel_id,
+        guild_name=interaction.guild.name,
+    )
     if already_subscribed:
         lines.append("💳 A card subscription is already set up — change the card or cancel it with `/pulsenotify cancel`.")
+    elif website_url:
+        buttons.append(_link(f"Subscribe on the website — {billing.price_label}/month", website_url, "⭐"))
+        lines.append(
+            "Subscribing happens on the **PulseNotify website**: choose 💳 **card** (renews monthly by itself) or "
+            "🪙 **crypto** (prepaid for 3, 6 or 12 months), pay, and the site shows you the result right away. "
+            "During the free trial your card is saved but **nothing is charged until the trial ends** — cancel "
+            "before then with `/pulsenotify cancel` and you pay nothing."
+        )
+        lines.append("-# The link is personal to this server and works for 30 minutes — run this command again for a new one.")
     elif billing.card_available:
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
@@ -140,7 +161,7 @@ async def subscribe(interaction: discord.Interaction) -> None:
             "charged until the trial ends** — cancel before then with `/pulsenotify cancel` and you pay nothing."
         )
 
-    crypto_url = billing.subscribe_url(guild_id)
+    crypto_url = None if (website_url or already_subscribed) else billing.subscribe_url(guild_id)
     if crypto_url:
         buttons.append(_link("Pay with crypto — 3/6/12 months", crypto_url, "🪙"))
         lines.append("🪙 **Crypto** is prepaid for 3, 6 or 12 months (crypto can't renew automatically).")

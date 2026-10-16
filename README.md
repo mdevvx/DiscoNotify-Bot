@@ -75,6 +75,7 @@ Before any platform integration is built: verify that platform's *current* offic
    - [database/migrations/0007_bot_state.sql](database/migrations/0007_bot_state.sql) — maintenance mode
    - [database/migrations/0008_website_billing.sql](database/migrations/0008_website_billing.sql) — website payments, upgrade reminders
    - [database/migrations/0009_polar_provider.sql](database/migrations/0009_polar_provider.sql) — card payments through Polar
+   - [database/migrations/0010_bot_present.sql](database/migrations/0010_bot_present.sql) — which servers the bot is in (website server list)
 
    Then add `pulsenotify` under **Project Settings > Data API > Exposed schemas**. All tables live in that schema, not `public`, and the bot can't reach them until the schema is exposed.
 
@@ -173,8 +174,11 @@ Every message the bot sends — alerts and command replies alike — is a Compon
 Per-server subscriptions (**`BILLING_PRICE_USD`** a month, $2.99 by default) live in `billing/` with the commands in `commands/admin/billing.py`. **Nothing is enforced until `BILLING_ENABLED=true`** — until then every server keeps full access and no trial clock starts.
 
 **How it works**
-- **Card — Polar ([polar.sh](https://polar.sh)).** Polar is a merchant of record: it charges the customer, handles sales tax and pays you out. `/pulsenotify subscribe` makes the bot create a hosted Polar checkout for that server (the server ID, the person and the channel travel as metadata) and shows it as a button. `/pulsenotify cancel` opens Polar's customer portal, where the subscription is cancelled or the card changed. No website pages are needed for card payments.
-- **Crypto — NOWPayments, paid on your website** (`BILLING_SUBSCRIBE_URL`, prepaid 3/6/12 months). Optional; the button only shows when the URL is set.
+- **Card — Polar ([polar.sh](https://polar.sh)).** Polar is a merchant of record: it charges the customer, handles sales tax and pays you out. `/pulsenotify cancel` opens Polar's customer portal, where the subscription is cancelled or the card changed. Two ways to subscribe:
+  - **Website mode** (`BILLING_SUBSCRIBE_URL` **and** `BILLING_LINK_SECRET` set): `/pulsenotify subscribe` gives a button to your website with a **signed, 30-minute link** (server, who asked, trial days left). The website creates the Polar checkout, the customer pays, and the website shows a **success / warning / error** alert. Crypto can live on the same page. Spec and reference code: [docs/website-integration.md](docs/website-integration.md). People can also open the site directly, **log in with Discord and pick their server from a list** (only servers they manage that the bot is in — tracked by `pulsenotify_guilds.bot_present`, migration 0010).
+  - **Bot mode** (no secret): the bot creates the hosted Polar checkout itself and shows it as a button — no website pages needed.
+  Either way the server ID, the person and the channel travel as metadata, and the bot finds the payment by itself.
+- **Crypto — NOWPayments, paid on your website** (prepaid 3/6/12 months). Optional; in bot mode the button shows when `BILLING_SUBSCRIBE_URL` is set.
 - **Trial:** a server's 7-day free trial starts the first time the bot sees it with billing on, and removing and re-adding the bot doesn't restart it. Subscribing by card during the trial saves the card and charges nothing until the trial ends (the bot sets each checkout's trial to the days left; the Polar product has no trial of its own). Cancel during the trial → never charged; after paying → the server stays active until the end of the paid month.
 - **Confirmation:** every 60s the bot lists Polar's subscriptions (and checks NOWPayments) itself — a payment only counts once the provider says so — then posts "✅ Payment received" in the channel `/pulsenotify subscribe` was used in. Known subscriptions are refreshed every 10 minutes (renewals, cancellations, refunds). No webhook endpoint is needed, so there's no inbound attack surface.
 - **Upgrade reminders:** when the trial or a subscription runs out, the bot DMs the **server owner** a reminder with subscribe buttons — right away, then every `BILLING_REMINDER_EVERY_DAYS` (7), at most `BILLING_REMINDER_MAX` (3) times. If DMs are closed it posts in the server's system channel. Paying resets the count. Whitelisted servers never get one. Any other command from an unpaid server answers "🔒 Subscription needed".
@@ -183,13 +187,14 @@ Per-server subscriptions (**`BILLING_PRICE_USD`** a month, $2.99 by default) liv
 
 **Security rules built in**
 - Only people with **Manage Server** can run `subscribe` / `cancel`, with a cooldown (3 uses per 30 s).
+- Website links are **HMAC-signed and expire** (`BILLING_LINK_TTL_MINUTES`, 30 by default), so nobody can forge a server ID, and the website needs no Discord login.
 - The **billing portal link** is pre-authenticated as the paying customer (it shows their email and card), so only **the person who subscribed or the server owner** can open it; other admins are told who can.
 - Checkout and portal links from Polar's API are only used when they're **https on polar.sh**; replies are ephemeral (only the person who asked sees them); a checkout link is reused for 10 minutes instead of calling Polar again.
 - A subscription that ends **early** (refund, chargeback, revoked) cuts access at that moment — without touching prepaid crypto time.
 - Users see a generic message when Polar fails; the technical detail (which may name scopes or settings) is logged and shown to the bot owner only.
 - The access token only needs the scopes below, lives only in the environment (never in git, never logged), and the bot has no webhook endpoint.
 
-**1. Database:** run [0006_billing.sql](database/migrations/0006_billing.sql), [0008_website_billing.sql](database/migrations/0008_website_billing.sql) and [0009_polar_provider.sql](database/migrations/0009_polar_provider.sql) in the Supabase SQL editor.
+**1. Database:** run [0006_billing.sql](database/migrations/0006_billing.sql), [0008_website_billing.sql](database/migrations/0008_website_billing.sql) and [0009_polar_provider.sql](database/migrations/0009_polar_provider.sql) and [0010_bot_present.sql](database/migrations/0010_bot_present.sql) in the Supabase SQL editor.
 
 **2. Polar (cards)**
 1. Create an organization at polar.sh and finish the **Account Review** (product, identity, payout account via Stripe Connect, website, support email).
@@ -204,7 +209,7 @@ Per-server subscriptions (**`BILLING_PRICE_USD`** a month, $2.99 by default) liv
 3. Your website creates the payment (with `order_id` = `"<guild_id>-<anything unique>"`) and inserts a `pending` row into `pulsenotify.pulsenotify_payments`: `guild_id`, `provider = 'nowpayments'`, `external_id` = NOWPayments' `payment_id`, `months` (3/6/12), `amount_usd`, `status = 'pending'`. The bot checks it with NOWPayments and credits the months once paid — but refuses it if NOWPayments' `order_id` names another server or its USD price is lower than `amount_usd`. Inserting needs the Supabase service-role key on the website's **server side** only.
 4. Each coin has a **minimum payment** that moves with network fees (2026-10-13: under $1 for USDT-BNB/LTC/SOL/ETH, ~$11.18 for USDT on TRON, ~$21.98 for BTC) — the website should check `/min-amount` before offering a plan.
 
-**4. Turn it on:** set `POLAR_ACCESS_TOKEN`, `POLAR_PRODUCT_ID` (and `BILLING_SUBSCRIBE_URL` if you offer crypto), `BILLING_ENABLED=true`, redeploy, `!sync`. Whitelist your own servers first with `!whitelist add` (in each server, or `!whitelist add <server_id>`). The startup log shows "Billing enabled (card: on, …)" and warns about a missing token or a price mismatch.
+**4. Turn it on:** set `POLAR_ACCESS_TOKEN`, `POLAR_PRODUCT_ID` (for website mode also `BILLING_SUBSCRIBE_URL` and `BILLING_LINK_SECRET` — a long random string shared with the website, e.g. `python -c "import secrets; print(secrets.token_urlsafe(48))"`; otherwise `BILLING_SUBSCRIBE_URL` only if you offer crypto), `BILLING_ENABLED=true`, redeploy, `!sync`. Whitelist your own servers first with `!whitelist add` (in each server, or `!whitelist add <server_id>`). The startup log shows "Billing enabled (card: on, …)" and warns about a missing token or a price mismatch.
 
 ## Testing
 

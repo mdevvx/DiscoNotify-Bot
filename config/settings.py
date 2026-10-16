@@ -13,7 +13,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import List, Optional
 
-from pydantic import Field, field_validator
+from pydantic import SecretStr, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # pydantic-settings tries to JSON-decode env values for any "complex" field
@@ -117,9 +117,16 @@ class Settings(BaseSettings):
     billing_trial_days: int = Field(default=7, alias="BILLING_TRIAL_DAYS")
     billing_grace_days: int = Field(default=3, alias="BILLING_GRACE_DAYS")
     billing_poll_interval_seconds: float = Field(default=60.0, alias="BILLING_POLL_INTERVAL_SECONDS")
-    # The website's crypto payment page. The bot adds ?guild_id=<server ID>
-    # (or fills in a {guild_id} placeholder).
+    # The website's subscribe page. With BILLING_LINK_SECRET set too, the
+    # subscribe button opens it with a signed token (server, who asked, trial
+    # days left) and the website creates the Polar checkout / crypto payment
+    # and shows the result. Without the secret it's only the crypto page, and
+    # the bot creates card checkouts itself; the bot adds ?guild_id=<id>.
     billing_subscribe_url: Optional[str] = Field(default=None, alias="BILLING_SUBSCRIBE_URL")
+    # Shared with the website to sign those links — a long random string
+    # (e.g. `python -c "import secrets; print(secrets.token_urlsafe(48))"`).
+    billing_link_secret: Optional[SecretStr] = Field(default=None, alias="BILLING_LINK_SECRET")
+    billing_link_ttl_minutes: int = Field(default=30, ge=1, le=1440, alias="BILLING_LINK_TTL_MINUTES")
     # Upgrade reminders DM'd to the server owner once the trial or
     # subscription has run out: right away, then every N days, at most M.
     billing_reminder_every_days: int = Field(default=7, alias="BILLING_REMINDER_EVERY_DAYS")

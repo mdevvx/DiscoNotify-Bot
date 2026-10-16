@@ -32,6 +32,7 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Set
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
 from billing.access import Access, AccessReason, evaluate, parse_time, utcnow
+from billing.links import sign_link
 from billing.nowpayments import EXPIRED_STATUSES, FAILED_STATUSES, PAID_STATUSES, NowPaymentsClient
 from billing.polar import PolarClient, PolarError
 from billing.repository import BillingRepository
@@ -89,6 +90,8 @@ class BillingService:
         trial_days: int = 7,
         grace_days: int = 3,
         subscribe_url: Optional[str] = None,
+        link_secret: Optional[str] = None,
+        link_ttl_minutes: int = 30,
         reminder_every_days: int = 7,
         reminder_max: int = 3,
         polar: Optional[PolarClient] = None,
@@ -103,6 +106,8 @@ class BillingService:
         self._trial = datetime.timedelta(days=trial_days)
         self._grace = datetime.timedelta(days=grace_days)
         self._subscribe_url = subscribe_url or None
+        self._link_secret = link_secret or None
+        self._link_ttl_seconds = link_ttl_minutes * 60
         self._reminder_every = datetime.timedelta(days=reminder_every_days)
         self._reminder_max = reminder_max
         self._polar = polar if polar_product_id else None
@@ -133,6 +138,41 @@ class BillingService:
     def subscribe_url(self, guild_id: int) -> Optional[str]:
         """The website's crypto payment page for this server (None until set)."""
         return with_server(self._subscribe_url, guild_id)
+
+    @property
+    def website_mode(self) -> bool:
+        """Subscribing happens on the website: the subscribe page URL and the
+        secret that signs the links to it are both set. The website then
+        creates the Polar checkout (or the crypto payment) and shows the
+        result; without this the bot creates the card checkout itself."""
+        return self._subscribe_url is not None and self._link_secret is not None
+
+    async def website_subscribe_url(
+        self,
+        guild_id: int,
+        *,
+        user_id: Optional[int] = None,
+        channel_id: Optional[int] = None,
+        guild_name: Optional[str] = None,
+    ) -> Optional[str]:
+        """The website's subscribe page for this server, with a signed,
+        short-lived token saying which server, who asked and how many trial
+        days are left (None unless website_mode)."""
+        if not self.website_mode:
+            return None
+        token = sign_link(
+            self._link_secret,  # type: ignore[arg-type]
+            guild_id=guild_id,
+            user_id=user_id,
+            channel_id=channel_id,
+            guild_name=guild_name,
+            trial_days=await self.remaining_trial_days(guild_id),
+            ttl_seconds=self._link_ttl_seconds,
+            now=self._clock().timestamp(),
+        )
+        parts = urlsplit(self._subscribe_url)  # type: ignore[arg-type]
+        query = "&".join(part for part in (parts.query, urlencode({"t": token})) if part)
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
 
     async def aclose(self) -> None:
         for client in (self._polar, self._nowpayments):

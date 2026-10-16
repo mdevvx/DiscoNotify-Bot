@@ -165,6 +165,8 @@ class PulseNotifyBot(commands.Bot):
             trial_days=settings.billing_trial_days,
             grace_days=settings.billing_grace_days,
             subscribe_url=settings.billing_subscribe_url,
+            link_secret=settings.billing_link_secret.get_secret_value() if settings.billing_link_secret else None,
+            link_ttl_minutes=settings.billing_link_ttl_minutes,
             reminder_every_days=settings.billing_reminder_every_days,
             reminder_max=settings.billing_reminder_max,
             polar=(
@@ -364,7 +366,7 @@ class PulseNotifyBot(commands.Bot):
         lines = [f"Server: **{guild.name}**", *subscription_needed(row, price_label=self.billing.price_label)]
         if reminder >= self.settings.billing_reminder_max:
             lines.append("-# This is the last reminder — we won't message you about this again.")
-        buttons = await subscribe_buttons(self.billing, guild.id)
+        buttons = await subscribe_buttons(self.billing, guild.id, guild.name)
         return cards.card(*lines, title=title, tone=cards.WARNING, extra=buttons)
 
     async def _dm_owner(self, guild: discord.Guild, view: discord.ui.LayoutView) -> bool:
