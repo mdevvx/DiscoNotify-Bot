@@ -13,7 +13,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import List, Optional
 
-from pydantic import SecretStr, Field, field_validator
+from pydantic import Field, SecretStr, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # pydantic-settings tries to JSON-decode env values for any "complex" field
@@ -175,6 +175,16 @@ class Settings(BaseSettings):
         if upper not in _VALID_LOG_LEVELS:
             raise ValueError(f"LOG_LEVEL must be one of {sorted(_VALID_LOG_LEVELS)}, got {value!r}")
         return upper
+
+
+def describe_settings_errors(error: ValidationError) -> str:
+    """One line per bad variable — its name and what's wrong, never the value
+    it was given (that could be a secret)."""
+    lines = []
+    for item in error.errors():
+        name = ".".join(str(part) for part in item["loc"]) or "settings"
+        lines.append(f"  - {name}: {item['msg']}")
+    return "\n".join(lines)
 
 
 @lru_cache

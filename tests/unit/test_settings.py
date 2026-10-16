@@ -89,3 +89,35 @@ def test_blank_required_fields_raise_a_clear_error_not_a_silent_empty_string(mon
 
     with pytest.raises(Exception):
         Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+def test_a_bad_variable_is_reported_by_name_without_its_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Real case 2026-10-16: BILLING_POLL_INTERVAL_SECONDS=600e crash-looped a
+    deploy behind pages of traceback."""
+    from pydantic import ValidationError
+
+    from config.settings import describe_settings_errors
+
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("BILLING_POLL_INTERVAL_SECONDS", "600e")
+
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(_env_file=None)  # type: ignore[call-arg]
+
+    text = describe_settings_errors(exc_info.value)
+    assert "BILLING_POLL_INTERVAL_SECONDS" in text and "valid number" in text
+    assert "600e" not in text
+
+
+def test_a_missing_required_variable_is_named(monkeypatch: pytest.MonkeyPatch) -> None:
+    from pydantic import ValidationError
+
+    from config.settings import describe_settings_errors
+
+    _set_required_env(monkeypatch)
+    monkeypatch.delenv("SUPABASE_KEY", raising=False)
+
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert "SUPABASE_KEY: Field required" in describe_settings_errors(exc_info.value)
