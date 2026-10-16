@@ -4,7 +4,7 @@ actually pausing anything), the command gate, and the billing commands."""
 
 from __future__ import annotations
 
-from typing import Any, List, Set
+from typing import Any, Dict, List, Optional, Set
 
 import pytest
 
@@ -97,13 +97,30 @@ class FakeBilling:
         self.whitelisted: List[int] = []
         self.reason = AccessReason.TRIAL if allowed else AccessReason.EXPIRED
         self.row: Any = None
-        self.site = "https://pulsenotify.duoplus.org"
+        self.site: Optional[str] = "https://pulsenotify.duoplus.org/crypto"
+        self.checkouts: List[Dict[str, Any]] = []
+        self.portal_for: List[int] = []
+        self.payer: Optional[int] = 5
+        self.checkout_error: Optional[Exception] = None
 
     def subscribe_url(self, guild_id: int) -> Any:
-        return f"{self.site}/subscribe?guild_id={guild_id}" if self.site else None
+        return f"{self.site}?guild_id={guild_id}" if self.site else None
 
-    def cancel_url(self, guild_id: int) -> Any:
-        return f"{self.site}/cancel?guild_id={guild_id}" if self.site else None
+    async def start_card_checkout(self, guild_id: int, *, user_id: Any = None, channel_id: Any = None) -> str:
+        if self.checkout_error is not None:
+            raise self.checkout_error
+        self.checkouts.append({"guild_id": guild_id, "user_id": user_id, "channel_id": channel_id})
+        return f"https://buy.polar.sh/co_{len(self.checkouts)}"
+
+    async def manage_card_url(self, guild_id: int) -> str:
+        self.portal_for.append(guild_id)
+        return "https://polar.sh/pulsenotify/portal?customer_session_token=t"
+
+    async def can_manage_card(self, guild_id: int, user_id: int, *, server_owner_id: Any) -> bool:
+        return user_id == self.payer or user_id == server_owner_id
+
+    async def card_payer_id(self, guild_id: int) -> Any:
+        return self.payer
 
     async def access(self, guild_id: int) -> Access:
         return Access(self._allowed, self.reason)
@@ -184,7 +201,7 @@ async def test_a_server_without_access_is_told_to_subscribe() -> None:
     assert "Subscription needed" in reply["content"]
     assert "/pulsenotify subscribe" in reply["content"] and "$1/month" in reply["content"]
     assert "every setting is kept" in reply["content"]
-    assert _link_urls(reply["view"]) == ["https://pulsenotify.duoplus.org/subscribe?guild_id=1"]
+    assert _link_urls(reply["view"]) == []  # the message points to /pulsenotify subscribe, which creates the checkout
 
 
 def _link_urls(view: Any) -> List[str]:
@@ -336,40 +353,117 @@ async def test_subscribe_says_free_while_billing_is_off() -> None:
     assert "free" in interaction.response.messages[0]["content"].lower()
 
 
-async def test_subscribe_links_to_the_website_with_the_server_id() -> None:
-    interaction = FakeInteraction(FakeBot())
+async def test_subscribe_creates_a_card_checkout_for_this_server_and_links_crypto() -> None:
+    bot = FakeBot()
+    interaction = FakeInteraction(bot)
 
     await subscribe.callback(interaction)  # type: ignore[arg-type]
 
-    reply = interaction.response.messages[0]
-    assert _link_urls(reply["view"]) == ["https://pulsenotify.duoplus.org/subscribe?guild_id=1"]
-    assert "website" in reply["content"] and "$1/month" in reply["content"]
+    reply = (interaction.response.messages or interaction.followup.messages)[0]
+    assert reply["ephemeral"] is True  # the checkout link is for the person who asked
+    assert _link_urls(reply["view"]) == [
+        "https://buy.polar.sh/co_1",
+        "https://pulsenotify.duoplus.org/crypto?guild_id=1",
+    ]
+    assert bot.billing.checkouts == [{"guild_id": 1, "user_id": 5, "channel_id": 555}]
+    assert "$1/month" in reply["content"] and "nothing is charged until the trial ends" in reply["content"]
     assert "`/pulsenotify cancel`" in reply["content"]
 
 
-async def test_subscribe_without_a_website_link_says_it_isnt_ready() -> None:
+async def test_subscribe_without_card_or_crypto_set_up_says_it_isnt_ready() -> None:
     bot = FakeBot()
-    bot.billing.site = ""
+    bot.billing.card_available = False
+    bot.billing.site = None
     interaction = FakeInteraction(bot)
 
     await subscribe.callback(interaction)  # type: ignore[arg-type]
 
     reply = interaction.response.messages[0]
     assert _link_urls(reply["view"]) == []
-    assert "isn't available yet" in reply["content"]
+    assert "aren't switched on yet" in reply["content"]
 
 
-async def test_cancel_links_to_the_website_and_explains_paid_time_is_kept() -> None:
+async def test_a_server_with_a_running_card_subscription_gets_no_second_checkout() -> None:
+    """Two checkouts would mean two subscriptions and a double charge."""
     bot = FakeBot()
     bot.billing.reason = AccessReason.PAID
-    bot.billing.row = {"card_status": "active", "card_subscription_id": "sub_1"}
+    bot.billing.row = {"card_status": "active", "card_customer_id": "cus_1"}
     interaction = FakeInteraction(bot)
+
+    await subscribe.callback(interaction)  # type: ignore[arg-type]
+
+    assert bot.billing.checkouts == []
+    assert "already set up" in interaction.response.messages[0]["content"]
+
+
+async def test_a_polar_problem_shows_users_a_generic_message_and_the_owner_the_detail() -> None:
+    from billing.polar import PolarError
+
+    secret_detail = "Polar rejected the access token (403): missing scope — check POLAR_ACCESS_TOKEN"
+    for user_id, expect_detail in ((5, False), (_OWNER, True)):
+        bot = FakeBot()
+        bot.billing.checkout_error = PolarError(secret_detail)
+        interaction = FakeInteraction(bot, user_id=user_id)
+
+        await subscribe.callback(interaction)  # type: ignore[arg-type]
+
+        text = (interaction.response.messages or interaction.followup.messages)[0]["content"]
+        assert ("POLAR_ACCESS_TOKEN" in text) is expect_detail
+        assert "Card payments aren't working right now" in text
+
+
+async def test_cancel_opens_the_billing_portal_for_the_payer() -> None:
+    bot = FakeBot()
+    bot.billing.reason = AccessReason.PAID
+    bot.billing.row = {"card_status": "active", "card_customer_id": "cus_1"}
+    interaction = FakeInteraction(bot, user_id=5)  # 5 paid
+
+    await cancel.callback(interaction)  # type: ignore[arg-type]
+
+    reply = (interaction.response.messages or interaction.followup.messages)[0]
+    assert reply["ephemeral"] is True
+    assert _link_urls(reply["view"]) == ["https://polar.sh/pulsenotify/portal?customer_session_token=t"]
+    assert "stays active until the end of the month" in reply["content"]
+    assert bot.billing.portal_for == [1]
+
+
+async def test_cancel_refuses_the_portal_to_an_admin_who_didnt_pay_and_isnt_the_owner() -> None:
+    """The link is pre-authenticated as the payer and shows their email and card."""
+    bot = FakeBot()
+    bot.billing.reason = AccessReason.PAID
+    bot.billing.row = {"card_status": "active", "card_customer_id": "cus_1"}
+    interaction = FakeInteraction(bot, user_id=77)
 
     await cancel.callback(interaction)  # type: ignore[arg-type]
 
     reply = interaction.response.messages[0]
-    assert _link_urls(reply["view"]) == ["https://pulsenotify.duoplus.org/cancel?guild_id=1"]
-    assert "stays active until the end of the month" in reply["content"]
+    assert _link_urls(reply["view"]) == [] and bot.billing.portal_for == []
+    assert "only <@5> (who subscribed) or the server owner can open it" in reply["content"]
+
+
+async def test_the_server_owner_can_always_open_the_portal() -> None:
+    bot = FakeBot()
+    bot.billing.reason = AccessReason.PAID
+    bot.billing.row = {"card_status": "active", "card_customer_id": "cus_1"}
+    interaction = FakeInteraction(bot, user_id=77)
+    interaction.guild.owner_id = 77  # type: ignore[attr-defined]
+
+    await cancel.callback(interaction)  # type: ignore[arg-type]
+
+    assert bot.billing.portal_for == [1]
+
+
+async def test_a_cooldown_gets_a_readable_message() -> None:
+    from discord import app_commands
+
+    from bot.events import handle_app_command_error
+
+    interaction = FakeInteraction(FakeBot())
+    cooldown = app_commands.Cooldown(3, 30.0)
+
+    await handle_app_command_error(interaction, app_commands.CommandOnCooldown(cooldown, 12.4))  # type: ignore[arg-type]
+
+    assert "you can use this again in 12 seconds" in interaction.response.messages[0]["content"]
 
 
 @pytest.mark.parametrize(
@@ -432,7 +526,10 @@ async def test_the_server_owner_is_dmed_an_upgrade_reminder_with_the_link() -> N
 
     text = plain_text(owner.sent[0])
     assert "trial has ended" in text and "Gaming Hub" in text
-    assert _link_urls(owner.sent[0]) == ["https://pulsenotify.duoplus.org/subscribe?guild_id=1"]
+    assert _link_urls(owner.sent[0]) == [
+        "https://buy.polar.sh/co_1",
+        "https://pulsenotify.duoplus.org/crypto?guild_id=1",
+    ]
     assert marked == [1]
 
 

@@ -74,6 +74,7 @@ Before any platform integration is built: verify that platform's *current* offic
    - [database/migrations/0006_billing.sql](database/migrations/0006_billing.sql)
    - [database/migrations/0007_bot_state.sql](database/migrations/0007_bot_state.sql) — maintenance mode
    - [database/migrations/0008_website_billing.sql](database/migrations/0008_website_billing.sql) — website payments, upgrade reminders
+   - [database/migrations/0009_polar_provider.sql](database/migrations/0009_polar_provider.sql) — card payments through Polar
 
    Then add `pulsenotify` under **Project Settings > Data API > Exposed schemas**. All tables live in that schema, not `public`, and the bot can't reach them until the schema is exposed.
 
@@ -124,8 +125,8 @@ Every slash command lives under one top-level `/pulsenotify` group (`commands/pu
 |---|---|---|
 | `/pulsenotify status` | This server only: whether monitoring is on, a **Subscription** section (state, card/crypto, renewal or end date, how to manage it) when billing is on, and for every monitored account — the account (linked), the channel its alerts post to, how many alert types are on, who gets pinged, whether it's live, when it was last checked and when its last alert went out, plus each platform's check interval. Works while the server is paused | Anyone |
 | `/pulsenotify global status` | Bot-wide health: uptime, latency, server count, database connection, per-platform monitoring health and request counts. Private reply, hidden from `/pulsenotify help` for everyone else | Bot owner only (`DISCORD_OWNER_IDS` or the Discord application's owner) |
-| `/pulsenotify subscribe` | Shows this server's trial/subscription state and a **Subscribe on the website** button (`BILLING_SUBSCRIBE_URL`, with the server ID filled in) — card monthly or crypto 3/6/12 months. Only says "free" while billing is off | Manage Server |
-| `/pulsenotify cancel` | Explains what cancelling means for this server (trial with a saved card → never charged; paid card → active until the end of the paid month; crypto → nothing renews) and a **Cancel on the website** button (`BILLING_CANCEL_URL`) | Manage Server |
+| `/pulsenotify subscribe` | Shows this server's trial/subscription state and creates its payment buttons: **Subscribe by card** (a hosted Polar checkout for this server; during the trial nothing is charged until it ends) and, when `BILLING_SUBSCRIBE_URL` is set, **Pay with crypto** (3/6/12 months). Says "free" while billing is off | Manage Server |
+| `/pulsenotify cancel` | Explains what cancelling means for this server (trial with a saved card → never charged; paid card → active until the end of the paid month; crypto → nothing renews) and opens Polar's billing portal (cancel or change card) — **only for the person who subscribed or the server owner** | Manage Server |
 | `!whitelist add [server_id] [note]` · `!whitelist remove [server_id]` · `!whitelist list` | Let a server use everything without paying, undo that, or list whitelisted servers. `server_id` defaults to the current server. A text command on purpose: Discord can't hide a slash command from individual users, so this never appears in anyone's command menu or `/pulsenotify help`, and anyone else typing it gets no reply | Bot owner only |
 | `!maintenance on [message]` · `!maintenance off` · `!maintenance` | Pause PulseNotify in **every** server — all commands (except the owner's) and all monitoring — with your message shown to members and "🛠️ Under maintenance" as the bot's status. Asks to confirm first. Survives restarts (stored in the database, migration 0007), so: switch on → update → restart → check → switch off. Routine updates don't need it: a restart is seconds and nothing is lost (content cursors and live states are saved) | Bot owner only |
 | `/pulsenotify help` | Lists every command and what it does — built by introspecting the command group itself, so it can't drift out of sync with what's actually registered | Anyone |
@@ -172,33 +173,38 @@ Every message the bot sends — alerts and command replies alike — is a Compon
 Per-server subscriptions (**`BILLING_PRICE_USD`** a month, $2.99 by default) live in `billing/` with the commands in `commands/admin/billing.py`. **Nothing is enforced until `BILLING_ENABLED=true`** — until then every server keeps full access and no trial clock starts.
 
 **How it works**
-- **All payments happen on the PulseNotify website, never inside Discord.** `/pulsenotify subscribe` and `/pulsenotify cancel` show the server's state and a button to your pages (`BILLING_SUBSCRIBE_URL`, `BILLING_CANCEL_URL`) with the server ID added as `?guild_id=<id>` — or put `{guild_id}` in the URL where it should go. Until a URL is set the command says the page "isn't available yet".
-- **Trial:** a server's 7-day free trial starts the first time the bot sees it with billing on. Afterwards it needs an active subscription (or the bot owner's whitelist). Any gated command in a server without access answers "🔒 Subscription needed" with the subscribe button.
-- **Upgrade reminders:** when the trial (or a paid subscription) runs out, the bot DMs the **server owner** a reminder with the subscribe button — right away, then every `BILLING_REMINDER_EVERY_DAYS` (7), at most `BILLING_REMINDER_MAX` (3) times. If the owner's DMs are closed it posts in the server's system channel instead. Paying resets the count. Whitelisted servers never get one.
-- **Card (Paddle):** renews monthly by itself. Subscribing during the trial should save the card and charge nothing until the trial ends (give the checkout a trial for the remaining days). Cancel during the trial → never charged; after paying → the server stays active until the end of the paid month.
-- **Crypto (NOWPayments):** prepaid for 3, 6 or 12 months; months stack.
-- **Grace:** 3 days after paid time runs out (covers a renewal Paddle retries), then monitoring pauses. Settings are never deleted; monitoring resumes the moment the server pays.
-- **Confirmation:** every 60s the bot checks Paddle and NOWPayments itself — a payment only counts once the provider says it's paid. It then DMs the server owner "✅ Payment received" (or posts in the system channel if DMs are closed).
-- **Price:** `BILLING_PRICE_USD` is the price shown in Discord — keep it the same as what the website charges.
+- **Card — Polar ([polar.sh](https://polar.sh)).** Polar is a merchant of record: it charges the customer, handles sales tax and pays you out. `/pulsenotify subscribe` makes the bot create a hosted Polar checkout for that server (the server ID, the person and the channel travel as metadata) and shows it as a button. `/pulsenotify cancel` opens Polar's customer portal, where the subscription is cancelled or the card changed. No website pages are needed for card payments.
+- **Crypto — NOWPayments, paid on your website** (`BILLING_SUBSCRIBE_URL`, prepaid 3/6/12 months). Optional; the button only shows when the URL is set.
+- **Trial:** a server's 7-day free trial starts the first time the bot sees it with billing on, and removing and re-adding the bot doesn't restart it. Subscribing by card during the trial saves the card and charges nothing until the trial ends (the bot sets each checkout's trial to the days left; the Polar product has no trial of its own). Cancel during the trial → never charged; after paying → the server stays active until the end of the paid month.
+- **Confirmation:** every 60s the bot lists Polar's subscriptions (and checks NOWPayments) itself — a payment only counts once the provider says so — then posts "✅ Payment received" in the channel `/pulsenotify subscribe` was used in. Known subscriptions are refreshed every 10 minutes (renewals, cancellations, refunds). No webhook endpoint is needed, so there's no inbound attack surface.
+- **Upgrade reminders:** when the trial or a subscription runs out, the bot DMs the **server owner** a reminder with subscribe buttons — right away, then every `BILLING_REMINDER_EVERY_DAYS` (7), at most `BILLING_REMINDER_MAX` (3) times. If DMs are closed it posts in the server's system channel. Paying resets the count. Whitelisted servers never get one. Any other command from an unpaid server answers "🔒 Subscription needed".
+- **Grace:** 3 days after paid time runs out, then monitoring pauses. Settings are never deleted; monitoring resumes the moment the server pays.
+- **Price:** `BILLING_PRICE_USD` is the price shown in Discord and used for crypto amounts — keep it equal to the Polar product's price (the startup log warns if they differ). Polar keeps existing subscribers on the price they signed up at.
 
-**What the website must do** (the bot finds the payments from this)
-- **Card:** open Paddle checkout with the server ID in custom data — `Paddle.Checkout.open({ items: [{ priceId: "pri_…", quantity: 1 }], customData: { guild_id: "<id from ?guild_id=>" } })`. Nothing else: the bot lists Paddle's paid transactions and picks up every one with `custom_data.guild_id` for a server it's in. Renewals and cancellations are read from the subscription every 10 minutes.
-- **Crypto:** create the NOWPayments payment with `order_id` = `"<guild_id>-<anything unique>"`, then insert a row into `pulsenotify.pulsenotify_payments`: `guild_id`, `provider = 'nowpayments'`, `external_id` = NOWPayments' `payment_id`, `months` (3/6/12), `amount_usd` (the USD price), `status = 'pending'`. The bot checks it with NOWPayments and credits the months once paid — but refuses it if NOWPayments' `order_id` names another server or its USD price is lower than `amount_usd`. (Inserting needs the Supabase service-role key on the website's **server side** — never in browser code.)
-- **Cancel page:** cancel the server's Paddle subscription at the end of the billing period (`POST /subscriptions/{id}/cancel` with `effective_from: "next_billing_period"`, or send the customer to Paddle's customer portal). The subscription ID is `card_subscription_id` in `pulsenotify.pulsenotify_billing` for that `guild_id`. **Check who's asking** — e.g. the customer's Paddle email, or Paddle's portal — so nobody can cancel another server's subscription just by knowing its ID.
+**Security rules built in**
+- Only people with **Manage Server** can run `subscribe` / `cancel`, with a cooldown (3 uses per 30 s).
+- The **billing portal link** is pre-authenticated as the paying customer (it shows their email and card), so only **the person who subscribed or the server owner** can open it; other admins are told who can.
+- Checkout and portal links from Polar's API are only used when they're **https on polar.sh**; replies are ephemeral (only the person who asked sees them); a checkout link is reused for 10 minutes instead of calling Polar again.
+- A subscription that ends **early** (refund, chargeback, revoked) cuts access at that moment — without touching prepaid crypto time.
+- Users see a generic message when Polar fails; the technical detail (which may name scopes or settings) is logged and shown to the bot owner only.
+- The access token only needs the scopes below, lives only in the environment (never in git, never logged), and the bot has no webhook endpoint.
 
-**1. Database:** run [0006_billing.sql](database/migrations/0006_billing.sql) and [0008_website_billing.sql](database/migrations/0008_website_billing.sql) in the Supabase SQL editor.
+**1. Database:** run [0006_billing.sql](database/migrations/0006_billing.sql), [0008_website_billing.sql](database/migrations/0008_website_billing.sql) and [0009_polar_provider.sql](database/migrations/0009_polar_provider.sql) in the Supabase SQL editor.
 
-**2. Paddle (cards)** — a *merchant of record*: it charges the customer, handles VAT/sales tax, and pays you out. Fees ≈ 5% + $0.50 per payment.
-1. Sign up at paddle.com. Paddle verifies sellers and needs a live website with your pricing, Terms of Service, Privacy Policy and Refund Policy.
-2. **Catalog → Products → New product** ("PulseNotify") with a recurring **monthly** USD price — the website's checkout uses it.
-3. **Developer tools → Authentication → API keys** → new key for the bot → `PADDLE_API_KEY`, with **Transactions** read and **Subscriptions** read. The key's prefix decides the environment — `pdl_sdbx_…` sandbox, `pdl_live_…` live — and the bot follows it even if `PADDLE_SANDBOX` says otherwise. The website needs its own client-side token (and its own key if it cancels through the API).
+**2. Polar (cards)**
+1. Create an organization at polar.sh and finish the **Account Review** (product, identity, payout account via Stripe Connect, website, support email).
+2. **Products → New product:** *Subscription*, **monthly**, fixed price equal to `BILLING_PRICE_USD`, **no free trial** on the product (the bot adds the trial per checkout), no benefits. Copy its ID → `POLAR_PRODUCT_ID`.
+3. **Settings → Developers → New access token** (an *organization* access token) → `POLAR_ACCESS_TOKEN`. Give it only: `checkouts:write`, `subscriptions:read`, `customer_sessions:write` (and optionally `products:read`, so the startup check can compare the price). Set an expiry and note it in your calendar. Put it **only** in Railway's variables.
+4. Optional: `POLAR_SUCCESS_URL` (where Polar sends people after paying; otherwise Polar's own page). `POLAR_SANDBOX=true` uses sandbox.polar.sh (a separate account and token).
+5. In Polar's settings turn on the customer email notifications (receipts, trial-ending reminders) — the bot doesn't send those.
 
-**3. NOWPayments (crypto)**
+**3. NOWPayments (crypto, optional)**
 1. Sign up at nowpayments.io and add your **payout wallet(s)**.
 2. **Settings → Payments → API keys** → `NOWPAYMENTS_API_KEY` (the bot only reads payments with it). Use a **live** key with `NOWPAYMENTS_SANDBOX=false`.
-3. Each coin has a **minimum payment** that moves with network fees (2026-10-13: under $1 for USDT-BNB/LTC/SOL/ETH, ~$11.18 for USDT on TRON, ~$21.98 for BTC) — the website should check `/min-amount` before offering a plan.
+3. Your website creates the payment (with `order_id` = `"<guild_id>-<anything unique>"`) and inserts a `pending` row into `pulsenotify.pulsenotify_payments`: `guild_id`, `provider = 'nowpayments'`, `external_id` = NOWPayments' `payment_id`, `months` (3/6/12), `amount_usd`, `status = 'pending'`. The bot checks it with NOWPayments and credits the months once paid — but refuses it if NOWPayments' `order_id` names another server or its USD price is lower than `amount_usd`. Inserting needs the Supabase service-role key on the website's **server side** only.
+4. Each coin has a **minimum payment** that moves with network fees (2026-10-13: under $1 for USDT-BNB/LTC/SOL/ETH, ~$11.18 for USDT on TRON, ~$21.98 for BTC) — the website should check `/min-amount` before offering a plan.
 
-**4. Turn it on:** set `BILLING_SUBSCRIBE_URL` and `BILLING_CANCEL_URL`, `BILLING_ENABLED=true`, restart, `!sync` (registers `/pulsenotify cancel`). Whitelist your own servers first with `!whitelist add` (in each server, or `!whitelist add <server_id>`).
+**4. Turn it on:** set `POLAR_ACCESS_TOKEN`, `POLAR_PRODUCT_ID` (and `BILLING_SUBSCRIBE_URL` if you offer crypto), `BILLING_ENABLED=true`, redeploy, `!sync`. Whitelist your own servers first with `!whitelist add` (in each server, or `!whitelist add <server_id>`). The startup log shows "Billing enabled (card: on, …)" and warns about a missing token or a price mismatch.
 
 ## Testing
 
@@ -428,7 +434,6 @@ Neither platform has an official, ToS-compliant way for this bot to monitor a Pa
 
 - **Facebook**: reading a Page's posts/feed always needs that Page's admin to authorize the app (`pages_read_engagement`/`pages_read_user_content`) and pass App Review. The closest exception, "Page Public Content Access," would let an approved app read *any* public Page's posts without that Page's cooperation — but it requires Meta Business Verification (a real identity-verification process) and its only listed allowed use case is "analyze and/or display posts and engagement," which a Discord alert bot fits ambiguously at best. Not built this phase; revisit if the operator completes that verification and review.
 - **TikTok**: every official developer surface (the Content Posting API and everything else) is built around a creator connecting *their own* account to your app — the opposite of monitoring a creator you don't control. No discovery/monitoring endpoint exists at all.
-
 
 ## Guild isolation
 

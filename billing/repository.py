@@ -1,7 +1,7 @@
 """Database access for billing (migrations 0006 and 0008): one
 `pulsenotify_billing` row per server, and a `pulsenotify_payments` ledger
 of every payment — written by the website (pending crypto payments) or by
-the bot (card checkouts it found at Paddle)."""
+the bot (card subscriptions it found at Polar)."""
 
 from __future__ import annotations
 
@@ -66,7 +66,7 @@ class BillingRepository:
         return result.data
 
     async def list_card_subscriptions(self) -> List[Dict[str, Any]]:
-        """Rows with a Paddle subscription that may still change state."""
+        """Rows with a card subscription that may still change state."""
         result = await self._db.client.table(_BILLING).select("*").execute()
         return [row for row in result.data if row.get("card_subscription_id") and row.get("card_status") != "canceled"]
 

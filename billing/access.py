@@ -5,7 +5,7 @@ A server has access while ANY of these holds:
 - it's inside its free trial,
 - it's paid up (card subscription or crypto prepayment), plus a grace
   period after the paid time runs out, so a card renewal that fails once
-  and succeeds on Paddle's retry doesn't cut monitoring in between.
+  and succeeds on the payment provider's retry doesn't cut monitoring in between.
 """
 
 from __future__ import annotations
@@ -109,9 +109,8 @@ def subscription_needed(row: Optional[Dict[str, Any]], *, price_label: str) -> "
     return [
         ended,
         "Alerts are paused, but **every setting is kept** — nothing needs setting up again.",
-        f"To switch it back on, subscribe on the PulseNotify website — **{price_label}/month**, card or crypto "
-        "(a server admin can also run **`/pulsenotify subscribe`** for the link). "
-        "Alerts resume within about 2 minutes of paying.",
+        f"To switch it back on, a server admin (Manage Server) runs **`/pulsenotify subscribe`** — "
+        f"**{price_label}/month**, card or crypto. Alerts resume within about 2 minutes of paying.",
     ]
 
 
@@ -131,7 +130,7 @@ def subscription_details(access: Access, row: Optional[Dict[str, Any]], *, price
         elif card_status == "trialing":
             lines.append(f"💳 Card saved — first {price_label} charge when the trial ends")
         elif card_status == "past_due":
-            lines.append("💳 Card payment failed — Paddle is retrying; update the card to keep alerts running")
+            lines.append("💳 Card payment failed — it will be retried; update the card with `/pulsenotify cancel` to keep alerts running")
         else:
             lines.append(f"💳 Card subscription — {price_label}/month, renews automatically")
     elif access.reason in (AccessReason.PAID, AccessReason.GRACE):

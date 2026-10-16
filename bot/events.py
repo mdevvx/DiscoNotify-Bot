@@ -77,6 +77,8 @@ async def handle_prefix_command_error(ctx: commands.Context, error: commands.Com
 async def handle_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
     if isinstance(error, app_commands.MissingPermissions):
         message = "You need the **Manage Server** permission to use this command."
+    elif isinstance(error, app_commands.CommandOnCooldown):
+        message = f"Slow down — you can use this again in {max(1, round(error.retry_after))} seconds."
     elif isinstance(error, app_commands.CheckFailure):
         message = "You are not able to use this command right now."
     else:

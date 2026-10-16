@@ -130,7 +130,7 @@ async def _subscribe_box(interaction: discord.Interaction) -> Optional[discord.u
     row = await billing.billing_row(interaction.guild.id)
     return cards.container(
         f"**`/pulsenotify subscribe`** 🛡️ — keep alerts running in this server: **{billing.price_label}/month**, "
-        "card or crypto, on our website.",
+        "card or crypto.",
         "`/pulsenotify cancel` 🛡️ — cancel any time; paid time is never cut short.",
         f"This server: {describe_access(access, row, price_label=billing.price_label)}",
         title="⭐ Subscription",

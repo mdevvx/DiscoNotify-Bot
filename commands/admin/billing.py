@@ -1,7 +1,11 @@
-"""`/pulsenotify subscribe` and `/pulsenotify cancel` — both send the server
-admin to the PulseNotify website, with this server's ID filled in. All
-payments and cancellations happen there; the poller in billing/service.py
-confirms them with Paddle / NOWPayments and updates the server's access.
+"""`/pulsenotify subscribe` and `/pulsenotify cancel`.
+
+Card payments go through Polar (billing/polar.py): `subscribe` creates a
+hosted checkout for this server and `cancel` opens Polar's customer portal,
+where the subscription is cancelled or the card changed. Crypto is paid on
+the website (BILLING_SUBSCRIBE_URL, 3/6/12 months prepaid). The poller in
+billing/service.py confirms payments with Polar / NOWPayments and updates
+the server's access.
 
 (The bot-owner whitelist is the `!whitelist` text command in
 commands/admin/whitelist.py, kept out of the slash-command menu on purpose.)
@@ -10,6 +14,7 @@ commands/admin/whitelist.py, kept out of the slash-command menu on purpose.)
 from __future__ import annotations
 
 import datetime
+import uuid
 from typing import Any, Dict, List, Optional
 
 import discord
@@ -17,14 +22,17 @@ from discord import app_commands
 from discord.ext import commands
 
 from billing.access import AccessReason, describe_access, parse_time
-from billing.service import BillingService
+from billing.polar import PolarError
+from billing.service import BillingService, BillingUnavailable
 from commands.pulsenotify_group import pulsenotify_group
 from ui import cards
+from utils.errors import PlatformError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-_NOT_READY = "The payment page isn't available yet — please check back soon."
+_NOT_READY = "Payments aren't switched on yet — please check back soon."
+_LIVE_CARD_STATUSES = ("active", "trialing", "past_due")
 
 
 def _when(moment: Optional[datetime.datetime], style: str) -> str:
@@ -35,20 +43,68 @@ def _billing(interaction: discord.Interaction) -> BillingService:
     return interaction.client.billing  # type: ignore[attr-defined]
 
 
-def subscribe_link(billing: BillingService, guild_id: int, label: str = "Subscribe on the website") -> List[discord.ui.Item]:
-    """A link button to the website's payment page for this server, or
-    nothing while BILLING_SUBSCRIBE_URL isn't set."""
-    url = billing.subscribe_url(guild_id)
-    if not url:
-        return []
-    return [discord.ui.ActionRow(discord.ui.Button(style=discord.ButtonStyle.link, label=label, url=url, emoji="⭐"))]
+def card_is_live(row: Optional[Dict[str, Any]]) -> bool:
+    """The server has a card subscription that's running (not ended)."""
+    row = row or {}
+    return bool(row.get("card_customer_id")) and row.get("card_status") in _LIVE_CARD_STATUSES
+
+
+def _link(label: str, url: str, emoji: str) -> discord.ui.Button:
+    return discord.ui.Button(style=discord.ButtonStyle.link, label=label, url=url, emoji=emoji)
+
+
+async def subscribe_buttons(billing: BillingService, guild_id: int) -> List[discord.ui.Item]:
+    """Link buttons for subscribing this server — a fresh card checkout and
+    the website's crypto page. For messages sent without a command to report
+    errors to (the reminder DMs): a failure just leaves that button out."""
+    buttons: List[discord.ui.Button] = []
+    if billing.card_available:
+        try:
+            buttons.append(
+                _link(f"Subscribe by card — {billing.price_label}/month", await billing.start_card_checkout(guild_id), "💳")
+            )
+        except Exception:
+            logger.warning("Couldn't create a card checkout for server %s.", guild_id, exc_info=True)
+    crypto_url = billing.subscribe_url(guild_id)
+    if crypto_url:
+        buttons.append(_link("Pay with crypto — 3/6/12 months", crypto_url, "🪙"))
+    return [discord.ui.ActionRow(*buttons)] if buttons else []
+
+
+async def _report_error(interaction: discord.Interaction, error: Exception) -> None:
+    if isinstance(error, BillingUnavailable):
+        message = str(error)
+    elif isinstance(error, (PolarError, PlatformError)):
+        # The detail can name configuration (scopes, token) — shown to the
+        # bot's owner only; everyone else gets the logged-and-retry message.
+        logger.error("Polar request failed in guild %s: %s", interaction.guild_id, error)
+        is_owner = await interaction.client.is_owner(interaction.user)  # type: ignore[attr-defined]
+        message = (
+            f"Card payments aren't working right now — {error}"
+            if is_owner
+            else "Card payments aren't working right now. Please try again in a few minutes."
+        )
+    else:
+        # The error type and a reference ID go in the reply too, so a failure
+        # can be traced even when the bot's log isn't at hand.
+        reference = uuid.uuid4().hex[:8]
+        logger.error("Billing action failed in guild %s [ref %s]", interaction.guild_id, reference, exc_info=error)
+        message = (
+            f"Something went wrong starting that payment ({type(error).__name__}, ref `{reference}`) — "
+            "it's been logged. Please try again."
+        )
+    try:
+        await cards.error(interaction, message)
+    except discord.HTTPException:
+        pass
 
 
 # ── /pulsenotify subscribe ──────────────────────────────────────────────
 
 
-@pulsenotify_group.command(name="subscribe", description="Subscribe this server to PulseNotify on our website.")
+@pulsenotify_group.command(name="subscribe", description="Subscribe this server to PulseNotify (monthly, card or crypto).")
 @app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.checks.cooldown(3, 30.0, key=lambda interaction: (interaction.guild_id, interaction.user.id))
 async def subscribe(interaction: discord.Interaction) -> None:
     assert interaction.guild is not None
     billing = _billing(interaction)
@@ -64,27 +120,51 @@ async def subscribe(interaction: discord.Interaction) -> None:
         await cards.reply(interaction, *lines, title="PulseNotify subscription", ephemeral=True)
         return
 
-    link = subscribe_link(billing, guild_id)
-    lines += [
-        f"**{billing.price_label}/month** per server — every feature, every monitored account.",
-        "Subscriptions are handled on the **PulseNotify website**: 💳 **card** renews monthly by itself, "
-        "🪙 **crypto** is prepaid for 3, 6 or 12 months.",
-        "Subscribing during the free trial charges nothing until the trial ends. Cancel any time with "
-        "`/pulsenotify cancel`.",
-        f"-# This server's ID is `{guild_id}` — the button fills it in for you. "
-        "Alerts switch on within about 2 minutes of paying.",
-    ]
-    if not link:
+    lines.append(f"**{billing.price_label}/month** per server — every feature and platform.")
+    buttons: List[discord.ui.Button] = []
+    already_subscribed = card_is_live(row) and not (row or {}).get("card_cancels_at")
+    if already_subscribed:
+        lines.append("💳 A card subscription is already set up — change the card or cancel it with `/pulsenotify cancel`.")
+    elif billing.card_available:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            url = await billing.start_card_checkout(
+                guild_id, user_id=interaction.user.id, channel_id=interaction.channel_id
+            )
+        except Exception as exc:
+            await _report_error(interaction, exc)
+            return
+        buttons.append(_link(f"Subscribe by card — {billing.price_label}/month", url, "💳"))
+        lines.append(
+            "💳 **Card** renews monthly by itself. During the free trial your card is saved but **nothing is "
+            "charged until the trial ends** — cancel before then with `/pulsenotify cancel` and you pay nothing."
+        )
+
+    crypto_url = billing.subscribe_url(guild_id)
+    if crypto_url:
+        buttons.append(_link("Pay with crypto — 3/6/12 months", crypto_url, "🪙"))
+        lines.append("🪙 **Crypto** is prepaid for 3, 6 or 12 months (crypto can't renew automatically).")
+
+    if not buttons and not already_subscribed:
         lines.append(_NOT_READY)
-        logger.warning("BILLING_SUBSCRIBE_URL isn't set — /pulsenotify subscribe has no link to show.")
-    await cards.reply(interaction, *lines, title="⭐ PulseNotify subscription", extra=link, ephemeral=True)
+        logger.warning("Neither card (POLAR_*) nor crypto (BILLING_SUBSCRIBE_URL) payments are configured.")
+    else:
+        lines.append(f"-# This server's ID is `{guild_id}`. Alerts switch on within about 2 minutes of paying.")
+    await cards.reply(
+        interaction,
+        *lines,
+        title="⭐ PulseNotify subscription",
+        extra=[discord.ui.ActionRow(*buttons)] if buttons else (),
+        ephemeral=True,
+    )
 
 
 # ── /pulsenotify cancel ─────────────────────────────────────────────────
 
 
-@pulsenotify_group.command(name="cancel", description="Cancel this server's PulseNotify subscription on our website.")
+@pulsenotify_group.command(name="cancel", description="Cancel this server's PulseNotify subscription or change its card.")
 @app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.checks.cooldown(3, 30.0, key=lambda interaction: (interaction.guild_id, interaction.user.id))
 async def cancel(interaction: discord.Interaction) -> None:
     assert interaction.guild is not None
     billing = _billing(interaction)
@@ -100,34 +180,45 @@ async def cancel(interaction: discord.Interaction) -> None:
         return
 
     lines = _cancel_lines(billing, access.reason, row)
-    url = billing.cancel_url(guild_id)
-    extra: List[discord.ui.Item] = []
-    if url:
-        extra = [
-            discord.ui.ActionRow(
-                discord.ui.Button(style=discord.ButtonStyle.link, label="Cancel on the website", url=url, emoji="✖️")
+    buttons: List[discord.ui.Button] = []
+    if card_is_live(row):
+        owner_id = getattr(interaction.guild, "owner_id", None)
+        if await billing.can_manage_card(guild_id, interaction.user.id, server_owner_id=owner_id):
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            try:
+                url = await billing.manage_card_url(guild_id)
+            except Exception as exc:
+                await _report_error(interaction, exc)
+                return
+            buttons.append(_link("Cancel or change card", url, "⚙️"))
+            lines.append("-# The link opens Polar's billing portal and works for about an hour. Don't share it.")
+        else:
+            payer = await billing.card_payer_id(guild_id)
+            who = f"<@{payer}> (who subscribed) or the server owner" if payer else "the server owner"
+            lines.append(
+                f"🔒 The billing portal shows the payer's email and card details, so only {who} can open it. "
+                "Ask them to run `/pulsenotify cancel`."
             )
-        ]
-    else:
-        lines.append("The cancellation page isn't available yet — please check back soon.")
-        logger.warning("BILLING_CANCEL_URL isn't set — /pulsenotify cancel has no link to show.")
-    lines.append(f"-# This server's ID is `{guild_id}` — the button fills it in for you.")
-    await cards.reply(interaction, *lines, title="Cancel subscription", extra=extra, ephemeral=True)
+    await cards.reply(
+        interaction,
+        *lines,
+        title="Cancel subscription",
+        extra=[discord.ui.ActionRow(*buttons)] if buttons else (),
+        ephemeral=True,
+    )
 
 
 def _cancel_lines(billing: BillingService, reason: AccessReason, row: Dict[str, Any]) -> List[str]:
     card_status = row.get("card_status")
     cancels_at = parse_time(row.get("card_cancels_at"))
-    if card_status in ("active", "trialing", "past_due") and cancels_at is not None:
+    if card_status in _LIVE_CARD_STATUSES and cancels_at is not None:
         return [f"Already cancelled — there are no further charges, and alerts keep running until {_when(cancels_at, 'D')}."]
     if card_status == "trialing":
-        return [
-            "Your card is saved but **hasn't been charged** — cancel before the free trial ends and you pay nothing.",
-        ]
+        return ["Your card is saved but **hasn't been charged** — cancel before the free trial ends and you pay nothing."]
     if card_status in ("active", "past_due"):
         return [
-            f"Cancelling stops the monthly {billing.price_label} charge. **No refund is needed** — the server stays "
-            "active until the end of the month you've already paid for, then alerts pause (your settings are kept).",
+            f"Cancelling stops the monthly {billing.price_label} charge. The server stays active until the end of the "
+            "month you've already paid for, then alerts pause (your settings are kept).",
         ]
     if reason in (AccessReason.PAID, AccessReason.GRACE):
         return [

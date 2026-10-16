@@ -106,27 +106,33 @@ class Settings(BaseSettings):
 
     # Per-server subscriptions (billing/). Nothing is enforced until
     # BILLING_ENABLED=true — until then every server keeps full access and
-    # no trial clock starts. Payments happen on the website
-    # (BILLING_SUBSCRIBE_URL); the bot only confirms them with Paddle (card)
-    # and NOWPayments (crypto), so their API keys are read-only use here.
+    # no trial clock starts. Card = Polar (hosted checkout and customer
+    # portal, created by the bot), crypto = NOWPayments paid on the website
+    # (BILLING_SUBSCRIBE_URL); either can be left unset.
     billing_enabled: bool = Field(default=False, alias="BILLING_ENABLED")
-    # The monthly price per server, in USD — the one place it's set. Card
-    # checkouts and crypto amounts (3/6/12 × this) both use it; existing
-    # card subscribers keep the price they signed up at.
+    # The monthly price per server, in USD, as shown in Discord — it must
+    # equal the price of the Polar product. Crypto amounts (3/6/12 × this)
+    # are set by the website.
     billing_price_usd: float = Field(default=2.99, gt=0, alias="BILLING_PRICE_USD")
     billing_trial_days: int = Field(default=7, alias="BILLING_TRIAL_DAYS")
     billing_grace_days: int = Field(default=3, alias="BILLING_GRACE_DAYS")
     billing_poll_interval_seconds: float = Field(default=60.0, alias="BILLING_POLL_INTERVAL_SECONDS")
-    # The website's payment and cancellation pages. The bot adds
-    # ?guild_id=<server ID> (or fills in a {guild_id} placeholder).
+    # The website's crypto payment page. The bot adds ?guild_id=<server ID>
+    # (or fills in a {guild_id} placeholder).
     billing_subscribe_url: Optional[str] = Field(default=None, alias="BILLING_SUBSCRIBE_URL")
-    billing_cancel_url: Optional[str] = Field(default=None, alias="BILLING_CANCEL_URL")
     # Upgrade reminders DM'd to the server owner once the trial or
     # subscription has run out: right away, then every N days, at most M.
     billing_reminder_every_days: int = Field(default=7, alias="BILLING_REMINDER_EVERY_DAYS")
     billing_reminder_max: int = Field(default=3, alias="BILLING_REMINDER_MAX")
-    paddle_api_key: Optional[str] = Field(default=None, alias="PADDLE_API_KEY")
-    paddle_sandbox: bool = Field(default=False, alias="PADDLE_SANDBOX")
+    # Polar (polar.sh): an organization access token with the checkouts:write,
+    # subscriptions:read and customer_sessions:write scopes, and the ID of the
+    # monthly subscription product (no trial on the product — the bot sets
+    # each checkout's trial). POLAR_SANDBOX=true uses sandbox.polar.sh.
+    polar_access_token: Optional[str] = Field(default=None, alias="POLAR_ACCESS_TOKEN")
+    polar_product_id: Optional[str] = Field(default=None, alias="POLAR_PRODUCT_ID")
+    polar_sandbox: bool = Field(default=False, alias="POLAR_SANDBOX")
+    # Where Polar sends people after paying; unset shows Polar's own page.
+    polar_success_url: Optional[str] = Field(default=None, alias="POLAR_SUCCESS_URL")
     nowpayments_api_key: Optional[str] = Field(default=None, alias="NOWPAYMENTS_API_KEY")
     nowpayments_sandbox: bool = Field(default=False, alias="NOWPAYMENTS_SANDBOX")
 

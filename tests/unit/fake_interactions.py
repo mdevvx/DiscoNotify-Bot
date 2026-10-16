@@ -37,7 +37,7 @@ class FakeResponse:
     async def send_modal(self, modal: Any) -> None:
         self.modals.append(modal)
 
-    async def defer(self, *, thinking: bool = False) -> None:
+    async def defer(self, *, ephemeral: bool = False, thinking: bool = False) -> None:
         self.deferred = True
 
 

@@ -1,7 +1,8 @@
-"""Billing: access rules, the trial, website card subscriptions (Paddle)
-including cancellation, website crypto prepayments (NOWPayments), the
-whitelist, upgrade reminders and the payment poller — driven through fake
-provider clients and the fake database, with an injectable clock."""
+"""Billing: access rules, the trial, card subscriptions (Polar) including
+cancellation, refunds and the security rules around checkout and portal
+links, crypto prepayments made on the website (NOWPayments), the whitelist,
+upgrade reminders and the payment poller — driven through fake provider
+clients and the fake database, with an injectable clock."""
 
 from __future__ import annotations
 
@@ -14,10 +15,11 @@ import pytest
 
 from billing.access import Access, AccessReason, describe_access, evaluate
 from billing.nowpayments import NowPaymentsClient
-from billing.paddle import PaddleClient, is_sandbox_key
+from billing.polar import PolarClient, PolarError
 from billing.repository import BillingRepository
-from billing.service import BillingService, format_usd, with_server
+from billing.service import BillingService, BillingUnavailable, format_usd, with_server
 from tests.unit.fakes import FakeDatabase
+from utils.errors import PermanentPlatformError, RateLimitedError, TransientPlatformError
 
 _GUILD = 1
 _START = datetime.datetime(2026, 10, 1, 12, 0, tzinfo=datetime.timezone.utc)
@@ -35,59 +37,69 @@ class Clock:
         self.now += datetime.timedelta(**kwargs)
 
 
-class FakePaddle:
-    """Paddle as the bot sees it: transactions the website's checkout
-    created (with custom_data.guild_id) and the subscriptions behind them."""
+class FakePolar:
+    """Polar as the bot sees it: the subscriptions that exist (created by
+    checkouts the bot started, each carrying metadata.guild_id)."""
 
     def __init__(self) -> None:
-        self.transactions: Dict[str, Dict[str, Any]] = {}
         self.subscriptions: Dict[str, Dict[str, Any]] = {}
-        self.listed_after: List[str] = []
+        self.checkouts: List[Dict[str, Any]] = []
+        self.sessions: List[str] = []
+        self.listed: List[Any] = []
+        self.checkout_url: Optional[str] = None
+        self.portal_url: Optional[str] = None
+        self.list_fails = False
+        self.product: Dict[str, Any] = {"prices": [{"price_amount": 299}], "is_recurring": True, "is_archived": False}
 
-    async def list_paid_transactions(self, *, updated_after: str, per_page: int = 100):
-        self.listed_after.append(updated_after)
-        after = datetime.datetime.fromisoformat(updated_after)
-        paid = [t for t in self.transactions.values() if t["status"] in ("paid", "completed")]
-        newer = [t for t in paid if datetime.datetime.fromisoformat(t["updated_at"]) > after]
-        return sorted(newer, key=lambda t: t["updated_at"])
+    async def create_checkout(self, product_id: str, *, metadata: Dict[str, str], trial_days: int = 0, success_url: Optional[str] = None):
+        self.checkouts.append({"product_id": product_id, "metadata": metadata, "trial_days": trial_days, "success_url": success_url})
+        return {"id": f"co_{len(self.checkouts)}", "url": self.checkout_url if self.checkout_url is not None else f"https://buy.polar.sh/co_{len(self.checkouts)}"}
 
-    async def get_transaction(self, transaction_id: str):
-        return self.transactions[transaction_id]
+    async def list_subscriptions(self, *, started_after: Any = None, statuses: Any = None):
+        self.listed.append(started_after)
+        if self.list_fails:
+            raise TransientPlatformError("Polar error 503")
+        return [sub for sub in self.subscriptions.values() if statuses is None or sub["status"] in statuses]
 
     async def get_subscription(self, subscription_id: str):
         return self.subscriptions[subscription_id]
 
+    async def create_customer_session(self, customer_id: str, *, return_url: Optional[str] = None):
+        self.sessions.append(customer_id)
+        return {"customer_portal_url": self.portal_url if self.portal_url is not None else f"https://polar.sh/pulsenotify/portal?customer_session_token=t_{customer_id}"}
+
+    async def get_product(self, product_id: str):
+        return self.product
+
     async def aclose(self) -> None:
         pass
 
-    def checkout(
+    def subscribe(
         self,
-        txn_id: str,
+        sub_id: str = "sub_1",
         *,
         status: str,
         period_end: datetime.datetime,
-        at: datetime.datetime,
         guild_id: Any = _GUILD,
-        cancel_at: Optional[datetime.datetime] = None,
-    ) -> None:
-        """Simulates a customer completing checkout on the website."""
-        self.transactions[txn_id] = {
-            "id": txn_id,
-            "status": "completed",
-            "subscription_id": "sub_1",
-            "custom_data": {"guild_id": str(guild_id)},
-            "updated_at": at.isoformat(),
-        }
-        self.set_subscription(status=status, period_end=period_end, cancel_at=cancel_at)
-
-    def set_subscription(self, *, status: str, period_end: datetime.datetime, cancel_at: Optional[datetime.datetime] = None):
-        self.subscriptions["sub_1"] = {
-            "id": "sub_1",
-            "customer_id": "ctm_1",
+        user_id: int = 7,
+        channel_id: int = 555,
+        trial_end: Optional[datetime.datetime] = None,
+    ) -> Dict[str, Any]:
+        """A customer completing a checkout (or a subscription changing)."""
+        metadata = {} if guild_id is None else {"guild_id": str(guild_id), "user_id": str(user_id), "channel_id": str(channel_id)}
+        subscription = {
+            "id": sub_id,
             "status": status,
-            "current_billing_period": {"ends_at": period_end.isoformat()},
-            "scheduled_change": {"action": "cancel", "effective_at": cancel_at.isoformat()} if cancel_at else None,
+            "customer_id": "cus_1",
+            "current_period_end": period_end.isoformat(),
+            "trial_end": trial_end.isoformat() if trial_end else None,
+            "cancel_at_period_end": False,
+            "ends_at": None,
+            "ended_at": None,
+            "metadata": metadata,
         }
+        self.subscriptions[sub_id] = subscription
+        return subscription
 
 
 class FakeNowPayments:
@@ -122,7 +134,7 @@ def db() -> FakeDatabase:
 
 
 def _service(db: FakeDatabase, clock: Clock, **kwargs: Any) -> BillingService:
-    defaults: Dict[str, Any] = {"enabled": True, "paddle": FakePaddle(), "nowpayments": FakeNowPayments()}
+    defaults: Dict[str, Any] = {"enabled": True, "polar": FakePolar(), "polar_product_id": "prod_1", "nowpayments": FakeNowPayments()}
     defaults.update(kwargs)
     return BillingService(BillingRepository(db), clock=clock, **defaults)  # type: ignore[arg-type]
 
@@ -209,12 +221,12 @@ async def test_whitelisted_server_never_needs_to_pay(db: FakeDatabase, clock: Cl
     assert _row(db)["whitelist_note"] == "my own server"
 
 
-# ── card (Paddle, checkout on the website) ──────────────────────────────
+# ── card (Polar) ────────────────────────────────────────────────────────
 
 
-async def test_a_website_card_checkout_is_found_and_grants_access_until_the_period_ends(db: FakeDatabase, clock: Clock) -> None:
-    paddle = FakePaddle()
-    service = _service(db, clock, paddle=paddle)
+async def test_a_paid_card_subscription_is_found_and_grants_access_until_the_period_ends(db: FakeDatabase, clock: Clock) -> None:
+    polar = FakePolar()
+    service = _service(db, clock, polar=polar)
     announced: List[Any] = []
 
     async def on_payment(payment: Dict[str, Any], access: Access) -> None:
@@ -224,7 +236,7 @@ async def test_a_website_card_checkout_is_found_and_grants_access_until_the_peri
     await service.access(_GUILD)
     clock.advance(days=8)
     period_end = clock.now + datetime.timedelta(days=30)
-    paddle.checkout("txn_1", status="active", period_end=period_end, at=clock.now)
+    polar.subscribe(status="active", period_end=period_end)
 
     await service.poll_once()
     await service.poll_once()  # already credited — no second confirmation
@@ -232,17 +244,18 @@ async def test_a_website_card_checkout_is_found_and_grants_access_until_the_peri
     access = await service.access(_GUILD)
     assert access.reason == AccessReason.PAID and access.until == period_end
     payments = db.tables["pulsenotify_payments"].rows
-    assert [(p["external_id"], p["status"]) for p in payments] == [("txn_1", "paid")]
-    assert announced == [("paddle", None, None, AccessReason.PAID)]
+    assert [(p["provider"], p["external_id"], p["status"]) for p in payments] == [("polar", "sub_1", "paid")]
+    assert announced == [("polar", 7, 555, AccessReason.PAID)]  # confirmation goes back to the channel it was started from
     assert "renews automatically by card" in describe_access(access, _row(db))
 
 
-async def test_checkouts_without_a_server_id_or_for_unknown_servers_are_ignored(db: FakeDatabase, clock: Clock) -> None:
-    paddle = FakePaddle()
-    service = _service(db, clock, paddle=paddle)
+async def test_subscriptions_without_a_server_id_or_for_unknown_servers_are_ignored(db: FakeDatabase, clock: Clock) -> None:
+    polar = FakePolar()
+    service = _service(db, clock, polar=polar)
     end = clock.now + datetime.timedelta(days=30)
-    paddle.checkout("txn_1", status="active", period_end=end, at=clock.now, guild_id="")
-    paddle.checkout("txn_2", status="active", period_end=end, at=clock.now, guild_id=999)
+    polar.subscribe("sub_1", status="active", period_end=end, guild_id=None)  # e.g. a checkout link made in the dashboard
+    polar.subscribe("sub_2", status="active", period_end=end, guild_id=999)  # a server the bot isn't in
+    polar.subscribe("sub_3", status="active", period_end=end, guild_id="9" * 40)  # not a plausible server ID
 
     await service.poll_once()
 
@@ -250,28 +263,25 @@ async def test_checkouts_without_a_server_id_or_for_unknown_servers_are_ignored(
     assert db.tables["pulsenotify_billing"].rows == []
 
 
-async def test_discovery_only_asks_for_transactions_newer_than_the_last_seen(db: FakeDatabase, clock: Clock) -> None:
-    paddle = FakePaddle()
-    service = _service(db, clock, paddle=paddle)
-    seen_at = clock.now + datetime.timedelta(minutes=1)
-    paddle.checkout("txn_1", status="active", period_end=clock.now + datetime.timedelta(days=30), at=seen_at)
+async def test_the_first_scan_reads_everything_then_only_the_last_few_days(db: FakeDatabase, clock: Clock) -> None:
+    polar = FakePolar()
+    service = _service(db, clock, polar=polar)
 
     await service.poll_once()
     await service.poll_once()
 
-    assert paddle.listed_after[0] == (_START - datetime.timedelta(days=3)).isoformat()
-    assert paddle.listed_after[1] == seen_at.isoformat()
+    assert polar.listed == [None, _START - datetime.timedelta(days=3)]
 
 
 async def test_cancelling_during_the_trial_is_never_charged(db: FakeDatabase, clock: Clock) -> None:
-    """Card saved during the trial, then cancelled before it ends: Paddle
-    cancels at the trial end and nothing was ever charged — access simply
+    """Card saved during the trial, then cancelled before it ends: Polar
+    ends it at the trial end and nothing was ever charged — access simply
     ends with the trial."""
-    paddle = FakePaddle()
-    service = _service(db, clock, paddle=paddle)
+    polar = FakePolar()
+    service = _service(db, clock, polar=polar)
     await service.access(_GUILD)
     trial_end = _START + datetime.timedelta(days=7)
-    paddle.checkout("txn_1", status="trialing", period_end=trial_end, at=clock.now)
+    subscription = polar.subscribe(status="trialing", period_end=trial_end, trial_end=trial_end)
     await service.poll_once()
 
     during = await service.access(_GUILD)
@@ -279,28 +289,28 @@ async def test_cancelling_during_the_trial_is_never_charged(db: FakeDatabase, cl
     assert _row(db).get("paid_until") is None  # trialing isn't paid time
     assert "card subscription starts" in describe_access(during, _row(db))
 
-    paddle.set_subscription(status="trialing", period_end=trial_end, cancel_at=trial_end)  # customer cancels
+    subscription.update(cancel_at_period_end=True, ends_at=trial_end.isoformat())  # customer cancels in the portal
     clock.advance(minutes=11)
     await service.poll_once()
     assert "Free trial — ends" in describe_access(await service.access(_GUILD), _row(db))
 
     clock.now = trial_end + datetime.timedelta(minutes=1)
-    paddle.set_subscription(status="canceled", period_end=trial_end)
+    subscription.update(status="canceled", ended_at=trial_end.isoformat())
     await service.poll_once()
     assert (await service.allowed_guild_ids({_GUILD})) == set()
     assert _row(db)["card_status"] == "canceled"
 
 
 async def test_cancelling_after_paying_keeps_access_until_the_paid_month_ends(db: FakeDatabase, clock: Clock) -> None:
-    paddle = FakePaddle()
-    service = _service(db, clock, paddle=paddle)
+    polar = FakePolar()
+    service = _service(db, clock, polar=polar)
     await service.access(_GUILD)
     clock.advance(days=8)
     period_end = clock.now + datetime.timedelta(days=30)
-    paddle.checkout("txn_1", status="active", period_end=period_end, at=clock.now)
+    subscription = polar.subscribe(status="active", period_end=period_end)
     await service.poll_once()
 
-    paddle.set_subscription(status="active", period_end=period_end, cancel_at=period_end)  # cancels, no renewal
+    subscription.update(cancel_at_period_end=True, ends_at=period_end.isoformat())  # cancels, no renewal
     clock.advance(minutes=11)
     await service.poll_once()
     still_paid = await service.access(_GUILD)
@@ -309,14 +319,14 @@ async def test_cancelling_after_paying_keeps_access_until_the_paid_month_ends(db
     assert "stops unless renewed" in describe_access(still_paid, _row(db))
 
     clock.now = period_end + datetime.timedelta(days=4)  # past the grace period
-    paddle.set_subscription(status="canceled", period_end=period_end)
+    subscription.update(status="canceled", ended_at=period_end.isoformat())
     await service.poll_once()
     assert (await service.allowed_guild_ids({_GUILD})) == set()
 
 
 async def test_monthly_renewal_extends_access_without_a_new_confirmation(db: FakeDatabase, clock: Clock) -> None:
-    paddle = FakePaddle()
-    service = _service(db, clock, paddle=paddle)
+    polar = FakePolar()
+    service = _service(db, clock, polar=polar)
     announced: List[str] = []
 
     async def on_payment(payment: Dict[str, Any], access: Access) -> None:
@@ -326,23 +336,181 @@ async def test_monthly_renewal_extends_access_without_a_new_confirmation(db: Fak
     await service.access(_GUILD)
     clock.advance(days=8)
     first_end = clock.now + datetime.timedelta(days=30)
-    paddle.checkout("txn_1", status="active", period_end=first_end, at=clock.now)
+    subscription = polar.subscribe(status="active", period_end=first_end)
     await service.poll_once()
 
     clock.now = first_end + datetime.timedelta(hours=1)
-    paddle.checkout("txn_2", status="active", period_end=first_end + datetime.timedelta(days=30), at=clock.now)
+    subscription["current_period_end"] = (first_end + datetime.timedelta(days=30)).isoformat()  # Polar renewed it
     await service.poll_once()
 
     assert (await service.access(_GUILD)).until == first_end + datetime.timedelta(days=30)
-    assert announced == ["txn_1"]
+    assert announced == ["sub_1"]
 
 
-async def test_an_abandoned_pending_card_row_expires(db: FakeDatabase, clock: Clock) -> None:
-    paddle = FakePaddle()
-    service = _service(db, clock, paddle=paddle)
+async def test_a_refund_or_chargeback_that_ends_the_subscription_early_cuts_access(db: FakeDatabase, clock: Clock) -> None:
+    polar = FakePolar()
+    service = _service(db, clock, polar=polar)
     await service.access(_GUILD)
-    _website_row(db, "paddle", "txn_9", months=1, amount_usd=2.99)
-    paddle.transactions["txn_9"] = {"id": "txn_9", "status": "ready", "subscription_id": None, "updated_at": _START.isoformat()}
+    clock.advance(days=8)
+    period_end = clock.now + datetime.timedelta(days=30)
+    subscription = polar.subscribe(status="active", period_end=period_end)
+    await service.poll_once()
+
+    clock.advance(days=2)
+    subscription.update(status="canceled", ended_at=clock.now.isoformat())  # revoked at once; period_end unchanged
+    clock.advance(minutes=11)
+    await service.poll_once()
+
+    assert _row(db)["paid_until"] == subscription["ended_at"]
+    clock.advance(days=4)  # past the grace period — long before the old period end
+    assert (await service.allowed_guild_ids({_GUILD})) == set()
+
+
+async def test_ending_the_card_subscription_early_doesnt_cut_prepaid_crypto_time(db: FakeDatabase, clock: Clock) -> None:
+    polar = FakePolar()
+    nowpayments = FakeNowPayments()
+    service = _service(db, clock, polar=polar, nowpayments=nowpayments)
+    await service.access(_GUILD)
+    clock.advance(days=8)
+    period_end = clock.now + datetime.timedelta(days=30)
+    subscription = polar.subscribe(status="active", period_end=period_end)
+    await service.poll_once()
+    nowpayments.create("1", price_usd=8.97, order_id=f"{_GUILD}-a", status="finished")
+    _website_row(db, "nowpayments", "1", months=3, amount_usd=8.97, created_at=clock.now)
+    await service.poll_once()  # +90 days on top of the card month
+
+    subscription.update(status="canceled", ended_at=(clock.now + datetime.timedelta(days=1)).isoformat())
+    clock.advance(minutes=11)
+    await service.poll_once()
+
+    assert (await service.access(_GUILD)).until == period_end + datetime.timedelta(days=90)
+
+
+async def test_subscribing_again_after_cancelling_replaces_the_old_subscription(db: FakeDatabase, clock: Clock) -> None:
+    polar = FakePolar()
+    service = _service(db, clock, polar=polar)
+    await service.access(_GUILD)
+    clock.advance(days=8)
+    old = polar.subscribe("sub_old", status="active", period_end=clock.now + datetime.timedelta(days=5))
+    await service.poll_once()
+    old.update(status="canceled", ended_at=(clock.now + datetime.timedelta(days=5)).isoformat())
+    clock.advance(days=6)
+    polar.subscribe("sub_new", status="active", period_end=clock.now + datetime.timedelta(days=30))
+
+    await service.poll_once()
+
+    assert _row(db)["card_subscription_id"] == "sub_new" and _row(db)["card_status"] == "active"
+    assert sorted(p["external_id"] for p in db.tables["pulsenotify_payments"].rows) == ["sub_new", "sub_old"]
+
+
+async def test_a_polar_outage_doesnt_stop_crypto_payments_being_credited(db: FakeDatabase, clock: Clock) -> None:
+    polar = FakePolar()
+    polar.list_fails = True
+    nowpayments = FakeNowPayments()
+    service = _service(db, clock, polar=polar, nowpayments=nowpayments)
+    await service.access(_GUILD)
+    nowpayments.create("1", price_usd=8.97, order_id=f"{_GUILD}-a", status="finished")
+    _website_row(db, "nowpayments", "1", months=3, amount_usd=8.97, created_at=clock.now)
+
+    await service.poll_once()
+
+    assert (await service.access(_GUILD)).reason == AccessReason.PAID
+
+
+async def test_the_checkout_carries_the_server_the_requester_and_the_remaining_trial(db: FakeDatabase, clock: Clock) -> None:
+    polar = FakePolar()
+    service = _service(db, clock, polar=polar, polar_success_url="https://pulsenotify.duoplus.org/thanks")
+    await service.access(_GUILD)
+    clock.advance(days=2, hours=1)  # 4 days 23 hours of trial left
+
+    url = await service.start_card_checkout(_GUILD, user_id=7, channel_id=555)
+    clock.advance(days=9)
+    await service.start_card_checkout(_GUILD, user_id=7, channel_id=555)
+
+    assert url == "https://buy.polar.sh/co_1"
+    assert polar.checkouts[0] == {
+        "product_id": "prod_1",
+        "metadata": {"guild_id": "1", "user_id": "7", "channel_id": "555"},
+        "trial_days": 5,  # rounded up: the card isn't charged before the trial ends
+        "success_url": "https://pulsenotify.duoplus.org/thanks",
+    }
+    assert polar.checkouts[1]["trial_days"] == 0  # trial over — charged straight away
+
+
+async def test_a_checkout_link_is_reused_for_ten_minutes(db: FakeDatabase, clock: Clock) -> None:
+    polar = FakePolar()
+    service = _service(db, clock, polar=polar)
+    await service.access(_GUILD)
+
+    first = await service.start_card_checkout(_GUILD, user_id=7, channel_id=555)
+    clock.advance(minutes=9)
+    again = await service.start_card_checkout(_GUILD, user_id=7, channel_id=555)
+    other_admin = await service.start_card_checkout(_GUILD, user_id=8, channel_id=555)
+    clock.advance(minutes=2)
+    later = await service.start_card_checkout(_GUILD, user_id=7, channel_id=555)
+
+    assert first == again and len({first, other_admin, later}) == 3
+    assert len(polar.checkouts) == 3
+
+
+@pytest.mark.parametrize("bad_url", ["https://evil.example/pay", "http://buy.polar.sh/x", "javascript:alert(1)", "https://polar.sh.evil.example/x", ""])
+async def test_links_that_arent_https_on_polars_own_domain_are_refused(db: FakeDatabase, clock: Clock, bad_url: Any) -> None:
+    polar = FakePolar()
+    polar.checkout_url = bad_url
+    polar.portal_url = bad_url
+    service = _service(db, clock, polar=polar)
+    await service.access(_GUILD)
+    clock.advance(days=8)
+    polar.subscribe(status="active", period_end=clock.now + datetime.timedelta(days=30))
+    await service.poll_once()
+
+    with pytest.raises(BillingUnavailable):
+        await service.start_card_checkout(_GUILD)
+    with pytest.raises(BillingUnavailable):
+        await service.manage_card_url(_GUILD)
+
+
+async def test_the_billing_portal_is_for_the_payer_or_the_server_owner_only(db: FakeDatabase, clock: Clock) -> None:
+    """The portal link is pre-authenticated as the paying customer — it shows
+    their email and card — so other admins don't get it."""
+    polar = FakePolar()
+    service = _service(db, clock, polar=polar)
+    await service.access(_GUILD)
+    clock.advance(days=8)
+    polar.subscribe(status="active", period_end=clock.now + datetime.timedelta(days=30), user_id=7)
+    await service.poll_once()
+
+    assert await service.can_manage_card(_GUILD, 7, server_owner_id=99) is True  # the payer
+    assert await service.can_manage_card(_GUILD, 99, server_owner_id=99) is True  # the server owner
+    assert await service.can_manage_card(_GUILD, 8, server_owner_id=99) is False  # another admin
+    assert await service.card_payer_id(_GUILD) == 7
+    assert (await service.manage_card_url(_GUILD)).startswith("https://polar.sh/")
+    assert polar.sessions == ["cus_1"]
+
+
+async def test_a_server_with_no_card_subscription_has_nothing_to_manage(db: FakeDatabase, clock: Clock) -> None:
+    service = _service(db, clock)
+    await service.access(_GUILD)
+
+    with pytest.raises(BillingUnavailable):
+        await service.manage_card_url(_GUILD)
+    assert await service.can_manage_card(_GUILD, 7, server_owner_id=99) is False
+
+
+async def test_card_is_unavailable_without_polar(db: FakeDatabase, clock: Clock) -> None:
+    service = _service(db, clock, polar=None)
+
+    await service.poll_once()
+
+    assert service.card_available is False
+    with pytest.raises(BillingUnavailable):
+        await service.start_card_checkout(_GUILD)
+
+
+async def test_an_old_pending_non_crypto_row_expires(db: FakeDatabase, clock: Clock) -> None:
+    service = _service(db, clock)
+    await service.access(_GUILD)
+    _website_row(db, "paddle", "txn_9", months=1, amount_usd=2.99)  # left over from the Paddle days
     clock.advance(days=2)
 
     await service.poll_once()
@@ -350,12 +518,15 @@ async def test_an_abandoned_pending_card_row_expires(db: FakeDatabase, clock: Cl
     assert db.tables["pulsenotify_payments"].rows[0]["status"] == "expired"
 
 
-async def test_card_is_unavailable_without_a_paddle_key(db: FakeDatabase, clock: Clock) -> None:
-    service = _service(db, clock, paddle=None)
+async def test_the_startup_check_warns_when_the_polar_price_differs(db: FakeDatabase, clock: Clock, caplog: pytest.LogCaptureFixture) -> None:
+    polar = FakePolar()
+    polar.product = {"prices": [{"price_amount": 100}], "is_recurring": True}
+    service = _service(db, clock, polar=polar)
 
-    await service.poll_once()
+    with caplog.at_level("WARNING"):
+        await service.check_setup()
 
-    assert service.card_available is False
+    assert "must match" in caplog.text
 
 
 # ── crypto (NOWPayments, payment created on the website) ────────────────
@@ -430,16 +601,13 @@ async def test_a_crypto_row_that_doesnt_match_nowpayments_is_not_credited(
     assert _row(db).get("paid_until") is None
 
 
-# ── website links ───────────────────────────────────────────────────────
+# ── website links (crypto page) ─────────────────────────────────────────
 
 
 def test_website_links_carry_the_server_id(db: FakeDatabase, clock: Clock) -> None:
-    service = _service(
-        db, clock, subscribe_url="https://pulsenotify.duoplus.org/subscribe", cancel_url="https://x.org/c?ref=bot"
-    )
+    service = _service(db, clock, subscribe_url="https://pulsenotify.duoplus.org/subscribe?ref=bot")
 
-    assert service.subscribe_url(42) == "https://pulsenotify.duoplus.org/subscribe?guild_id=42"
-    assert service.cancel_url(42) == "https://x.org/c?ref=bot&guild_id=42"
+    assert service.subscribe_url(42) == "https://pulsenotify.duoplus.org/subscribe?ref=bot&guild_id=42"
     assert with_server("https://x.org/servers/{guild_id}/pay", 42) == "https://x.org/servers/42/pay"
     assert _service(db, clock).subscribe_url(42) is None
 
@@ -498,32 +666,112 @@ async def test_whitelisted_servers_and_billing_off_get_no_reminders(db: FakeData
 # ── provider clients ────────────────────────────────────────────────────
 
 
-async def test_paddle_trial_checkout_copies_the_price_with_a_trial_period() -> None:
-    sent: List[Dict[str, Any]] = []
+def _polar_client(handler: Any, **kwargs: Any) -> PolarClient:
+    return PolarClient("polar_oat_secret", transport=httpx.MockTransport(handler), **kwargs)
+
+
+async def test_polar_checkout_request_shape() -> None:
+    sent: List[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.headers["Authorization"] == "Bearer key"
-        if request.method == "GET":
-            price = {
-                "id": "pri_1",
-                "product_id": "pro_1",
-                "unit_price": {"amount": "100", "currency_code": "USD"},
-                "billing_cycle": {"interval": "month", "frequency": 1},
-            }
-            return httpx.Response(200, json={"data": price})
-        sent.append(json.loads(request.content))
-        return httpx.Response(201, json={"data": {"id": "txn_1", "checkout": {"url": "https://pay.example"}}})
+        sent.append(request)
+        return httpx.Response(201, json={"id": "co_1", "url": "https://buy.polar.sh/co_1"})
 
-    client = PaddleClient("key", sandbox=True, transport=httpx.MockTransport(handler))
-    await client.create_transaction("pri_1", {"guild_id": "1"}, trial_days=5)
-    await client.create_transaction("pri_1", {"guild_id": "1"})
+    client = _polar_client(handler)
+    await client.create_checkout("prod_1", metadata={"guild_id": "1"}, trial_days=5, success_url="https://x.org/thanks")
+    await client.create_checkout("prod_1", metadata={"guild_id": "1"})
 
-    trial_item, plain_item = sent[0]["items"][0], sent[1]["items"][0]
-    assert trial_item["price"]["product_id"] == "pro_1"
-    assert trial_item["price"]["trial_period"] == {"interval": "day", "frequency": 5}
-    assert trial_item["price"]["unit_price"] == {"amount": "100", "currency_code": "USD"}
-    assert plain_item == {"price_id": "pri_1", "quantity": 1}
-    assert sent[0]["custom_data"] == {"guild_id": "1"}
+    with_trial, without = (json.loads(request.content) for request in sent)
+    assert sent[0].url.path == "/v1/checkouts/" and sent[0].method == "POST"
+    assert sent[0].headers["Authorization"] == "Bearer polar_oat_secret"
+    assert with_trial == {
+        "products": ["prod_1"],
+        "metadata": {"guild_id": "1"},
+        "allow_trial": True,
+        "trial_interval": "day",
+        "trial_interval_count": 5,
+        "success_url": "https://x.org/thanks",
+    }
+    assert without == {"products": ["prod_1"], "metadata": {"guild_id": "1"}, "allow_trial": False}
+
+
+async def test_polar_lists_every_page_of_subscriptions() -> None:
+    seen: List[Dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        page = int(request.url.params["page"])
+        seen.append({"page": page, "status": request.url.params.get_list("status"), **{k: request.url.params.get(k) for k in ("limit", "sorting", "started_after")}})
+        return httpx.Response(200, json={"items": [{"id": f"sub_{page}"}], "pagination": {"total_count": 2, "max_page": 2}})
+
+    client = _polar_client(handler)
+    items = await client.list_subscriptions(started_after=_START, statuses=["active", "trialing"])
+
+    assert [item["id"] for item in items] == ["sub_1", "sub_2"]
+    assert seen[0] == {
+        "page": 1, "status": ["active", "trialing"], "limit": "100", "sorting": "-started_at", "started_after": _START.isoformat()
+    }
+
+
+async def test_polar_customer_session_request_shape() -> None:
+    sent: List[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return httpx.Response(201, json={"customer_portal_url": "https://polar.sh/x/portal?customer_session_token=t"})
+
+    session = await _polar_client(handler).create_customer_session("cus_1")
+
+    assert sent[0].url.path == "/v1/customer-sessions/" and json.loads(sent[0].content) == {"customer_id": "cus_1"}
+    assert session["customer_portal_url"].startswith("https://polar.sh/")
+
+
+async def test_polar_sandbox_uses_the_sandbox_host() -> None:
+    hosts: List[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        hosts.append(request.url.host)
+        return httpx.Response(200, json={})
+
+    await _polar_client(handler, sandbox=True).get_product("prod_1")
+
+    assert hosts == ["sandbox-api.polar.sh"]
+
+
+@pytest.mark.parametrize(
+    ("status", "error", "text"),
+    [
+        (401, PolarError, "checkouts:write"),
+        (403, PolarError, "rejected the access token"),
+        (404, PermanentPlatformError, "Polar 404"),
+        (422, PermanentPlatformError, "products: Field required"),
+        (500, TransientPlatformError, "Polar error 500"),
+    ],
+)
+async def test_polar_errors_are_classified(status: int, error: type, text: str) -> None:
+    body = {"detail": [{"loc": ["body", "products"], "msg": "Field required"}]} if status == 422 else {"detail": "nope"}
+    client = _polar_client(lambda request: httpx.Response(status, json=body))
+
+    with pytest.raises(error, match=text):
+        await client.get_subscription("sub_1")
+
+
+async def test_polar_rate_limits_report_the_wait() -> None:
+    client = _polar_client(lambda request: httpx.Response(429, json={"detail": "slow down"}, headers={"retry-after": "30"}))
+
+    with pytest.raises(RateLimitedError) as exc_info:
+        await client.get_subscription("sub_1")
+
+    assert exc_info.value.retry_after == 30
+
+
+async def test_a_polar_timeout_is_temporary_and_never_leaks_the_token() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    with pytest.raises(TransientPlatformError) as exc_info:
+        await _polar_client(handler).get_subscription("sub_1")
+
+    assert "polar_oat_secret" not in str(exc_info.value)
 
 
 async def test_nowpayments_sends_the_api_key_and_usd_price() -> None:
@@ -551,49 +799,6 @@ def test_prices_display_without_needless_cents() -> None:
     assert format_usd(2.5) == "$2.50"
 
 
-async def test_paddle_list_paid_transactions_request_shape() -> None:
-    seen: Dict[str, Any] = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen.update(dict(request.url.params))
-        seen["path"] = request.url.path
-        return httpx.Response(200, json={"data": [{"id": "txn_1"}], "meta": {}})
-
-    client = PaddleClient("key", transport=httpx.MockTransport(handler))
-
-    assert await client.list_paid_transactions(updated_after="2026-10-01T12:00:00+00:00") == [{"id": "txn_1"}]
-    assert seen == {
-        "path": "/transactions",
-        "status": "paid,completed",
-        "updated_at[GT]": "2026-10-01T12:00:00+00:00",
-        "order_by": "updated_at[ASC]",
-        "per_page": "100",
-    }
-
-
-async def test_paddle_checkout_charges_the_configured_amount_not_the_catalog_one() -> None:
-    sent: List[Dict[str, Any]] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.method == "GET":
-            price = {
-                "product_id": "pro_1",
-                "unit_price": {"amount": "100", "currency_code": "USD"},
-                "billing_cycle": {"interval": "month", "frequency": 1},
-            }
-            return httpx.Response(200, json={"data": price})
-        sent.append(json.loads(request.content))
-        return httpx.Response(201, json={"data": {"id": "txn_1", "checkout": {"url": "https://pay.example"}}})
-
-    client = PaddleClient("key", transport=httpx.MockTransport(handler))
-    await client.create_transaction("pri_1", {"guild_id": "1"}, amount_cents=300)
-
-    price = sent[0]["items"][0]["price"]
-    assert price["unit_price"] == {"amount": "300", "currency_code": "USD"}
-    assert price["billing_cycle"] == {"interval": "month", "frequency": 1}
-    assert "trial_period" not in price
-
-
 async def test_nowpayments_min_amount_request_shape() -> None:
     seen: Dict[str, Any] = {}
 
@@ -605,14 +810,3 @@ async def test_nowpayments_min_amount_request_shape() -> None:
 
     assert await client.min_amount_usd("usdttrc20") == 11.18
     assert seen == {"currency_from": "usdttrc20", "currency_to": "usdttrc20", "fiat_equivalent": "usd"}
-
-
-# ── Paddle environment from the key ─────────────────────────────────────
-
-
-def test_paddle_environment_comes_from_the_key() -> None:
-    """Real case 2026-10-13: a live key with PADDLE_SANDBOX=true was sent to
-    the sandbox and rejected."""
-    assert is_sandbox_key("pdl_live_apikey_abc", configured_sandbox=True) is False
-    assert is_sandbox_key("pdl_sdbx_apikey_abc", configured_sandbox=False) is True
-    assert is_sandbox_key("old-style-key", configured_sandbox=True) is True

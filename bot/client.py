@@ -20,11 +20,11 @@ from discord.ext import commands
 from billing.access import Access, subscription_needed
 from bot.maintenance import Maintenance
 from billing.nowpayments import NowPaymentsClient
-from billing.paddle import PaddleClient, is_sandbox_key
+from billing.polar import PolarClient
 from billing.repository import BillingRepository
 from billing.service import BillingService
 from bot.events import handle_app_command_error, register_events
-from commands.admin.billing import subscribe_link
+from commands.admin.billing import subscribe_buttons
 from commands.pulsenotify_group import pulsenotify_group
 from config.settings import Settings
 from database.client import Database
@@ -122,7 +122,6 @@ class PulseNotifyCommandTree(app_commands.CommandTree):
                 *subscription_needed(row, price_label=bot.billing.price_label),
                 title="🔒 Subscription needed",
                 tone=cards.WARNING,
-                extra=subscribe_link(bot.billing, interaction.guild.id),
                 ephemeral=True,
             )
             return False
@@ -166,10 +165,15 @@ class PulseNotifyBot(commands.Bot):
             trial_days=settings.billing_trial_days,
             grace_days=settings.billing_grace_days,
             subscribe_url=settings.billing_subscribe_url,
-            cancel_url=settings.billing_cancel_url,
             reminder_every_days=settings.billing_reminder_every_days,
             reminder_max=settings.billing_reminder_max,
-            paddle=self._paddle_client(settings),
+            polar=(
+                PolarClient(settings.polar_access_token, sandbox=settings.polar_sandbox)
+                if settings.polar_access_token
+                else None
+            ),
+            polar_product_id=settings.polar_product_id,
+            polar_success_url=settings.polar_success_url,
             nowpayments=(
                 NowPaymentsClient(settings.nowpayments_api_key, sandbox=settings.nowpayments_sandbox)
                 if settings.nowpayments_api_key
@@ -203,6 +207,7 @@ class PulseNotifyBot(commands.Bot):
         await self.monitoring.start()
         if self.billing.enabled:
             self._billing_task = asyncio.create_task(self._billing_loop(), name="billing-poller")
+            await self.billing.check_setup()
             logger.info(
                 "Billing enabled (card: %s, crypto: %s).",
                 "on" if self.billing.card_available else "not configured",
@@ -301,20 +306,6 @@ class PulseNotifyBot(commands.Bot):
         self.owner_ids = owner_ids
         logger.info("Resolved %d bot owner(s).", len(owner_ids))
 
-    @staticmethod
-    def _paddle_client(settings: Settings) -> Optional[PaddleClient]:
-        if not settings.paddle_api_key:
-            return None
-        sandbox = is_sandbox_key(settings.paddle_api_key, settings.paddle_sandbox)
-        if sandbox != settings.paddle_sandbox:
-            logger.warning(
-                "PADDLE_SANDBOX=%s but PADDLE_API_KEY is a %s key — using %s.",
-                str(settings.paddle_sandbox).lower(),
-                "sandbox" if sandbox else "live",
-                "sandbox" if sandbox else "live",
-            )
-        return PaddleClient(settings.paddle_api_key, sandbox=sandbox)
-
     async def apply_presence(self) -> None:
         """The bot's status: "🛠️ Under maintenance" (Do Not Disturb) while
         maintenance is on, otherwise the configured DISCORD_STATUS_TEXT."""
@@ -361,19 +352,20 @@ class PulseNotifyBot(commands.Bot):
             guild = guilds.get(int(row["guild_id"]))
             if guild is None:
                 continue
-            view = self._reminder_card(guild, row)
+            view = await self._reminder_card(guild, row)
             delivered = await self._dm_owner(guild, view) or await self._post_in_guild(guild, view)
             if not delivered:
                 logger.warning("Couldn't deliver the upgrade reminder for server %s anywhere.", guild.id)
             await self.billing.mark_reminded(row)
 
-    def _reminder_card(self, guild: discord.Guild, row: Dict[str, Any]) -> discord.ui.LayoutView:
+    async def _reminder_card(self, guild: discord.Guild, row: Dict[str, Any]) -> discord.ui.LayoutView:
         reminder = int(row.get("reminders_sent") or 0) + 1
         title = "⏰ Your PulseNotify trial has ended" if not row.get("paid_until") else "⏰ Your PulseNotify subscription has ended"
         lines = [f"Server: **{guild.name}**", *subscription_needed(row, price_label=self.billing.price_label)]
         if reminder >= self.settings.billing_reminder_max:
             lines.append("-# This is the last reminder — we won't message you about this again.")
-        return cards.card(*lines, title=title, tone=cards.WARNING, extra=subscribe_link(self.billing, guild.id))
+        buttons = await subscribe_buttons(self.billing, guild.id)
+        return cards.card(*lines, title=title, tone=cards.WARNING, extra=buttons)
 
     async def _dm_owner(self, guild: discord.Guild, view: discord.ui.LayoutView) -> bool:
         if guild.owner_id is None:
@@ -407,7 +399,7 @@ class PulseNotifyBot(commands.Bot):
         thanks = f"Thanks <@{payment['requested_by']}>! " if payment.get("requested_by") else "Thank you! "
         guild = self.get_guild(guild_id)
         where = f" in **{guild.name}**" if guild is not None else ""
-        if payment["provider"] == "paddle" and row.get("card_status") == "trialing":
+        if payment["provider"] == "polar" and row.get("card_status") == "trialing":
             # Started during the free trial: card saved, nothing charged yet.
             first_charge = f"<t:{int(access.until.timestamp())}:D>" if access.until else "the end of the trial"
             view = cards.card(
@@ -419,7 +411,7 @@ class PulseNotifyBot(commands.Bot):
             )
         else:
             until = f" — active until <t:{int(access.until.timestamp())}:D>" if access.until else ""
-            method = "card" if payment["provider"] == "paddle" else "crypto"
+            method = "card" if payment["provider"] == "polar" else "crypto"
             view = cards.card(
                 f"{thanks}PulseNotify's subscription{where} is active{until}.",
                 f"Paid by {method} · {payment['months']} month(s)",
