@@ -432,20 +432,50 @@ async def test_a_server_with_a_running_card_subscription_gets_no_second_checkout
     assert "already set up" in interaction.response.messages[0]["content"]
 
 
-async def test_a_polar_problem_shows_users_a_generic_message_and_the_owner_the_detail() -> None:
+@pytest.mark.parametrize("user_id", [5, _OWNER])
+async def test_a_polar_problem_is_plain_english_for_everyone_the_owner_included(user_id: int) -> None:
+    """Real case 2026-10-16: the bot's owner saw "Polar 422: body.customer_id:
+    Customer does not exist". Details go to the log under a reference code."""
     from billing.polar import PolarError
+    from utils.errors import PermanentPlatformError
 
-    secret_detail = "Polar rejected the access token (403): missing scope — check POLAR_ACCESS_TOKEN"
-    for user_id, expect_detail in ((5, False), (_OWNER, True)):
+    for error in (
+        PolarError("Polar rejected the access token (403): missing scope — check POLAR_ACCESS_TOKEN"),
+        PermanentPlatformError("Polar 422: body.customer_id: Customer does not exist."),
+    ):
         bot = FakeBot()
-        bot.billing.checkout_error = PolarError(secret_detail)
+        bot.billing.checkout_error = error
         interaction = FakeInteraction(bot, user_id=user_id)
 
         await subscribe.callback(interaction)  # type: ignore[arg-type]
 
         text = (interaction.response.messages or interaction.followup.messages)[0]["content"]
-        assert ("POLAR_ACCESS_TOKEN" in text) is expect_detail
-        assert "Card payments aren't working right now" in text
+        assert "(Reference `" in text
+        for technical in ("Polar", "POLAR_ACCESS_TOKEN", "422", "customer_id", "scope", "token"):
+            assert technical not in text
+    assert "The card payment service isn't responding right now" in text or "We couldn't complete that" in text
+
+
+async def test_a_billing_page_polar_cant_open_is_explained_without_jargon() -> None:
+    from billing.service import BillingUnavailable
+
+    bot = FakeBot()
+    bot.billing.reason = AccessReason.PAID
+    bot.billing.row = {"card_status": "trialing", "card_customer_id": "cus_sandbox"}
+
+    async def refuse(guild_id: int) -> str:
+        raise BillingUnavailable(
+            "We couldn't open the billing page for this server's subscription. Please contact support and we'll sort it out."
+        )
+
+    bot.billing.manage_card_url = refuse  # type: ignore[method-assign]
+    interaction = FakeInteraction(bot, user_id=5)
+
+    await cancel.callback(interaction)  # type: ignore[arg-type]
+
+    text = (interaction.response.messages or interaction.followup.messages)[-1]["content"]
+    assert "couldn't open the billing page" in text and "contact support" in text
+    assert "Polar" not in text and "422" not in text
 
 
 async def test_cancel_opens_the_billing_portal_for_the_payer() -> None:

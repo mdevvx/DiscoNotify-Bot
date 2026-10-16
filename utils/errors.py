@@ -22,7 +22,16 @@ class DatabaseError(PulseNotifyError):
 
 
 class PlatformError(PulseNotifyError):
-    """Base class for errors a platform adapter raises while talking to its API."""
+    """Base class for errors a platform adapter raises while talking to its API.
+
+    `message` is for the log. `user_message`, when given, is a plain-English
+    sentence that's safe to show members (see utils/user_messages.py) — use it
+    only for answers the member can act on, like "that account doesn't exist".
+    """
+
+    def __init__(self, message: str = "", *, user_message: Optional[str] = None) -> None:
+        super().__init__(message)
+        self.user_message = user_message
 
 
 class TransientPlatformError(PlatformError):

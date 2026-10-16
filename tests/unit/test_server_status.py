@@ -143,7 +143,15 @@ def test_account_line_flags_problems() -> None:
 
     assert line.startswith("🔴")
     assert "⚠️ <#555>" in line
-    assert "⚠️ Instagram account not found" in line
+    assert "⚠️ can't be found any more — remove it and add it again" in line
+    assert "Instagram account not found" not in line  # the raw error is for the log, not for members
+
+
+def test_a_temporary_error_is_one_calm_sentence_with_no_technical_text() -> None:
+    line = _line(_row(status="error", last_error="Instagram API error 400: Cannot call API for app 2034048970642813"))
+
+    assert "couldn't be checked just now — retrying automatically" in line
+    assert "Instagram API" not in line and "Cannot call API" not in line and "2034048970642813" not in line
 
 
 def test_account_line_without_a_channel_says_so() -> None:

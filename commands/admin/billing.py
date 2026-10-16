@@ -14,7 +14,6 @@ commands/admin/whitelist.py, kept out of the slash-command menu on purpose.)
 from __future__ import annotations
 
 import datetime
-import uuid
 from typing import Any, Dict, List, Optional
 
 import discord
@@ -22,12 +21,11 @@ from discord import app_commands
 from discord.ext import commands
 
 from billing.access import AccessReason, describe_access, parse_time
-from billing.polar import PolarError
 from billing.service import BillingService, BillingUnavailable
 from commands.pulsenotify_group import pulsenotify_group
 from ui import cards
-from utils.errors import PlatformError
 from utils.logger import get_logger
+from utils.user_messages import friendly_platform_error
 
 logger = get_logger(__name__)
 
@@ -78,26 +76,16 @@ async def subscribe_buttons(
 
 
 async def _report_error(interaction: discord.Interaction, error: Exception) -> None:
+    """Plain English for everyone — the bot's owner included. The technical
+    detail goes to the log under a reference code (utils/user_messages.py)."""
     if isinstance(error, BillingUnavailable):
-        message = str(error)
-    elif isinstance(error, (PolarError, PlatformError)):
-        # The detail can name configuration (scopes, token) — shown to the
-        # bot's owner only; everyone else gets the logged-and-retry message.
-        logger.error("Polar request failed in guild %s: %s", interaction.guild_id, error)
-        is_owner = await interaction.client.is_owner(interaction.user)  # type: ignore[attr-defined]
-        message = (
-            f"Card payments aren't working right now — {error}"
-            if is_owner
-            else "Card payments aren't working right now. Please try again in a few minutes."
-        )
+        message = str(error)  # written for members
     else:
-        # The error type and a reference ID go in the reply too, so a failure
-        # can be traced even when the bot's log isn't at hand.
-        reference = uuid.uuid4().hex[:8]
-        logger.error("Billing action failed in guild %s [ref %s]", interaction.guild_id, reference, exc_info=error)
-        message = (
-            f"Something went wrong starting that payment ({type(error).__name__}, ref `{reference}`) — "
-            "it's been logged. Please try again."
+        message = friendly_platform_error(
+            error,
+            platform="The card payment service",
+            context="A billing action",
+            not_found="We couldn't complete that. Please try again, or contact support if it keeps happening.",
         )
     try:
         await cards.error(interaction, message)

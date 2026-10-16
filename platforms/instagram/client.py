@@ -153,7 +153,9 @@ class InstagramClient:
 
         if (code, subcode) == _USER_NOT_FOUND:
             raise PermanentPlatformError(
-                f"Instagram account not found — wrong username, renamed, or not a Business/Creator account: {message}"
+                f"Instagram account not found — wrong username, renamed, or not a Business/Creator account: {message}",
+                user_message="We couldn't find that Instagram account. It has to be a public Business or Creator "
+                "account — please check the username.",
             )
 
         if response.status_code >= 500 or error.get("is_transient"):

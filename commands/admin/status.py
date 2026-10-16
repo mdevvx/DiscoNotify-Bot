@@ -166,11 +166,12 @@ def format_account_line(
     details.append(f"checked {checked}" if checked else "not checked yet")
     if last_alert_at:
         details.append(f"last alert {_relative(last_alert_at)}")
-    if row.get("status") in ("invalid", "error") and row.get("last_error"):
-        error = row["last_error"]
-        if len(error) > _MAX_ERROR_LENGTH:
-            error = error[: _MAX_ERROR_LENGTH - 1] + "…"
-        details.append(f"⚠️ {discord.utils.escape_markdown(error)}")
+    # The raw error (status codes, API text) stays in the database and the
+    # log; members get one plain sentence.
+    if row.get("status") == "invalid":
+        details.append("⚠️ can't be found any more — remove it and add it again")
+    elif row.get("status") == "error":
+        details.append("⚠️ couldn't be checked just now — retrying automatically")
 
     return " · ".join(parts) + "\n-# " + " · ".join(details)
 

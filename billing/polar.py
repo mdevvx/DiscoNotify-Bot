@@ -37,9 +37,10 @@ _MAX_PAGES = 20
 _DEFAULT_RATE_LIMIT_WAIT_SECONDS = 60.0
 
 
-class PolarError(Exception):
-    """A Polar API call failed in a way worth showing the user (a bad or
-    under-scoped access token)."""
+class PolarError(TransientPlatformError):
+    """Polar refused our access token (bad, revoked or under-scoped). Not the
+    member's doing, and fixed by the bot's owner — members just see that card
+    payments aren't working for now (utils/user_messages.py)."""
 
 
 class PolarClient:

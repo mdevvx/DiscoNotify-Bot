@@ -142,7 +142,10 @@ class YouTubeAdapter(PlatformAdapter):
             username=value if kind == "username" else None,
         )
         if channel is None:
-            raise PermanentPlatformError(f"No YouTube channel found for {identifier!r}")
+            raise PermanentPlatformError(
+                f"No YouTube channel found for {identifier!r}",
+                user_message="We couldn't find that YouTube channel. Please check the @handle, link or channel ID.",
+            )
         return parser.channel_to_account_ref(channel)
 
     async def fetch_updates(self, account: AccountRef, cursor: Optional[str]) -> FetchResult:

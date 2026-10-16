@@ -84,7 +84,10 @@ class KickAdapter(PlatformAdapter):
         slug = parser.parse_identifier(identifier)
         channel = await self._client.get_channel_by_slug(slug) if slug else None
         if channel is None:
-            raise PermanentPlatformError(f"no Kick channel named {slug or identifier!r}")
+            raise PermanentPlatformError(
+                f"no Kick channel named {slug or identifier!r}",
+                user_message="We couldn't find that Kick channel. Please check the channel name or link.",
+            )
         return parser.channel_to_account_ref(channel)
 
     async def fetch_updates(self, account: AccountRef, cursor: Optional[str]) -> FetchResult:

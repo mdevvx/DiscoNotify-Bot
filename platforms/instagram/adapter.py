@@ -163,7 +163,10 @@ class InstagramAdapter(PlatformAdapter):
     async def validate_account(self, identifier: str) -> AccountRef:
         username = parser.parse_identifier(identifier)
         if not username:
-            raise PermanentPlatformError("Enter an Instagram username or profile URL.")
+            raise PermanentPlatformError(
+                "Enter an Instagram username or profile URL.",
+                user_message="Enter an Instagram username or profile link.",
+            )
         # Counted against the budget but never blocked by it — adding an
         # account is a one-off, interactive action.
         await self._budget.try_acquire()

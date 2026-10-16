@@ -14,8 +14,10 @@ without faking Discord's component state.
 
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Set
 
 import discord
 
@@ -23,7 +25,8 @@ from events.models import EventType, NormalizedEvent
 from notifications.templates import MAX_TEMPLATE_LENGTH, PLACEHOLDERS, format_role_mention, render_custom_message
 from platforms.base import event_types_for_capabilities
 from ui import cards
-from utils.errors import PermanentPlatformError, PlatformError, RateLimitedError
+from utils.errors import PlatformError, RateLimitedError
+from utils.user_messages import friendly_platform_error
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -84,6 +87,67 @@ def _shared_value(configs: Sequence[Dict[str, Any]], key: str) -> Any:
     pre-fills when it applies to all event types at once."""
     values = {config.get(key) for config in configs}
     return values.pop() if len(values) == 1 else None
+
+
+_URL_RE = re.compile(r"^(?:https?://)?[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}/", re.IGNORECASE)
+
+
+def _identifier_keys(platform: str, identifier: str) -> Set[str]:
+    """The account(s) a typed handle or link can only mean — lower-case
+    spellings to compare with what's stored. Deliberately cautious: it may
+    miss a duplicate (the check after the platform lookup catches those) but
+    never matches a different account."""
+    text = identifier.strip().lower()
+    path = text
+    if _URL_RE.match(text):
+        path = re.sub(r"^(?:https?://)?[^/]+/", "", text).split("?")[0].split("#")[0].strip("/")
+    parts = [part for part in path.split("/") if part]
+    if not parts:
+        return set()
+    first = parts[0]
+    if platform == "youtube":
+        if first.startswith("@"):
+            return {first}
+        if first == "channel" and len(parts) > 1:
+            return {parts[1]}
+        if len(parts) == 1 and first.startswith("uc") and len(first) == 24:  # a bare channel ID
+            return {first}
+        return set()  # c/Name, user/Name or a bare word: could be another channel than the stored @handle
+    return {first.lstrip("@")}
+
+
+def find_duplicate(rows: Sequence[Dict[str, Any]], platform: str, identifier: str) -> Optional[Dict[str, Any]]:
+    """The server's existing account that this typed handle or link names, if
+    any — without calling the platform."""
+    keys = _identifier_keys(platform, identifier)
+    if not keys:
+        return None
+    for row in rows:
+        if row["platform"] != platform:
+            continue
+        username = str(row["username"]).lower()
+        stored = {username, str(row["platform_account_id"]).lower()}
+        if platform != "youtube":
+            stored.add(username.lstrip("@"))
+        if keys & stored:
+            return row
+    return None
+
+
+async def already_added_message(bot: Any, guild_id: int, row: Dict[str, Any], platform_name: str) -> str:
+    """"You've already added **@nasa** (YouTube)…", with where its alerts go."""
+    where = ""
+    try:
+        channels = (await bot.channels_repo.list_by_account_for_guild(guild_id)).get(row["id"], [])
+        if channels:
+            where = " Its alerts go to " + ", ".join(f"<#{channel['channel_id']}>" for channel in channels) + "."
+    except Exception:
+        logger.warning("Couldn't look up where %s posts.", row.get("id"), exc_info=True)
+    return (
+        f"You've already added **{discord.utils.escape_markdown(str(row['username']))}** ({platform_name}) "
+        f"in this server.{where} See it with `/pulsenotify account-list`, or change its alerts with "
+        "`/pulsenotify alerts`."
+    )
 
 
 def mention_refusal(
@@ -191,16 +255,21 @@ class AddAccountModal(_Form):
         if refusal:
             await cards.error(interaction, refusal)
             return
+        existing = await bot.accounts_repo.list_by_guild(interaction.guild.id)  # type: ignore[attr-defined]
+        if not identifier:
+            await cards.error(interaction, f"Enter a {form.account_label}.")
+            return
+        duplicate = find_duplicate(existing, self.platform, identifier)
+        if duplicate is not None:  # before any platform lookup — costs nothing
+            await cards.error(interaction, await already_added_message(bot, interaction.guild.id, duplicate, form.name))
+            return
         limit = getattr(getattr(bot, "settings", None), "max_accounts_per_server", None)
-        if limit is not None and len(await bot.accounts_repo.list_by_guild(interaction.guild.id)) >= limit:  # type: ignore[attr-defined]
+        if limit is not None and len(existing) >= limit:
             await cards.error(
                 interaction,
                 f"This server already monitors {limit} accounts, the most allowed. "
                 "Remove one with `/pulsenotify account-remove` to add another.",
             )
-            return
-        if not identifier:
-            await cards.error(interaction, f"Enter a {form.account_label}.")
             return
         if channel is None:
             await cards.error(interaction, "I can't see that channel — pick another one.")
@@ -220,34 +289,35 @@ class AddAccountModal(_Form):
 
         adapter = bot.monitoring.get_adapter(self.platform)  # type: ignore[attr-defined]
         if adapter is None:
-            await cards.error(interaction, f"{form.name} isn't available right now (no API credentials configured for it).")
+            await cards.error(interaction, f"{form.name} alerts aren't available right now. Please try again later.")
             return
 
         try:
             account_ref = await adapter.validate_account(identifier)
-        except PermanentPlatformError as exc:
-            await cards.error(interaction, f"Couldn't find that {form.name} account: {exc}")
-            return
-        except RateLimitedError as exc:
-            await cards.error(interaction, f"Couldn't check that {form.name} account yet — {exc}. Nothing was added.")
-            return
-        except PlatformError as exc:
-            # The platform answered, but not about this account — an expired
-            # or blocked token, a missing permission, a rate limit. Say which:
-            # "couldn't reach" hid e.g. Meta refusing the bot's token (2026-10-14).
-            logger.warning("Validating %s account %r for guild %s failed: %s", self.platform, identifier, interaction.guild.id, exc)
-            await cards.error(interaction, f"{form.name} isn't available right now — {exc}")
-            return
-        except Exception:
-            logger.exception("Error validating %s account %r for guild %s", self.platform, identifier, interaction.guild.id)
-            await cards.error(interaction, f"Couldn't reach {form.name} right now — try again in a moment.")
+        except Exception as exc:
+            # Members get a plain-English sentence; the technical detail goes
+            # to the log under a reference code (utils/user_messages.py). A
+            # token or permission problem on our side reads as "isn't
+            # responding" — it's the bot owner's to fix, not the member's.
+            logger.warning(
+                "Validating %s account %r for guild %s failed: %s", self.platform, identifier, interaction.guild.id, exc,
+                exc_info=not isinstance(exc, PlatformError),
+            )
+            message = friendly_platform_error(exc, platform=form.name, context=f"Adding a {form.name} account")
+            await cards.error(interaction, f"{message} Nothing was added." if isinstance(exc, RateLimitedError) else message)
             return
 
         account_row = await bot.accounts_repo.add(  # type: ignore[attr-defined]
             interaction.guild.id, self.platform, account_ref.platform_account_id, account_ref.username
         )
         if account_row is None:
-            await cards.error(interaction, f"**{account_ref.username}** is already being monitored in this server.")
+            # Typed differently (a /c/Name link, a renamed handle, an ID) but it's the same account.
+            row = next(
+                (r for r in await bot.accounts_repo.list_by_guild(interaction.guild.id)  # type: ignore[attr-defined]
+                 if r["platform"] == self.platform and str(r["platform_account_id"]) == str(account_ref.platform_account_id)),
+                {"id": None, "username": account_ref.username},
+            )
+            await cards.error(interaction, await already_added_message(bot, interaction.guild.id, row, form.name))
             return
 
         channel_row = await bot.channels_repo.get_or_create(  # type: ignore[attr-defined]

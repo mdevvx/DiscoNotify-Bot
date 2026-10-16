@@ -28,9 +28,8 @@ def parse_identifier(identifier: str) -> str:
         value = url_match.group("handle")
     value = value.lstrip("@")
     if not _HANDLE_RE.match(value) or value.lower() in _RESERVED:
-        raise PermanentPlatformError(
-            f"{identifier!r} isn't an X handle — use the @handle (letters, numbers, _; up to 15) or the profile URL."
-        )
+        message = "That doesn't look like a Twitter / X handle. Use the @handle or the profile link."
+        raise PermanentPlatformError(message, user_message=message)
     return value
 
 

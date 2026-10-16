@@ -47,8 +47,10 @@ class FakeAdapter:
 
     def __init__(self, *, error: Optional[Exception] = None) -> None:
         self.error = error
+        self.calls = 0
 
     async def validate_account(self, identifier: str) -> AccountRef:
+        self.calls += 1
         if self.error is not None:
             raise self.error
         return AccountRef(platform="youtube", platform_account_id="UCabc", username="@example")
@@ -170,15 +172,105 @@ async def test_a_channel_the_bot_cannot_post_in_is_refused_up_front(db: FakeData
 async def test_an_unknown_account_is_reported_and_nothing_is_saved(db: FakeDatabase) -> None:
     interaction = await _submit(db, adapter=FakeAdapter(error=PermanentPlatformError("no such channel")))
 
-    assert "Couldn't find that YouTube account" in interaction.followup.messages[0]["content"]
+    text = interaction.followup.messages[0]["content"]
+    assert "We couldn't find that YouTube account" in text and "(Reference `" in text
+    assert "no such channel" not in text  # the detail goes to the log, not to members
     assert await interaction.client.accounts_repo.list_by_guild(1) == []
 
 
-async def test_adding_the_same_account_twice_says_so(db: FakeDatabase) -> None:
-    await _submit(db)
-    interaction = await _submit(db)
+async def test_an_error_that_carries_a_member_message_shows_exactly_that(db: FakeDatabase) -> None:
+    error = PermanentPlatformError("YouTube API 404: x", user_message="We couldn't find that YouTube channel. Please check the @handle.")
+    interaction = await _submit(db, adapter=FakeAdapter(error=error))
 
-    assert "already being monitored" in interaction.followup.messages[0]["content"]
+    assert interaction.followup.messages[0]["content"].count("We couldn't find that YouTube channel. Please check the @handle.") == 1
+    assert "404" not in interaction.followup.messages[0]["content"]
+
+
+async def test_a_busy_platform_says_when_to_try_again_and_that_nothing_was_added(db: FakeDatabase) -> None:
+    from utils.errors import RateLimitedError
+
+    interaction = await _submit(db, adapter=FakeAdapter(error=RateLimitedError("Instagram API rate limited: code 4", retry_after=130)))
+
+    text = interaction.followup.messages[0]["content"]
+    assert "busy right now" in text and "about 3 minutes" in text and "Nothing was added" in text
+    assert "code 4" not in text
+
+
+async def test_adding_the_same_account_twice_says_so_and_where_its_alerts_go(db: FakeDatabase) -> None:
+    await _submit(db)
+    adapter = FakeAdapter()
+    interaction = await _submit(db, adapter=adapter)
+
+    text = (interaction.response.messages or interaction.followup.messages)[0]["content"]
+    assert "You've already added **@example** (YouTube) in this server." in text
+    assert "Its alerts go to <#555>." in text and "/pulsenotify account-list" in text
+    assert adapter.calls == 0  # caught before asking YouTube anything
+    assert len(db.tables["pulsenotify_platform_accounts"].rows) == 1
+
+
+@pytest.mark.parametrize("spelling", ["@example", "@EXAMPLE", "  @Example  ", "https://www.youtube.com/@example", "youtube.com/@Example/videos", "https://youtube.com/channel/UCabc"])
+async def test_every_spelling_of_the_same_youtube_account_is_recognised_without_a_lookup(db: FakeDatabase, spelling: str) -> None:
+    await _submit(db)
+    adapter = FakeAdapter()
+
+    interaction = await _submit(db, adapter=adapter, identifier=spelling)
+
+    assert "You've already added **@example**" in (interaction.response.messages or interaction.followup.messages)[0]["content"]
+    assert adapter.calls == 0
+
+
+async def test_a_spelling_only_the_platform_can_resolve_is_still_caught_after_the_lookup(db: FakeDatabase) -> None:
+    """A /c/Name link could be any channel until YouTube says which."""
+    await _submit(db)
+    adapter = FakeAdapter()
+
+    interaction = await _submit(db, adapter=adapter, identifier="https://www.youtube.com/c/SomeOldName")
+
+    assert "You've already added **@example**" in interaction.followup.messages[0]["content"]
+    assert adapter.calls == 1
+    assert len(db.tables["pulsenotify_platform_accounts"].rows) == 1
+
+
+async def test_a_different_account_with_a_similar_name_is_not_a_duplicate(db: FakeDatabase) -> None:
+    class OtherChannel(FakeAdapter):
+        async def validate_account(self, identifier: str) -> AccountRef:
+            return AccountRef(platform="youtube", platform_account_id="UCother", username="@example_two")
+
+    await _submit(db)
+
+    interaction = await _submit(db, adapter=OtherChannel(), identifier="@example_two")
+
+    assert "already added" not in str(interaction.followup.messages + interaction.response.messages)
+    assert [row["username"] for row in db.tables["pulsenotify_platform_accounts"].rows] == ["@example", "@example_two"]
+
+
+@pytest.mark.parametrize(
+    ("platform", "stored_username", "stored_id", "spellings"),
+    [
+        ("youtube", "@nasa", "UCLA_DiR1FfKNvjuUpBHmylQ", ["@NASA", "https://www.youtube.com/@nasa", "youtube.com/channel/UCLA_DiR1FfKNvjuUpBHmylQ", "UCLA_DiR1FfKNvjuUpBHmylQ"]),
+        ("kick", "xqc", "676", ["xqc", "XQC", "@xqc", "https://kick.com/xqc", "kick.com/XQC/"]),
+        ("instagram", "pajamabillionaire", "17841400572798814", ["pajamabillionaire", "@PajamaBillionaire", "https://www.instagram.com/pajamabillionaire/", "instagram.com/pajamabillionaire?igsh=abc"]),
+        ("twitter", "Cookedcom", "2008104784159805440", ["@cookedcom", "Cookedcom", "https://x.com/cookedcom", "https://twitter.com/Cookedcom/status/2110162914594443689", "x.com/cookedcom/"]),
+    ],
+)
+def test_duplicates_are_recognised_on_every_platform(platform: str, stored_username: str, stored_id: str, spellings: list) -> None:
+    from commands.accounts.modals import find_duplicate
+
+    rows = [{"id": "row-1", "platform": platform, "username": stored_username, "platform_account_id": stored_id}]
+
+    for spelling in spellings:
+        assert find_duplicate(rows, platform, spelling) is rows[0], spelling
+
+
+def test_the_same_name_on_another_platform_or_another_account_is_not_a_duplicate() -> None:
+    from commands.accounts.modals import find_duplicate
+
+    rows = [{"id": "row-1", "platform": "instagram", "username": "nasa", "platform_account_id": "1784"}]
+
+    assert find_duplicate(rows, "twitter", "@nasa") is None  # a different platform
+    assert find_duplicate(rows, "instagram", "@nasa_hq") is None  # a different account
+    assert find_duplicate(rows, "instagram", "https://www.instagram.com/p/AbC123/") is None  # a post link
+    assert find_duplicate(rows, "instagram", "   ") is None
 
 
 async def test_a_server_at_its_account_limit_cant_add_more(db: FakeDatabase) -> None:
@@ -257,14 +349,16 @@ def test_form_title_uses_the_right_article() -> None:
     assert AddAccountModal("youtube").title == "Add a YouTube account"
 
 
-async def test_a_token_or_permission_problem_is_named_not_hidden(db: FakeDatabase) -> None:
-    """Regression test: Meta refusing the bot's own token showed only
-    "Couldn't reach Instagram right now", with nothing to act on."""
+async def test_a_token_or_permission_problem_is_never_shown_to_members(db: FakeDatabase) -> None:
+    """Meta refusing the bot's own token is the bot owner's to fix (the log has
+    it, under the reference code) — members only hear that it isn't responding."""
     from utils.errors import TransientPlatformError
 
-    error = TransientPlatformError("Instagram access token is missing a permission: Cannot call API for app")
+    error = TransientPlatformError("Instagram access token is missing a permission: Cannot call API for app 2034048970642813")
     interaction = await _submit(db, adapter=FakeAdapter(error=error))
 
     message = interaction.followup.messages[0]["content"]
-    assert "missing a permission" in message
+    assert "isn't responding right now" in message and "(Reference `" in message
+    for technical in ("token", "permission", "Cannot call API", "2034048970642813"):
+        assert technical not in message
     assert await interaction.client.accounts_repo.list_by_guild(1) == []

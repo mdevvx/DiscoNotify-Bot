@@ -61,7 +61,10 @@ class TwitchAdapter(PlatformAdapter):
         login = parser.parse_identifier(identifier)
         user = await self._client.get_user(login=login)
         if user is None:
-            raise PermanentPlatformError(f"No Twitch channel found for {identifier!r}")
+            raise PermanentPlatformError(
+                f"No Twitch channel found for {identifier!r}",
+                user_message="We couldn't find that Twitch channel. Please check the channel name or link.",
+            )
         return parser.user_to_account_ref(user)
 
     async def fetch_updates(self, account: AccountRef, cursor: Optional[str]) -> FetchResult:

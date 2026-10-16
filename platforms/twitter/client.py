@@ -173,10 +173,11 @@ def _parse_timeline(html: str, who: str) -> List[Dict[str, Any]]:
 def require_posts(posts: List[Dict[str, Any]], handle: str) -> Dict[str, Any]:
     """The account's profile from its posts, for adding it."""
     if not posts:
-        raise PermanentPlatformError(
-            f"Couldn't find public posts for @{handle} — check the handle. Accounts that are private, "
-            "suspended or have never posted can't be monitored."
+        message = (
+            f"We couldn't find public posts for @{handle}. Please check the handle — private, suspended "
+            "or brand-new accounts with no posts can't be monitored."
         )
+        raise PermanentPlatformError(message, user_message=message)
     for post in posts:
         user = post.get("user") or {}
         if str(user.get("screen_name", "")).lower() == handle.lower():

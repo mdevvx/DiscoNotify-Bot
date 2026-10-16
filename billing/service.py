@@ -36,6 +36,7 @@ from billing.links import sign_link
 from billing.nowpayments import EXPIRED_STATUSES, FAILED_STATUSES, PAID_STATUSES, NowPaymentsClient
 from billing.polar import PolarClient, PolarError
 from billing.repository import BillingRepository
+from utils.errors import PermanentPlatformError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -248,7 +249,7 @@ class BillingService:
         ran /pulsenotify subscribe, and where) travel with the subscription,
         so the confirmation is posted back in that channel."""
         if self._polar is None or self._polar_product_id is None:
-            raise BillingUnavailable("Card payments aren't set up on this bot yet.")
+            raise BillingUnavailable("Card payments aren't available yet. Please check back soon.")
         now = self._clock()
         cache_key = (guild_id, user_id or 0, channel_id or 0)
         cached = self._checkout_cache.get(cache_key)
@@ -267,7 +268,7 @@ class BillingService:
         )
         url = checkout.get("url")
         if not _is_polar_url(url):
-            raise BillingUnavailable("Polar didn't return a usable checkout link — please try again.")
+            raise BillingUnavailable("We couldn't create the payment link right now. Please try again in a moment.")
         self._checkout_cache[cache_key] = (now, url)
         return url
 
@@ -276,11 +277,20 @@ class BillingService:
         card is updated or the subscription cancelled."""
         row = await self._repo.get(guild_id)
         if self._polar is None or row is None or not row.get("card_customer_id"):
-            raise BillingUnavailable("This server has no card subscription to manage.")
-        session = await self._polar.create_customer_session(row["card_customer_id"])
+            raise BillingUnavailable("This server doesn't have a card subscription to manage.")
+        try:
+            session = await self._polar.create_customer_session(row["card_customer_id"])
+        except PermanentPlatformError as exc:
+            # Polar doesn't know this customer — e.g. a subscription made in
+            # its sandbox, or on another account. Nothing a member can fix.
+            logger.warning("Polar refused a billing portal for server %s: %s", guild_id, exc)
+            raise BillingUnavailable(
+                "We couldn't open the billing page for this server's subscription. "
+                "Please contact support and we'll sort it out."
+            ) from exc
         url = session.get("customer_portal_url")
         if not _is_polar_url(url):
-            raise BillingUnavailable("Polar didn't return a usable billing portal link — please try again.")
+            raise BillingUnavailable("We couldn't open the billing page right now. Please try again in a moment.")
         return url
 
     async def can_manage_card(self, guild_id: int, user_id: int, *, server_owner_id: Optional[int]) -> bool:

@@ -71,7 +71,7 @@ async def test_an_unknown_account_has_no_posts_and_cant_be_added() -> None:
     posts = await client.get_timeline_by_handle("nobody_here")
 
     assert posts == []
-    with pytest.raises(PermanentPlatformError, match="Couldn't find public posts"):
+    with pytest.raises(PermanentPlatformError, match="couldn't find public posts"):
         require_posts(posts, "nobody_here")
 
 
