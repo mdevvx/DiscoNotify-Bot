@@ -27,6 +27,7 @@ them with the provider itself:
 from __future__ import annotations
 
 import datetime
+from dataclasses import dataclass
 import math
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import urlencode, urlsplit, urlunsplit
@@ -58,6 +59,23 @@ _CHECKOUT_CACHE_TTL = datetime.timedelta(minutes=10)
 _MAX_ID_DIGITS = 19  # a Discord snowflake fits a bigint
 
 PaymentCallback = Callable[[Dict[str, Any], Access], Awaitable[None]]
+
+
+@dataclass(frozen=True)
+class BillingEvent:
+    """Something that happened to a server's subscription after it began:
+    `card_renewed`, `card_failed` (charge declined, being retried),
+    `card_cancel_scheduled` (ends at `until`), `card_ended`, `crypto_failed`
+    (failed, refunded or underpaid) or `crypto_expired`. Worked out from
+    what changed, so a restart can't repeat one."""
+
+    kind: str
+    guild_id: int
+    until: Optional[datetime.datetime] = None
+    payment: Optional[Dict[str, Any]] = None
+
+
+EventCallback = Callable[[BillingEvent], Awaitable[None]]
 
 
 class BillingUnavailable(Exception):
@@ -122,6 +140,7 @@ class BillingService:
         self._checkout_cache: Dict[Tuple[int, int, int], Tuple[datetime.datetime, str]] = {}
         self._known_subscriptions: Set[str] = set()
         self.on_payment: Optional[PaymentCallback] = None
+        self.on_event: Optional[EventCallback] = None
 
     @property
     def price_label(self) -> str:
@@ -490,6 +509,7 @@ class BillingService:
             cancels_at = parse_time(subscription.get("ends_at")) or period_end
 
         row = await self._repo.get_or_create(guild_id, trial_ends_at=self._clock() + self._trial)
+        before = dict(row)
         changes: Dict[str, Any] = {
             "card_subscription_id": subscription.get("id"),
             "card_customer_id": subscription.get("customer_id"),
@@ -518,6 +538,38 @@ class BillingService:
                     changes["paid_until"] = ended_at
         await self._repo.update(guild_id, changes)
         self._invalidate(guild_id)
+        if before.get("card_subscription_id") == subscription.get("id"):
+            for kind, until in self._card_transitions(before, changes, cancels_at):
+                await self._emit(BillingEvent(kind, guild_id, until=until))
+
+    @staticmethod
+    def _card_transitions(
+        before: Dict[str, Any], changes: Dict[str, Any], cancels_at: Optional[datetime.datetime]
+    ) -> "List[Tuple[str, Optional[datetime.datetime]]]":
+        """What changed for a subscription we already knew: a month was paid,
+        a charge failed, it was cancelled, or it ended."""
+        found: "List[Tuple[str, Optional[datetime.datetime]]]" = []
+        old_status, new_status = before.get("card_status"), changes["card_status"]
+        old_paid = parse_time(before.get("paid_until"))
+        new_paid = changes.get("paid_until")
+        if new_paid is not None and (old_paid is None or new_paid > old_paid) and new_status == "active":
+            found.append(("card_renewed", new_paid))
+        if new_status == "past_due" and old_status != "past_due":
+            found.append(("card_failed", None))
+        if cancels_at is not None and parse_time(before.get("card_cancels_at")) is None and new_status in _ACTIVE_CARD_STATUSES:
+            found.append(("card_cancel_scheduled", cancels_at))
+        if new_status == "canceled" and old_status in _ACTIVE_CARD_STATUSES:
+            found.append(("card_ended", parse_time(changes.get("paid_until")) or old_paid))
+        return found
+
+    async def _emit(self, event: BillingEvent) -> None:
+        logger.info("Billing event %s for server %s.", event.kind, event.guild_id)
+        if self.on_event is None:
+            return
+        try:
+            await self.on_event(event)
+        except Exception:
+            logger.warning("Couldn't deliver the %s alert for server %s.", event.kind, event.guild_id, exc_info=True)
 
     async def _check_crypto_payment(self, payment: Dict[str, Any]) -> None:
         if self._nowpayments is None:
@@ -529,6 +581,7 @@ class BillingService:
             if problem:
                 logger.error("Crypto payment %s not credited: %s", payment["id"], problem)
                 await self._repo.set_payment_status(payment["id"], "failed")
+                await self._emit(BillingEvent("crypto_failed", int(payment["guild_id"]), payment=payment))
                 return
             guild_id = int(payment["guild_id"])
             row = await self._repo.get_or_create(guild_id, trial_ends_at=self._clock() + self._trial)
@@ -541,8 +594,10 @@ class BillingService:
             await self._complete(payment)
         elif status in FAILED_STATUSES:
             await self._repo.set_payment_status(payment["id"], "failed")
+            await self._emit(BillingEvent("crypto_failed", int(payment["guild_id"]), payment=payment))
         elif status in EXPIRED_STATUSES or self._expired(payment, _CRYPTO_PAYMENT_TTL):
             await self._repo.set_payment_status(payment["id"], "expired")
+            await self._emit(BillingEvent("crypto_expired", int(payment["guild_id"]), payment=payment))
 
     @staticmethod
     def _crypto_mismatch(payment: Dict[str, Any], remote: Dict[str, Any]) -> Optional[str]:

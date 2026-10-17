@@ -22,7 +22,7 @@ from bot.maintenance import Maintenance
 from billing.nowpayments import NowPaymentsClient
 from billing.polar import PolarClient
 from billing.repository import BillingRepository
-from billing.service import BillingService
+from billing.service import BillingEvent, BillingService
 from bot.events import handle_app_command_error, register_events
 from commands.admin.billing import subscribe_buttons
 from commands.pulsenotify_group import pulsenotify_group
@@ -183,6 +183,7 @@ class PulseNotifyBot(commands.Bot):
             ),
         )
         self.billing.on_payment = self._announce_payment
+        self.billing.on_event = self._announce_billing_event
         # Accounts of a paused server, or one without billing access, are
         # simply not polled (their settings stay).
         self.monitoring.guild_filter = self._monitorable_guilds
@@ -422,11 +423,90 @@ class PulseNotifyBot(commands.Bot):
             )
 
         channel_id = payment.get("channel_id")
-        if channel_id:
-            channel = self.get_channel(int(channel_id)) or await self.fetch_channel(int(channel_id))
-            await channel.send(view=view, allowed_mentions=discord.AllowedMentions.none())  # type: ignore[union-attr]
-        elif guild is not None and not await self._dm_owner(guild, view):
-            await self._post_in_guild(guild, view)
+        try:
+            if channel_id:
+                channel = self.get_channel(int(channel_id)) or await self.fetch_channel(int(channel_id))
+                await channel.send(view=view, allowed_mentions=discord.AllowedMentions.none())  # type: ignore[union-attr]
+            elif guild is not None and not await self._dm_owner(guild, view):
+                await self._post_in_guild(guild, view)
+        finally:
+            method = "card" if payment["provider"] == "polar" else "crypto"
+            await self._alert_bot_owners(
+                "💰 New payment", f"{method} · {payment['months']} month(s) · ${payment['amount_usd']}", guild_id, payment, cards.SUCCESS
+            )
+
+    async def _announce_billing_event(self, event: BillingEvent) -> None:
+        """Tells the server (its owner, by DM or the intro channel) and the
+        bot owners what happened to a subscription after it began."""
+        guild = self.get_guild(event.guild_id)
+        name = guild.name if guild is not None else f"server {event.guild_id}"
+        until = f"<t:{int(event.until.timestamp())}:D>" if event.until else None
+        price = self.billing.price_label
+        mine: Optional[discord.ui.LayoutView] = None
+        summary, tone = event.kind, cards.INFO
+        if event.kind == "card_renewed":
+            summary, tone = f"card renewed · {price}", cards.SUCCESS
+            mine = cards.card(
+                f"PulseNotify's card payment for **{name}** went through ({price})."
+                + (f" Active until {until}." if until else ""),
+                title="✅ Subscription renewed",
+                tone=cards.SUCCESS,
+            )
+        elif event.kind == "card_failed":
+            summary, tone = "card charge failed (retrying)", cards.WARNING
+            mine = cards.card(
+                f"The card payment for **{name}** didn't go through. It will be retried automatically — alerts keep running meanwhile.",
+                "To use a different card, run `/pulsenotify cancel` to open your billing page and update it.",
+                title="⚠️ Card payment failed",
+                tone=cards.WARNING,
+            )
+        elif event.kind == "card_cancel_scheduled":
+            summary, tone = "card cancelled, ends at period end", cards.WARNING
+            mine = cards.card(
+                f"The PulseNotify subscription for **{name}** was cancelled. Alerts keep working until {until}, and you won't be charged again."
+                if until
+                else f"The PulseNotify subscription for **{name}** was cancelled. You won't be charged again.",
+                "Changed your mind? Run `/pulsenotify subscribe` any time.",
+                title="ℹ️ Subscription cancelled",
+                tone=cards.WARNING,
+            )
+        elif event.kind == "card_ended":
+            summary, tone = "card subscription ended", cards.ERROR
+            mine = cards.card(
+                f"The PulseNotify card subscription for **{name}** has ended, so alerts are paused. Every setting is kept.",
+                "Switch it back on with `/pulsenotify subscribe`.",
+                title="⏸️ Subscription ended",
+                tone=cards.ERROR,
+            )
+        elif event.kind == "crypto_failed":
+            summary, tone = "crypto payment failed/underpaid", cards.ERROR
+            mine = cards.card(
+                f"A crypto payment for **{name}** didn't go through, so nothing was added. If you sent funds, contact support with the server name and the time you paid.",
+                title="⚠️ Crypto payment not completed",
+                tone=cards.ERROR,
+            )
+        elif event.kind == "crypto_expired":
+            summary, tone = "crypto payment expired unpaid", cards.INFO  # bot owners only
+        if mine is not None and guild is not None and not await self._dm_owner(guild, mine):
+            await self._post_in_guild(guild, mine)
+        await self._alert_bot_owners(f"Billing: {event.kind.replace('_', ' ')}", summary, event.guild_id, event.payment, tone)
+
+    async def _alert_bot_owners(
+        self, title: str, summary: str, guild_id: int, payment: Optional[Dict[str, Any]], tone: int
+    ) -> None:
+        if not self.settings.billing_owner_alerts:
+            return
+        guild = self.get_guild(guild_id)
+        lines = [f"**{guild.name if guild else 'Unknown server'}** (`{guild_id}`)", summary]
+        if payment and payment.get("requested_by"):
+            lines.append(f"Requested by <@{payment['requested_by']}>")
+        view = cards.card(*lines, title=title, tone=tone)
+        for owner_id in self.settings.discord_owner_ids:
+            try:
+                user = self.get_user(owner_id) or await self.fetch_user(owner_id)
+                await user.send(view=view)
+            except discord.HTTPException:
+                logger.info("Couldn't DM bot owner %s a billing alert.", owner_id)
 
     async def close(self) -> None:
         logger.info("Shutting down PulseNotify...")

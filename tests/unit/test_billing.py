@@ -810,3 +810,61 @@ async def test_nowpayments_min_amount_request_shape() -> None:
 
     assert await client.min_amount_usd("usdttrc20") == 11.18
     assert seen == {"currency_from": "usdttrc20", "currency_to": "usdttrc20", "fiat_equivalent": "usd"}
+
+
+# ── alerts for what happens after a subscription begins ─────────────────
+
+
+async def test_renewals_failed_charges_cancellations_and_endings_each_raise_one_alert(db: FakeDatabase, clock: Clock) -> None:
+    polar = FakePolar()
+    service = _service(db, clock, polar=polar)
+    events: List[str] = []
+
+    async def on_event(event: Any) -> None:
+        events.append(event.kind)
+
+    service.on_event = on_event
+    await service.access(_GUILD)
+    clock.advance(days=8)
+    period_end = clock.now + datetime.timedelta(days=30)
+    subscription = polar.subscribe(status="active", period_end=period_end)
+    await service.poll_once()
+    assert events == []  # the first payment is the "payment received" card, not an event
+
+    clock.advance(days=30, minutes=11)
+    subscription.update(current_period_end=(period_end + datetime.timedelta(days=30)).isoformat())
+    await service.poll_once()
+    clock.advance(minutes=11)
+    await service.poll_once()  # nothing new changed — no repeat
+    subscription.update(status="past_due")
+    clock.advance(minutes=11)
+    await service.poll_once()
+    subscription.update(status="active", cancel_at_period_end=True, ends_at=subscription["current_period_end"])
+    clock.advance(minutes=11)
+    await service.poll_once()
+    subscription.update(status="canceled", ended_at=subscription["current_period_end"])
+    clock.advance(minutes=11)
+    await service.poll_once()
+
+    assert events == ["card_renewed", "card_failed", "card_cancel_scheduled", "card_ended"]
+
+
+async def test_failed_and_expired_crypto_payments_raise_alerts(db: FakeDatabase, clock: Clock) -> None:
+    nowpayments = FakeNowPayments()
+    service = _service(db, clock, nowpayments=nowpayments)
+    events: List[str] = []
+
+    async def on_event(event: Any) -> None:
+        events.append(event.kind)
+
+    service.on_event = on_event
+    await service.access(_GUILD)
+    nowpayments.create("1", price_usd=8.97, order_id=f"{_GUILD}-a", status="failed")
+    nowpayments.create("2", price_usd=8.97, order_id=f"{_GUILD}-b", status="expired")
+    _website_row(db, "nowpayments", "1", months=3, amount_usd=8.97)
+    _website_row(db, "nowpayments", "2", months=3, amount_usd=8.97)
+
+    await service.poll_once()
+    await service.poll_once()
+
+    assert sorted(events) == ["crypto_expired", "crypto_failed"]

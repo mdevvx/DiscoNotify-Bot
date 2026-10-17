@@ -131,6 +131,9 @@ class Settings(BaseSettings):
     # subscription has run out: right away, then every N days, at most M.
     billing_reminder_every_days: int = Field(default=7, alias="BILLING_REMINDER_EVERY_DAYS")
     billing_reminder_max: int = Field(default=3, alias="BILLING_REMINDER_MAX")
+    # DM every bot owner (DISCORD_OWNER_IDS) about each payment, renewal,
+    # failed charge, cancellation and failed crypto payment, with the server.
+    billing_owner_alerts: bool = Field(default=True, alias="BILLING_OWNER_ALERTS")
     # Polar (polar.sh): an organization access token with the checkouts:write,
     # subscriptions:read and customer_sessions:write scopes, and the ID of the
     # monthly subscription product (no trial on the product — the bot sets
