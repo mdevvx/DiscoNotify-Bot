@@ -32,6 +32,7 @@ from database.repositories.accounts import PlatformAccountRepository
 from database.repositories.alert_configs import AlertConfigurationRepository
 from database.repositories.bot_state import BotStateRepository
 from database.repositories.channels import NotificationChannelRepository
+from database.repositories.dm_log import DmLogRepository
 from database.repositories.guilds import GuildRepository
 from monitoring.manager import MonitoringManager
 from notifications.sender import NotificationSender
@@ -78,6 +79,18 @@ _ALWAYS_ALLOWED = {
 # How often to look for servers whose owner is due an upgrade reminder.
 _REMINDER_CHECK_EVERY = datetime.timedelta(minutes=10)
 _OWNER_GROUP_PREFIX = "pulsenotify global "
+# Discord error "Cannot send messages to this user".
+_DM_CLOSED = 50007
+# How the DM log names each billing event's DM.
+_EVENT_DM_KINDS = {
+    "card_renewed": "payment_success",
+    "card_failed": "payment_failed",
+    "crypto_failed": "payment_failed",
+    "card_cancel_scheduled": "card_cancelling",
+    "card_ended": "card_ended",
+}
+# Old DM-log rows are purged after this many days (checked about once a day).
+_DM_LOG_RETENTION_DAYS = 90
 
 
 class PulseNotifyCommandTree(app_commands.CommandTree):
@@ -155,6 +168,7 @@ class PulseNotifyBot(commands.Bot):
         self.channels_repo = NotificationChannelRepository(self.database)
         self.alert_configs_repo = AlertConfigurationRepository(self.database)
         self.maintenance = Maintenance(BotStateRepository(self.database))
+        self.dm_log = DmLogRepository(self.database)
 
         self.notification_sender = NotificationSender(self, self.alert_configs_repo, self.channels_repo)
         self.monitoring = MonitoringManager(self.database, settings, notification_sink=self.notification_sender.handle)
@@ -330,7 +344,13 @@ class PulseNotifyBot(commands.Bot):
 
     async def _billing_loop(self) -> None:
         last_reminder_check: Optional[datetime.datetime] = None
+        last_dm_purge: Optional[datetime.datetime] = None
         while True:
+            try:
+                if await self.maintenance.refresh():  # the admin panel's switch flipped
+                    await self.apply_presence()
+            except Exception:
+                logger.exception("Syncing maintenance mode failed.")
             try:
                 await self.billing.poll_once()
             except Exception:
@@ -344,7 +364,45 @@ class PulseNotifyBot(commands.Bot):
                     await self.send_upgrade_reminders()
                 except Exception:
                     logger.exception("Sending upgrade reminders failed.")
+                try:
+                    await self.send_abandoned_checkout_reminders()
+                except Exception:
+                    logger.exception("Sending abandoned-checkout reminders failed.")
+                if last_dm_purge is None or now - last_dm_purge >= datetime.timedelta(days=1):
+                    last_dm_purge = now
+                    try:
+                        await self.dm_log.purge_older_than(_DM_LOG_RETENTION_DAYS)
+                    except Exception:
+                        logger.warning("Couldn't purge old DM log rows.", exc_info=True)
             await asyncio.sleep(self.settings.billing_poll_interval_seconds)
+
+    async def send_abandoned_checkout_reminders(self) -> None:
+        """One DM to whoever started a checkout that's still unpaid an hour
+        later. The DM log is the memory: a payment with a logged
+        checkout_abandoned row (sent or not) is never DMed again, and if the
+        log can't be read nothing is sent."""
+        for payment in await self.billing.abandoned_checkouts():
+            try:
+                if await self.dm_log.was_sent(payment["id"], "checkout_abandoned"):
+                    continue
+            except Exception:
+                logger.warning("Couldn't read the DM log; skipping abandoned-checkout DMs.", exc_info=True)
+                return
+            guild_id = int(payment["guild_id"])
+            guild = self.get_guild(guild_id)
+            if guild is None:
+                continue
+            buttons = await subscribe_buttons(self.billing, guild_id, guild.name)
+            view = cards.card(
+                f"You started subscribing **{guild.name}** to PulseNotify but haven't finished paying.",
+                "Your checkout is still open — pick it up where you left off, or ignore this if you've changed your mind.",
+                title="🛒 Your checkout is waiting",
+                tone=cards.INFO,
+                extra=buttons,
+            )
+            await self._dm_user(
+                int(payment["requested_by"]), view, guild_id=guild_id, kind="checkout_abandoned", payment_id=payment["id"]
+            )
 
     async def send_upgrade_reminders(self) -> None:
         """DMs the owner of every server whose trial or subscription has run
@@ -356,7 +414,7 @@ class PulseNotifyBot(commands.Bot):
             if guild is None:
                 continue
             view = await self._reminder_card(guild, row)
-            delivered = await self._dm_owner(guild, view) or await self._post_in_guild(guild, view)
+            delivered = await self._dm_owner(guild, view, kind="expiry_reminder") or await self._post_in_guild(guild, view)
             if not delivered:
                 logger.warning("Couldn't deliver the upgrade reminder for server %s anywhere.", guild.id)
             await self.billing.mark_reminded(row)
@@ -370,16 +428,35 @@ class PulseNotifyBot(commands.Bot):
         buttons = await subscribe_buttons(self.billing, guild.id, guild.name)
         return cards.card(*lines, title=title, tone=cards.WARNING, extra=buttons)
 
-    async def _dm_owner(self, guild: discord.Guild, view: discord.ui.LayoutView) -> bool:
+    async def _dm_owner(
+        self, guild: discord.Guild, view: discord.ui.LayoutView, *, kind: str, payment_id: Optional[str] = None
+    ) -> bool:
         if guild.owner_id is None:
             return False
+        return await self._dm_user(guild.owner_id, view, guild_id=guild.id, kind=kind, payment_id=payment_id)
+
+    async def _dm_user(
+        self, user_id: int, view: discord.ui.LayoutView, *, guild_id: int, kind: str, payment_id: Optional[str] = None
+    ) -> bool:
+        """DMs a member and records the attempt in the DM log (IDs, kind and
+        outcome only). Logging never gets in the way of sending."""
+        status, error = "sent", None
         try:
-            owner = guild.owner or await self.fetch_user(guild.owner_id)
-            await owner.send(view=view)
-            return True
-        except discord.HTTPException:
-            logger.info("Couldn't DM the owner of server %s (DMs closed?).", guild.id)
-            return False
+            user = self.get_user(user_id) or await self.fetch_user(user_id)
+            await user.send(view=view)
+        except discord.HTTPException as exc:
+            if exc.code == _DM_CLOSED:
+                status = "dm_closed"
+            else:
+                status, error = "failed", f"HTTP {exc.status}, Discord code {exc.code}"
+            logger.info("Couldn't DM %s about server %s (%s).", user_id, guild_id, status)
+        try:
+            await self.dm_log.add(
+                guild_id=guild_id, user_id=user_id, kind=kind, status=status, error=error, payment_id=payment_id
+            )
+        except Exception:
+            logger.warning("Couldn't record the %s DM to %s in the DM log (migration 0011?).", kind, user_id, exc_info=True)
+        return status == "sent"
 
     async def _post_in_guild(self, guild: discord.Guild, view: discord.ui.LayoutView) -> bool:
         from bot.onboarding import pick_intro_channel
@@ -427,7 +504,9 @@ class PulseNotifyBot(commands.Bot):
             if channel_id:
                 channel = self.get_channel(int(channel_id)) or await self.fetch_channel(int(channel_id))
                 await channel.send(view=view, allowed_mentions=discord.AllowedMentions.none())  # type: ignore[union-attr]
-            elif guild is not None and not await self._dm_owner(guild, view):
+            elif guild is not None and not await self._dm_owner(
+                guild, view, kind="payment_success", payment_id=payment.get("id")
+            ):
                 await self._post_in_guild(guild, view)
         finally:
             method = "card" if payment["provider"] == "polar" else "crypto"
@@ -487,8 +566,10 @@ class PulseNotifyBot(commands.Bot):
             )
         elif event.kind == "crypto_expired":
             summary, tone = "crypto payment expired unpaid", cards.INFO  # bot owners only
-        if mine is not None and guild is not None and not await self._dm_owner(guild, mine):
-            await self._post_in_guild(guild, mine)
+        if mine is not None and guild is not None:
+            payment_id = (event.payment or {}).get("id")
+            if not await self._dm_owner(guild, mine, kind=_EVENT_DM_KINDS[event.kind], payment_id=payment_id):
+                await self._post_in_guild(guild, mine)
         await self._alert_bot_owners(f"Billing: {event.kind.replace('_', ' ')}", summary, event.guild_id, event.payment, tone)
 
     async def _alert_bot_owners(

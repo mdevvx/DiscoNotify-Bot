@@ -48,6 +48,9 @@ DAYS_PER_MONTH = 30
 # other pending row — only legacy ones exist — is closed after a day).
 _STALE_PENDING_TTL = datetime.timedelta(hours=24)
 _CRYPTO_PAYMENT_TTL = datetime.timedelta(days=3)
+# A checkout still unpaid after this long gets one nudge DM, if it's no older than the window.
+_ABANDONED_AFTER = datetime.timedelta(hours=1)
+_ABANDONED_WINDOW = datetime.timedelta(hours=24)
 _CARD_REFRESH_EVERY = datetime.timedelta(minutes=10)
 _ACCESS_CACHE_TTL = datetime.timedelta(seconds=60)
 # After the first full scan, look this far back for new card subscriptions.
@@ -414,6 +417,22 @@ class BillingService:
             int(row["guild_id"]),
             {"reminders_sent": int(row.get("reminders_sent") or 0) + 1, "last_reminder_at": self._clock()},
         )
+
+    async def abandoned_checkouts(self) -> List[Dict[str, Any]]:
+        """Pending payments still unpaid `_ABANDONED_AFTER` after they started
+        (but not older than `_ABANDONED_WINDOW`, so a backlog is never DMed
+        in one go). The caller dedupes against the DM log."""
+        if not self.enabled:
+            return []
+        now = self._clock()
+        found = []
+        for payment in await self._repo.list_pending():
+            created = parse_time(payment.get("created_at"))
+            if created is None or not payment.get("requested_by"):
+                continue
+            if _ABANDONED_AFTER <= now - created <= _ABANDONED_WINDOW:
+                found.append(payment)
+        return found
 
     # ── poller ──────────────────────────────────────────────────────────
 

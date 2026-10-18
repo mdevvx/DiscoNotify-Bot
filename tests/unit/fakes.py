@@ -38,6 +38,7 @@ class _FakeQuery:
         self._payload = payload or {}
         self._filters: Dict[str, Any] = {}
         self._in_filters: Dict[str, List[Any]] = {}
+        self._lt_filters: Dict[str, Any] = {}
         self._order: Optional[tuple] = None
         self._limit: Optional[int] = None
 
@@ -47,6 +48,10 @@ class _FakeQuery:
 
     def in_(self, column: str, values: Sequence[Any]) -> "_FakeQuery":
         self._in_filters[column] = list(values)
+        return self
+
+    def lt(self, column: str, value: Any) -> "_FakeQuery":
+        self._lt_filters[column] = value
         return self
 
     def order(self, column: str, *, desc: bool = False) -> "_FakeQuery":
@@ -61,6 +66,8 @@ class _FakeQuery:
         rows = [row for row in self._table.rows if all(row.get(k) == v for k, v in self._filters.items())]
         for column, values in self._in_filters.items():
             rows = [row for row in rows if row.get(column) in values]
+        for column, value in self._lt_filters.items():
+            rows = [row for row in rows if row.get(column) is not None and row[column] < value]
         return rows
 
     async def execute(self) -> _FakeResult:
@@ -182,6 +189,7 @@ class FakeDatabase:
                 defaults={"status": "pending", "metadata": dict, "created_at": _now_iso},
                 has_generated_id=True,
             ),
+            "pulsenotify_dm_log": FakeTable(unique_on=[], defaults={"created_at": _now_iso, "error": None, "payment_id": None}),
             "pulsenotify_platform_health": FakeTable(
                 unique_on=[("platform",)],
                 defaults={

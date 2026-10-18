@@ -283,6 +283,33 @@ async def test_maintenance_state_survives_a_restart() -> None:
     assert again.active is False
 
 
+async def test_the_admin_panels_switch_turns_maintenance_on_and_off() -> None:
+    from bot.maintenance import Maintenance
+    from database.repositories.bot_state import BotStateRepository
+
+    repo = BotStateRepository(FakeDatabase())  # type: ignore[arg-type]
+    state = Maintenance(repo)
+
+    assert await state.refresh() is False  # no switch row yet: nothing changes
+    await repo.set("maintenance_mode", True)
+    assert await state.refresh() is True and state.active
+    assert await state.refresh() is False  # already on
+    await repo.set("maintenance_mode", False)
+    assert await state.refresh() is True and not state.active
+
+
+async def test_maintenance_commands_keep_the_panels_switch_in_step() -> None:
+    from bot.maintenance import Maintenance
+    from database.repositories.bot_state import BotStateRepository
+
+    repo = BotStateRepository(FakeDatabase())  # type: ignore[arg-type]
+    state = Maintenance(repo)
+    await state.enable(message=None, by=_OWNER)
+    assert await repo.get("maintenance_mode") is True
+    await state.disable()
+    assert await repo.get("maintenance_mode") is False
+
+
 async def test_a_missing_state_table_means_not_in_maintenance() -> None:
     from bot.maintenance import Maintenance
 
@@ -564,6 +591,96 @@ class _Recipient:
         self.sent.append(view)
 
 
+class _DmLog:
+    def __init__(self, already: Any = ()) -> None:
+        self.rows: List[Any] = []
+        self._already = set(already)
+
+    async def add(self, **row: Any) -> None:
+        self.rows.append(row)
+
+    async def was_sent(self, payment_id: str, kind: str) -> bool:
+        return (payment_id, kind) in self._already
+
+
+def _discord_error(code: int, status: int = 403) -> Exception:
+    import discord
+
+    response = type("R", (), {"status": status, "reason": "x"})()
+    return discord.HTTPException(response, {"code": code, "message": "nope"})
+
+
+def _dm_bot(recipient: Any, dm_log: Any) -> Any:
+    from bot.client import PulseNotifyBot
+
+    bot = type("B", (), {})()
+    bot.get_user = lambda user_id: recipient
+    bot.dm_log = dm_log
+    bot._dm_user = PulseNotifyBot._dm_user.__get__(bot)
+    return bot
+
+
+async def test_a_dm_to_a_member_with_closed_dms_is_logged_as_dm_closed() -> None:
+    class Closed(_Recipient):
+        async def send(self, **_: Any) -> None:
+            raise _discord_error(50007)
+
+    log = _DmLog()
+    delivered = await _dm_bot(Closed(), log)._dm_user(5, object(), guild_id=1, kind="payment_failed", payment_id="p1")
+
+    assert delivered is False
+    assert log.rows == [
+        {"guild_id": 1, "user_id": 5, "kind": "payment_failed", "status": "dm_closed", "error": None, "payment_id": "p1"}
+    ]
+
+
+async def test_any_other_dm_error_is_logged_as_failed_with_a_short_reason() -> None:
+    class Broken(_Recipient):
+        async def send(self, **_: Any) -> None:
+            raise _discord_error(0, status=500)
+
+    log = _DmLog()
+    await _dm_bot(Broken(), log)._dm_user(5, object(), guild_id=1, kind="payment_success")
+
+    assert log.rows[0]["status"] == "failed" and "500" in log.rows[0]["error"]
+
+
+async def test_a_dm_still_goes_out_when_the_log_cant_be_written() -> None:
+    class Down(_DmLog):
+        async def add(self, **row: Any) -> None:
+            raise RuntimeError("relation pulsenotify_dm_log does not exist")
+
+    recipient = _Recipient()
+    assert await _dm_bot(recipient, Down())._dm_user(5, object(), guild_id=1, kind="payment_success") is True
+    assert len(recipient.sent) == 1
+
+
+async def test_an_abandoned_checkout_is_dmed_once_and_never_again() -> None:
+    from bot.client import PulseNotifyBot
+
+    payments = [
+        {"id": "p-new", "guild_id": 1, "requested_by": 5},
+        {"id": "p-done", "guild_id": 1, "requested_by": 6},
+    ]
+
+    class Billing(FakeBilling):
+        async def abandoned_checkouts(self) -> List[Any]:
+            return payments
+
+    buyer = _Recipient()
+    log = _DmLog(already={("p-done", "checkout_abandoned")})
+    bot = _dm_bot(buyer, log)
+    bot.billing = Billing(allowed=False)
+    bot.billing.website = None
+    bot.get_guild = lambda guild_id: type("G", (), {"id": guild_id, "name": "Gaming Hub"})()
+    bot.send_abandoned_checkout_reminders = PulseNotifyBot.send_abandoned_checkout_reminders.__get__(bot)
+
+    await bot.send_abandoned_checkout_reminders()
+
+    assert len(buyer.sent) == 1
+    assert [(row["user_id"], row["kind"], row["payment_id"]) for row in log.rows] == [(5, "checkout_abandoned", "p-new")]
+
+
 async def test_the_server_owner_is_dmed_an_upgrade_reminder_with_the_link() -> None:
     from bot.client import PulseNotifyBot
     from ui.cards import plain_text
@@ -586,11 +703,16 @@ async def test_the_server_owner_is_dmed_an_upgrade_reminder_with_the_link() -> N
     bot.billing = Billing(allowed=False)
     bot.settings = type("S", (), {"billing_reminder_max": 3})()
     bot.billing.website = None
-    for name in ("send_upgrade_reminders", "_reminder_card", "_dm_owner", "_post_in_guild"):
+    bot.get_user = lambda user_id: owner
+    bot.dm_log = _DmLog()
+    for name in ("send_upgrade_reminders", "_reminder_card", "_dm_owner", "_dm_user", "_post_in_guild"):
         setattr(bot, name, getattr(PulseNotifyBot, name).__get__(bot))
 
     await bot.send_upgrade_reminders()
 
+    assert bot.dm_log.rows == [
+        {"guild_id": 1, "user_id": 9, "kind": "expiry_reminder", "status": "sent", "error": None, "payment_id": None}
+    ]
     text = plain_text(owner.sent[0])
     assert "trial has ended" in text and "Gaming Hub" in text
     assert _link_urls(owner.sent[0]) == [
