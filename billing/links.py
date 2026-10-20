@@ -1,6 +1,6 @@
 """Signed links from the bot to the website's subscribe page.
 
-`/pulsenotify subscribe` gives a button to `BILLING_SUBSCRIBE_URL?t=<token>`.
+`/notify subscribe` gives a button to `BILLING_SUBSCRIBE_URL?t=<token>`.
 The token carries what Discord already authenticated — which server, who
 asked, in which channel, how many trial days are left — signed with a secret
 shared between the bot and the website (BILLING_LINK_SECRET), and it expires.

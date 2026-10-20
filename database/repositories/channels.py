@@ -12,8 +12,8 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-_CHANNELS_TABLE = "pulsenotify_notification_channels"
-_LINKS_TABLE = "pulsenotify_account_channels"
+_CHANNELS_TABLE = "notify_notification_channels"
+_LINKS_TABLE = "notify_account_channels"
 
 
 class NotificationChannelRepository:
@@ -89,7 +89,7 @@ class NotificationChannelRepository:
 
     async def list_by_account_for_guild(self, guild_id: int) -> Dict[str, List[NotificationChannelRow]]:
         """account_id -> every channel it posts to (valid or not), for one
-        guild, in two queries — for /pulsenotify status."""
+        guild, in two queries — for /notify status."""
         links = await self._db.client.table(_LINKS_TABLE).select("*").eq("guild_id", guild_id).execute()
         if not links.data:
             return {}

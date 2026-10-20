@@ -19,7 +19,7 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-_TABLE = "pulsenotify_events"
+_TABLE = "notify_events"
 
 
 class EventRepository:

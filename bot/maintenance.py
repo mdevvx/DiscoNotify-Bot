@@ -1,8 +1,8 @@
-"""Maintenance mode: pauses PulseNotify everywhere — every server's
+"""Maintenance mode: pauses DiscoNotify everywhere — every server's
 commands (bot owners excepted, so they can test) and all monitoring — and
 shows "🛠️ Under maintenance" as the bot's status.
 
-Stored in the database (pulsenotify_bot_state, migration 0007), so it
+Stored in the database (notify_bot_state, migration 0007), so it
 survives restarts: switch it on, update the bot, restart, check things as
 the owner, switch it off. Routine updates don't need it — a restart is a
 few seconds and nothing is lost (content cursors and live states are
@@ -21,7 +21,7 @@ logger = get_logger(__name__)
 
 _KEY = "maintenance"  # {message, by, since} — what the bot shows members
 _FLAG_KEY = "maintenance_mode"  # plain true/false — the admin panel's switch
-DEFAULT_MESSAGE = "PulseNotify is being updated and will be back shortly."
+DEFAULT_MESSAGE = "DiscoNotify is being updated and will be back shortly."
 
 
 class Maintenance:

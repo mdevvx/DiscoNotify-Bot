@@ -2,7 +2,7 @@
 it never shows in anyone's command menu; non-owners get no reply).
 
     !maintenance                 — current state
-    !maintenance on [message]    — pause PulseNotify everywhere (asks to confirm)
+    !maintenance on [message]    — pause DiscoNotify everywhere (asks to confirm)
     !maintenance off             — resume
 
 See bot/maintenance.py for what "paused" means and why it survives restarts.
@@ -36,7 +36,7 @@ class ConfirmMaintenanceView(discord.ui.LayoutView):
         cancel.callback = self.cancel  # type: ignore[method-assign]
         self.add_item(
             cards.container(
-                "This pauses PulseNotify in **every server**: all commands (except yours) and all alerts, "
+                "This pauses DiscoNotify in **every server**: all commands (except yours) and all alerts, "
                 "until you run `!maintenance off`. It stays on across restarts.",
                 f"Members will see: *{discord.utils.escape_markdown(self._message)}*",
                 title="🛠️ Turn on maintenance mode?",
@@ -54,7 +54,7 @@ class ConfirmMaintenanceView(discord.ui.LayoutView):
         await self._bot.apply_presence()
         await interaction.response.edit_message(
             view=cards.card(
-                "PulseNotify is paused everywhere. Update and restart as needed, then run `!maintenance off`.",
+                "DiscoNotify is paused everywhere. Update and restart as needed, then run `!maintenance off`.",
                 title="🛠️ Maintenance mode is on",
                 tone=cards.WARNING,
             )
@@ -62,7 +62,7 @@ class ConfirmMaintenanceView(discord.ui.LayoutView):
 
     async def cancel(self, interaction: discord.Interaction) -> None:
         self.stop()
-        await interaction.response.edit_message(view=cards.card("Cancelled — PulseNotify keeps running.", title="Maintenance"))
+        await interaction.response.edit_message(view=cards.card("Cancelled — DiscoNotify keeps running.", title="Maintenance"))
 
 
 class MaintenanceCog(commands.Cog):
@@ -86,7 +86,7 @@ class MaintenanceCog(commands.Cog):
         else:
             await ctx.send(
                 view=cards.card(
-                    "**Off** — PulseNotify is running normally.",
+                    "**Off** — DiscoNotify is running normally.",
                     f"`{prefix}maintenance on [message]` pauses it everywhere (asks to confirm first).",
                     title="Maintenance",
                 )
@@ -110,7 +110,7 @@ class MaintenanceCog(commands.Cog):
         await self.bot.apply_presence()  # type: ignore[attr-defined]
         await ctx.send(
             view=cards.card(
-                "PulseNotify is running again in every server — alerts resume on the next check.",
+                "DiscoNotify is running again in every server — alerts resume on the next check.",
                 title="✅ Maintenance mode is off",
             )
         )

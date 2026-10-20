@@ -1,10 +1,10 @@
-"""`whitelist` — bot-owner-only text command: let a server use PulseNotify
+"""`whitelist` — bot-owner-only text command: let a server use DiscoNotify
 without paying.
 
 A text command (like `sync`), not a slash command, on purpose: Discord
 can't hide a slash subcommand from individual users, so a slash version
 would show up in everyone's command menu. As a text command it's invisible
-— never in the menu, never in `/pulsenotify help` — and a non-owner
+— never in the menu, never in `/notify help` — and a non-owner
 typing it gets no reply at all (bot/events.py ignores NotOwner silently).
 
     !whitelist add [server_id] [note…]   (server_id defaults to this server)

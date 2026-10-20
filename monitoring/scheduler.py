@@ -44,7 +44,7 @@ class PlatformScheduler:
     ) -> None:
         self._adapter = adapter
         # Which servers may be monitored right now (not paused with
-        # /pulsenotify toggle, and with billing access) — see
+        # /notify toggle, and with billing access) — see
         # MonitoringManager.guild_filter. None = every server.
         self._guild_filter = guild_filter
         # Accounts whose every alert type is switched off — checking them

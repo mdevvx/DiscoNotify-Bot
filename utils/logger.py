@@ -23,7 +23,7 @@ _configured = False
 class _SuppressVoiceWarning(logging.Filter):
     """Drops discord.py's "voice will NOT be supported" startup notice.
 
-    PulseNotify has no voice features at all (it only ever posts text
+    DiscoNotify has no voice features at all (it only ever posts text
     alerts), so the missing voice-encryption dependency this warns about
     is never relevant — silenced by message content rather than by
     lowering discord.client's whole log level, so any other warning that
@@ -56,7 +56,7 @@ def setup_logging(level: str = "INFO", log_dir: str = "logs") -> None:
         log_path = Path(__file__).resolve().parent.parent / log_path
     log_path.mkdir(parents=True, exist_ok=True)
     file_handler = RotatingFileHandler(
-        log_path / "pulsenotify.log",
+        log_path / "disconotify.log",
         maxBytes=10 * 1024 * 1024,
         backupCount=5,
         encoding="utf-8",

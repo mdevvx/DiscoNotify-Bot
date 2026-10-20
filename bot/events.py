@@ -19,13 +19,13 @@ from ui import cards
 from utils.logger import get_logger
 
 if TYPE_CHECKING:
-    from bot.client import PulseNotifyBot
+    from bot.client import DiscoNotifyBot
 
 logger = get_logger(__name__)
 
 
-def register_events(bot: "PulseNotifyBot") -> None:
-    """Attaches the bot's event listeners. Called once from PulseNotifyBot.__init__."""
+def register_events(bot: "DiscoNotifyBot") -> None:
+    """Attaches the bot's event listeners. Called once from DiscoNotifyBot.__init__."""
 
     @bot.event
     async def on_ready() -> None:

@@ -17,7 +17,7 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-_TABLE = "pulsenotify_live_states"
+_TABLE = "notify_live_states"
 
 
 class LiveStateRepository:

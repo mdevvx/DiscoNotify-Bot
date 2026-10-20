@@ -12,7 +12,7 @@ import sys
 
 from pydantic import ValidationError
 
-from bot.client import PulseNotifyBot
+from bot.client import DiscoNotifyBot
 from bot.lifecycle import run
 from config.settings import describe_settings_errors, get_settings
 from utils.logger import get_logger, setup_logging
@@ -24,13 +24,13 @@ async def main() -> None:
     except ValidationError as exc:
         # One readable line per bad variable instead of pages of traceback
         # (a typo like BILLING_POLL_INTERVAL_SECONDS=600e crash-looped a deploy).
-        sys.exit("PulseNotify can't start — fix these environment variables (values aren't shown):\n" + describe_settings_errors(exc))
+        sys.exit("DiscoNotify can't start — fix these environment variables (values aren't shown):\n" + describe_settings_errors(exc))
     setup_logging(settings.log_level, settings.log_dir)
     logger = get_logger(__name__)
 
-    logger.info("Starting PulseNotify (environment=%s)...", settings.environment)
+    logger.info("Starting DiscoNotify (environment=%s)...", settings.environment)
 
-    bot = PulseNotifyBot(settings=settings)
+    bot = DiscoNotifyBot(settings=settings)
     await run(bot, settings.discord_token)
 
 

@@ -83,7 +83,7 @@ def _seed_account(db: FakeDatabase, account_id: str = "acc-1", **overrides: Any)
         "content_cursor": None,
     }
     row.update(overrides)
-    db.tables["pulsenotify_platform_accounts"].rows.append(row)
+    db.tables["notify_platform_accounts"].rows.append(row)
 
 
 class Harness:

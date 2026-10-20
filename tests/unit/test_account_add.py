@@ -1,4 +1,4 @@
-"""`/pulsenotify account-add`: the command opens a per-platform form, and
+"""`/notify account-add`: the command opens a per-platform form, and
 the form's apply() validates the account, links the channel, seeds the
 default alerts and (optionally) the mention role."""
 
@@ -208,9 +208,9 @@ async def test_adding_the_same_account_twice_says_so_and_where_its_alerts_go(db:
 
     text = (interaction.response.messages or interaction.followup.messages)[0]["content"]
     assert "You've already added **@example** (YouTube) in this server." in text
-    assert "Its alerts go to <#555>." in text and "/pulsenotify account-list" in text
+    assert "Its alerts go to <#555>." in text and "/notify account-list" in text
     assert adapter.calls == 0  # caught before asking YouTube anything
-    assert len(db.tables["pulsenotify_platform_accounts"].rows) == 1
+    assert len(db.tables["notify_platform_accounts"].rows) == 1
 
 
 @pytest.mark.parametrize("spelling", ["@example", "@EXAMPLE", "  @Example  ", "https://www.youtube.com/@example", "youtube.com/@Example/videos", "https://youtube.com/channel/UCabc"])
@@ -233,7 +233,7 @@ async def test_a_spelling_only_the_platform_can_resolve_is_still_caught_after_th
 
     assert "You've already added **@example**" in interaction.followup.messages[0]["content"]
     assert adapter.calls == 1
-    assert len(db.tables["pulsenotify_platform_accounts"].rows) == 1
+    assert len(db.tables["notify_platform_accounts"].rows) == 1
 
 
 async def test_a_different_account_with_a_similar_name_is_not_a_duplicate(db: FakeDatabase) -> None:
@@ -246,7 +246,7 @@ async def test_a_different_account_with_a_similar_name_is_not_a_duplicate(db: Fa
     interaction = await _submit(db, adapter=OtherChannel(), identifier="@example_two")
 
     assert "already added" not in str(interaction.followup.messages + interaction.response.messages)
-    assert [row["username"] for row in db.tables["pulsenotify_platform_accounts"].rows] == ["@example", "@example_two"]
+    assert [row["username"] for row in db.tables["notify_platform_accounts"].rows] == ["@example", "@example_two"]
 
 
 @pytest.mark.parametrize(
@@ -283,14 +283,14 @@ async def test_a_server_at_its_account_limit_cant_add_more(db: FakeDatabase) -> 
     """Shared API limits (YouTube quota, Instagram calls, X window) must not
     be used up by one server."""
     for n in range(25):
-        db.tables["pulsenotify_platform_accounts"].rows.append(
+        db.tables["notify_platform_accounts"].rows.append(
             {"id": f"acc-{n}", "guild_id": 1, "platform": "youtube", "platform_account_id": f"UC{n}", "username": f"c{n}"}
         )
 
     interaction = await _submit(db)
 
     assert "already monitors 25 accounts" in interaction.followup.messages[0]["content"]
-    assert len(db.tables["pulsenotify_platform_accounts"].rows) == 25
+    assert len(db.tables["notify_platform_accounts"].rows) == 25
 
 
 async def test_a_blank_identifier_is_refused(db: FakeDatabase) -> None:
@@ -416,5 +416,5 @@ async def test_a_form_that_expired_before_it_could_be_acknowledged_changes_nothi
         interaction, identifier="@example", channel=FakeTextChannel(), role_id=None
     )
 
-    assert db.tables["pulsenotify_platform_accounts"].rows == []
+    assert db.tables["notify_platform_accounts"].rows == []
     assert interaction.followup.messages == [] and interaction.response.messages == []

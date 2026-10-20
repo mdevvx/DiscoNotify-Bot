@@ -146,8 +146,8 @@ async def already_added_message(bot: Any, guild_id: int, row: Dict[str, Any], pl
         logger.warning("Couldn't look up where %s posts.", row.get("id"), exc_info=True)
     return (
         f"You've already added **{discord.utils.escape_markdown(str(row['username']))}** ({platform_name}) "
-        f"in this server.{where} See it with `/pulsenotify account-list`, or change its alerts with "
-        "`/pulsenotify alerts`."
+        f"in this server.{where} See it with `/notify account-list`, or change its alerts with "
+        "`/notify alerts`."
     )
 
 
@@ -259,7 +259,7 @@ class AddAccountModal(_Form):
         self.add_item(
             discord.ui.Label(
                 text="Role to mention (optional)",
-                description="Pinged on every alert. Change later with /pulsenotify account-set-mention.",
+                description="Pinged on every alert. Change later with /notify account-set-mention.",
                 component=self.role,
             )
         )
@@ -301,7 +301,7 @@ class AddAccountModal(_Form):
             await cards.error(
                 interaction,
                 f"This server already monitors {limit} accounts, the most allowed. "
-                "Remove one with `/pulsenotify account-remove` to add another.",
+                "Remove one with `/notify account-remove` to add another.",
             )
             return
         if channel is None:

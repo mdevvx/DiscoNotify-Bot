@@ -7,7 +7,7 @@ discord.Color where they actually build an embed.
 
 from __future__ import annotations
 
-BOT_NAME = "PulseNotify"
+BOT_NAME = "DiscoNotify"
 BOT_VERSION = "0.1.0"
 
 # Card colours, from the app icon (2026-10-14): everything normal —

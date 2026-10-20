@@ -27,7 +27,7 @@ def _seed(db: FakeDatabase, **overrides) -> dict:
         "content_cursor": None,
     }
     row.update(overrides)
-    db.tables["pulsenotify_platform_accounts"].rows.append(row)
+    db.tables["notify_platform_accounts"].rows.append(row)
     return row
 
 

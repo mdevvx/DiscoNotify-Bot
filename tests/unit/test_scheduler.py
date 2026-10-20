@@ -64,7 +64,7 @@ async def test_sync_workers_removes_workers_for_accounts_no_longer_enabled() -> 
     await scheduler._sync_workers()
     assert scheduler.worker_count == 1
 
-    db.tables["pulsenotify_platform_accounts"].rows[0]["enabled"] = False
+    db.tables["notify_platform_accounts"].rows[0]["enabled"] = False
     await scheduler._sync_workers()
 
     assert scheduler.worker_count == 0
@@ -143,7 +143,7 @@ async def test_a_platform_with_a_quota_has_it_written_each_cycle() -> None:
 
     await scheduler._report_quota()
 
-    row = db.tables["pulsenotify_platform_health"].rows[0]
+    row = db.tables["notify_platform_health"].rows[0]
     assert (row["quota_remaining"], row["quota_limit"]) == (70, 100)
 
 
@@ -153,7 +153,7 @@ async def test_a_platform_without_a_quota_writes_none() -> None:
 
     await scheduler._report_quota()
 
-    assert db.tables["pulsenotify_platform_health"].rows == []
+    assert db.tables["notify_platform_health"].rows == []
 
 
 async def test_a_failure_reporting_quota_never_stops_polling() -> None:

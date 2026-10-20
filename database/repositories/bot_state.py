@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 
 from database.client import Database
 
-_TABLE = "pulsenotify_bot_state"
+_TABLE = "notify_bot_state"
 
 
 class BotStateRepository:

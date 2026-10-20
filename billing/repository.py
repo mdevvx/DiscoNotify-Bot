@@ -1,5 +1,5 @@
 """Database access for billing (migrations 0006 and 0008): one
-`pulsenotify_billing` row per server, and a `pulsenotify_payments` ledger
+`notify_billing` row per server, and a `notify_payments` ledger
 of every payment — written by the website (pending crypto payments) or by
 the bot (card subscriptions it found at Polar)."""
 
@@ -10,9 +10,9 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from database.client import Database, is_unique_violation
 
-_BILLING = "pulsenotify_billing"
-_PAYMENTS = "pulsenotify_payments"
-_GUILDS = "pulsenotify_guilds"
+_BILLING = "notify_billing"
+_PAYMENTS = "notify_payments"
+_GUILDS = "notify_guilds"
 
 
 def _iso(moment: datetime.datetime) -> str:
@@ -39,7 +39,7 @@ class BillingRepository:
     async def get_or_create(self, guild_id: int, *, trial_ends_at: datetime.datetime) -> Dict[str, Any]:
         """The server's row, starting its trial if this is the first time
         it's been seen with billing on. The guild row must already exist
-        (pulsenotify_guilds is the foreign key)."""
+        (notify_guilds is the foreign key)."""
         existing = await self.get(guild_id)
         if existing is not None:
             return existing
@@ -111,7 +111,7 @@ class BillingRepository:
         return result.data[0] if result.data else None
 
     async def guild_exists(self, guild_id: int) -> bool:
-        """Billing rows reference pulsenotify_guilds — only servers the bot
+        """Billing rows reference notify_guilds — only servers the bot
         has joined can be credited."""
         result = await self._db.client.table(_GUILDS).select("guild_id").eq("guild_id", guild_id).execute()
         return bool(result.data)

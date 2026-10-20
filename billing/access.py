@@ -1,4 +1,4 @@
-"""Who may use PulseNotify right now — pure logic over one billing row.
+"""Who may use DiscoNotify right now — pure logic over one billing row.
 
 A server has access while ANY of these holds:
 - it's whitelisted by a bot owner (never pays),
@@ -70,7 +70,7 @@ def utcnow() -> datetime.datetime:
 
 
 def describe_access(access: Access, row: Optional[Dict[str, Any]], *, price_label: str = "$2.99") -> str:
-    """One line for /pulsenotify status and /pulsenotify subscribe."""
+    """One line for /notify status and /notify subscribe."""
     row = row or {}
     if access.reason == AccessReason.BILLING_OFF:
         return "🎁 Free — no subscription needed"
@@ -86,7 +86,7 @@ def describe_access(access: Access, row: Optional[Dict[str, Any]], *, price_labe
         return f"✅ Paid until {_when(access.until, 'D')} — {how}"
     if access.reason == AccessReason.GRACE:
         return f"⚠️ Payment overdue — monitoring stops {_when(access.until, 'R')} unless renewed"
-    return "🔴 Subscription ended — monitoring is paused. Use `/pulsenotify subscribe`."
+    return "🔴 Subscription ended — monitoring is paused. Use `/notify subscribe`."
 
 
 def _when(moment: Optional[datetime.datetime], style: str) -> str:
@@ -101,21 +101,21 @@ def subscription_needed(row: Optional[Dict[str, Any]], *, price_label: str) -> "
     paid_until = parse_time(row.get("paid_until"))
     trial_ends_at = parse_time(row.get("trial_ends_at"))
     if paid_until is not None:
-        ended = f"This server's PulseNotify subscription ended on {_when(paid_until, 'D')}."
+        ended = f"This server's DiscoNotify subscription ended on {_when(paid_until, 'D')}."
     elif trial_ends_at is not None:
         ended = f"This server's free trial ended on {_when(trial_ends_at, 'D')}."
     else:
-        ended = "This server doesn't have an active PulseNotify subscription."
+        ended = "This server doesn't have an active DiscoNotify subscription."
     return [
         ended,
         "Alerts are paused, but **every setting is kept** — nothing needs setting up again.",
-        f"To switch it back on, a server admin (Manage Server) runs **`/pulsenotify subscribe`** — "
+        f"To switch it back on, a server admin (Manage Server) runs **`/notify subscribe`** — "
         f"**{price_label}/month**, card or crypto. Alerts resume within about 2 minutes of paying.",
     ]
 
 
 def subscription_details(access: Access, row: Optional[Dict[str, Any]], *, price_label: str) -> "list[str]":
-    """The Subscription section of /pulsenotify status: state, how it's
+    """The Subscription section of /notify status: state, how it's
     paid, and where to manage it."""
     row = row or {}
     lines = [describe_access(access, row, price_label=price_label)]
@@ -130,7 +130,7 @@ def subscription_details(access: Access, row: Optional[Dict[str, Any]], *, price
         elif card_status == "trialing":
             lines.append(f"💳 Card saved — first {price_label} charge when the trial ends")
         elif card_status == "past_due":
-            lines.append("💳 Card payment failed — it will be retried; update the card with `/pulsenotify cancel` to keep alerts running")
+            lines.append("💳 Card payment failed — it will be retried; update the card with `/notify cancel` to keep alerts running")
         else:
             lines.append(f"💳 Card subscription — {price_label}/month, renews automatically")
     elif access.reason in (AccessReason.PAID, AccessReason.GRACE):
@@ -138,9 +138,9 @@ def subscription_details(access: Access, row: Optional[Dict[str, Any]], *, price
 
     if access.allowed:
         if card_status in ("active", "trialing", "past_due") and cancels_at is None:
-            lines.append("Cancel any time: `/pulsenotify cancel`")
+            lines.append("Cancel any time: `/notify cancel`")
         else:
-            lines.append("Subscribe or renew: `/pulsenotify subscribe`")
+            lines.append("Subscribe or renew: `/notify subscribe`")
     else:
-        lines.append(f"Turn alerts back on: `/pulsenotify subscribe` — {price_label}/month, card or crypto")
+        lines.append(f"Turn alerts back on: `/notify subscribe` — {price_label}/month, card or crypto")
     return lines

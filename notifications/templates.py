@@ -4,7 +4,7 @@ messages (section 35's "Custom message... safe template substitution").
 Two different trust levels are handled deliberately:
 
 - The *template* itself is admin-authored (typed via
-  `/pulsenotify account-set-message`, which requires Manage Server) and is
+  `/notify account-set-message`, which requires Manage Server) and is
   allowed to contain literal Discord mention syntax on purpose — an admin
   writing "Hey @everyone" into their own template is explicit
   configuration, not the "arbitrary user-controlled content from social
@@ -26,8 +26,8 @@ from events.models import NormalizedEvent
 
 _PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
 
-# Keep in sync with the description shown by /pulsenotify account-set-message
-# and /pulsenotify help.
+# Keep in sync with the description shown by /notify account-set-message
+# and /notify help.
 PLACEHOLDERS = ("creator", "title", "description", "url", "platform", "category", "viewers", "mention")
 
 # Leaves headroom under Discord's 2000-char message limit after

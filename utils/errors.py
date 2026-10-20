@@ -1,4 +1,4 @@
-"""PulseNotify's own exception hierarchy.
+"""DiscoNotify's own exception hierarchy.
 
 Notification-specific exceptions are added once Phase 4 has a real sender
 to raise them.
@@ -9,19 +9,19 @@ from __future__ import annotations
 from typing import Optional
 
 
-class PulseNotifyError(Exception):
-    """Base class for all PulseNotify-specific errors."""
+class DiscoNotifyError(Exception):
+    """Base class for all DiscoNotify-specific errors."""
 
 
-class ConfigurationError(PulseNotifyError):
+class ConfigurationError(DiscoNotifyError):
     """Required configuration is missing or invalid."""
 
 
-class DatabaseError(PulseNotifyError):
+class DatabaseError(DiscoNotifyError):
     """A database access problem that isn't itself a Supabase/Postgrest error."""
 
 
-class PlatformError(PulseNotifyError):
+class PlatformError(DiscoNotifyError):
     """Base class for errors a platform adapter raises while talking to its API.
 
     `message` is for the log. `user_message`, when given, is a plain-English

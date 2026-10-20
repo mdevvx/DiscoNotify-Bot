@@ -244,7 +244,7 @@ async def test_youtube_alert_is_a_v2_card_with_the_videos_details(harness: Harne
 async def test_embed_disabled_sends_only_the_text_line_with_the_link(harness: Harness) -> None:
     channel = await harness.add_channel(1, "acc-1", 555)
     await harness.alert_repo.seed_defaults(1, "acc-1", ["video_published"])
-    harness.db.tables["pulsenotify_alert_configurations"].rows[0]["embed_enabled"] = False
+    harness.db.tables["notify_alert_configurations"].rows[0]["embed_enabled"] = False
 
     await harness.sender.handle(_event())
 
@@ -273,7 +273,7 @@ async def test_disabled_event_type_sends_nothing(harness: Harness) -> None:
     channel = await harness.add_channel(1, "acc-1", 555)
     await harness.alert_repo.seed_defaults(1, "acc-1", ["video_published"])
     # Flip it off directly in the fake DB (no /alerts command exists yet).
-    harness.db.tables["pulsenotify_alert_configurations"].rows[0]["enabled"] = False
+    harness.db.tables["notify_alert_configurations"].rows[0]["enabled"] = False
 
     await harness.sender.handle(_event())
 
@@ -283,7 +283,7 @@ async def test_disabled_event_type_sends_nothing(harness: Harness) -> None:
 async def test_mention_role_is_included_and_scoped_to_that_role_only(harness: Harness) -> None:
     channel = await harness.add_channel(1, "acc-1", 555)
     await harness.alert_repo.seed_defaults(1, "acc-1", ["video_published"])
-    harness.db.tables["pulsenotify_alert_configurations"].rows[0]["mention_role_id"] = 999
+    harness.db.tables["notify_alert_configurations"].rows[0]["mention_role_id"] = 999
 
     await harness.sender.handle(_event())
 
@@ -300,7 +300,7 @@ async def test_everyone_role_is_sent_as_a_real_everyone_ping(harness: Harness) -
     a dead "@@everyone", so it must go out as literal @everyone instead."""
     channel = await harness.add_channel(1, "acc-1", 555)
     await harness.alert_repo.seed_defaults(1, "acc-1", ["video_published"])
-    harness.db.tables["pulsenotify_alert_configurations"].rows[0]["mention_role_id"] = 1
+    harness.db.tables["notify_alert_configurations"].rows[0]["mention_role_id"] = 1
 
     await harness.sender.handle(_event())
 
@@ -317,7 +317,7 @@ async def test_a_title_inside_the_card_cannot_ping_when_everyone_is_allowed(harn
     ping too."""
     channel = await harness.add_channel(1, "acc-1", 555)
     await harness.alert_repo.seed_defaults(1, "acc-1", ["video_published"])
-    harness.db.tables["pulsenotify_alert_configurations"].rows[0]["mention_role_id"] = 1
+    harness.db.tables["notify_alert_configurations"].rows[0]["mention_role_id"] = 1
 
     await harness.sender.handle(_event(title="@here watch", description="@everyone hi", author="@everyone TV"))
 
@@ -335,7 +335,7 @@ async def test_a_title_inside_the_card_cannot_ping_when_everyone_is_allowed(harn
 async def test_custom_message_replaces_the_text_line_and_keeps_the_card(harness: Harness) -> None:
     channel = await harness.add_channel(1, "acc-1", 555)
     await harness.alert_repo.seed_defaults(1, "acc-1", ["video_published"])
-    harness.db.tables["pulsenotify_alert_configurations"].rows[0]["custom_message"] = (
+    harness.db.tables["notify_alert_configurations"].rows[0]["custom_message"] = (
         "Hey @everyone, {creator} just posted a new post! Go check it out!\n{url}"
     )
 
@@ -351,8 +351,8 @@ async def test_custom_message_replaces_the_text_line_and_keeps_the_card(harness:
 async def test_custom_message_with_embed_disabled_sends_only_the_message(harness: Harness) -> None:
     channel = await harness.add_channel(1, "acc-1", 555)
     await harness.alert_repo.seed_defaults(1, "acc-1", ["video_published"])
-    harness.db.tables["pulsenotify_alert_configurations"].rows[0]["custom_message"] = "Check this out!\n{url}"
-    harness.db.tables["pulsenotify_alert_configurations"].rows[0]["embed_enabled"] = False
+    harness.db.tables["notify_alert_configurations"].rows[0]["custom_message"] = "Check this out!\n{url}"
+    harness.db.tables["notify_alert_configurations"].rows[0]["embed_enabled"] = False
 
     await harness.sender.handle(_event())
 
@@ -364,7 +364,7 @@ async def test_custom_message_with_embed_disabled_sends_only_the_message(harness
 async def test_custom_messages_literal_everyone_actually_allows_the_mention(harness: Harness) -> None:
     channel = await harness.add_channel(1, "acc-1", 555)
     await harness.alert_repo.seed_defaults(1, "acc-1", ["video_published"])
-    harness.db.tables["pulsenotify_alert_configurations"].rows[0]["custom_message"] = "Hey @everyone!"
+    harness.db.tables["notify_alert_configurations"].rows[0]["custom_message"] = "Hey @everyone!"
 
     await harness.sender.handle(_event())
 
@@ -374,7 +374,7 @@ async def test_custom_messages_literal_everyone_actually_allows_the_mention(harn
 async def test_custom_message_without_everyone_does_not_allow_the_mention(harness: Harness) -> None:
     channel = await harness.add_channel(1, "acc-1", 555)
     await harness.alert_repo.seed_defaults(1, "acc-1", ["video_published"])
-    harness.db.tables["pulsenotify_alert_configurations"].rows[0]["custom_message"] = "New post from {creator}"
+    harness.db.tables["notify_alert_configurations"].rows[0]["custom_message"] = "New post from {creator}"
 
     await harness.sender.handle(_event())
 
@@ -387,7 +387,7 @@ async def test_custom_message_title_cannot_inject_a_real_everyone_mention(harnes
     into the template — only the admin's own typed text can do that."""
     channel = await harness.add_channel(1, "acc-1", 555)
     await harness.alert_repo.seed_defaults(1, "acc-1", ["video_published"])
-    harness.db.tables["pulsenotify_alert_configurations"].rows[0]["custom_message"] = "New post: {title}"
+    harness.db.tables["notify_alert_configurations"].rows[0]["custom_message"] = "New post: {title}"
 
     await harness.sender.handle(_event(title="please @everyone watch this"))
 
@@ -399,8 +399,8 @@ async def test_custom_message_title_cannot_inject_a_real_everyone_mention(harnes
 async def test_custom_message_mention_placeholder_uses_the_configured_role(harness: Harness) -> None:
     channel = await harness.add_channel(1, "acc-1", 555)
     await harness.alert_repo.seed_defaults(1, "acc-1", ["video_published"])
-    harness.db.tables["pulsenotify_alert_configurations"].rows[0]["custom_message"] = "{mention} new post!"
-    harness.db.tables["pulsenotify_alert_configurations"].rows[0]["mention_role_id"] = 999999999999999999
+    harness.db.tables["notify_alert_configurations"].rows[0]["custom_message"] = "{mention} new post!"
+    harness.db.tables["notify_alert_configurations"].rows[0]["mention_role_id"] = 999999999999999999
 
     await harness.sender.handle(_event())
 
@@ -533,7 +533,7 @@ async def test_missing_manage_webhooks_permission_falls_back_to_sending_as_the_b
 async def test_webhook_deleted_externally_before_any_send_is_recreated(harness: Harness) -> None:
     """Regression test: if a webhook is deleted from Discord's side (by a
     server admin, or some unrelated automation/integration) before
-    PulseNotify ever tries to actually send through it — e.g. between
+    DiscoNotify ever tries to actually send through it — e.g. between
     get_or_create_webhook() being called proactively from account-add and
     the first real notification — the stale stored URL must not be handed
     back as if it were still good. Previously get_or_create_webhook()
@@ -582,7 +582,7 @@ async def test_sending_does_not_spend_a_round_trip_verifying_the_webhook(harness
 
 async def test_deleted_webhook_is_replaced_and_the_alert_goes_through_the_new_one(harness: Harness) -> None:
     """Simulates a server admin deleting the webhook from Discord's side
-    sometime after PulseNotify created and persisted it."""
+    sometime after DiscoNotify created and persisted it."""
     channel = await harness.add_channel(1, "acc-1", 555)
     await harness.sender.handle(_event())  # creates + persists the webhook normally
     assert channel.create_webhook_calls == 1
@@ -680,7 +680,7 @@ async def test_a_thumbnail_that_never_appears_leaves_the_alert_without_it(harnes
 async def test_no_image_check_when_embeds_are_off(harness: Harness) -> None:
     channel = await harness.add_channel(1, "acc-1", 555)
     await harness.alert_repo.seed_defaults(1, "acc-1", ["video_published"])
-    harness.db.tables["pulsenotify_alert_configurations"].rows[0]["embed_enabled"] = False
+    harness.db.tables["notify_alert_configurations"].rows[0]["embed_enabled"] = False
 
     await harness.sender.handle(_event(thumbnail_url=_THUMB))
 

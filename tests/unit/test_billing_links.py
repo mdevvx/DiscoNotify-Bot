@@ -73,12 +73,12 @@ def test_malformed_tokens_are_refused_not_crashed_on(junk: str) -> None:
 
 async def test_the_service_builds_the_signed_website_link_with_the_remaining_trial() -> None:
     db = FakeDatabase()
-    db.tables["pulsenotify_guilds"].rows.append({"guild_id": 1, "enabled": True})
+    db.tables["notify_guilds"].rows.append({"guild_id": 1, "enabled": True})
     clock_now = datetime.datetime.fromtimestamp(_NOW, datetime.timezone.utc)
     service = BillingService(
         BillingRepository(db),  # type: ignore[arg-type]
         enabled=True,
-        subscribe_url="https://pulsenotify.duoplus.org/subscribe?ref=bot",
+        subscribe_url="https://disconotify.com/subscribe?ref=bot",
         link_secret=_SECRET,
         clock=lambda: clock_now,
     )
@@ -88,7 +88,7 @@ async def test_the_service_builds_the_signed_website_link_with_the_remaining_tri
 
     parts = urlsplit(url)
     assert service.website_mode is True
-    assert (parts.scheme, parts.netloc, parts.path) == ("https", "pulsenotify.duoplus.org", "/subscribe")
+    assert (parts.scheme, parts.netloc, parts.path) == ("https", "disconotify.com", "/subscribe")
     query = parse_qs(parts.query)
     assert query["ref"] == ["bot"]
     payload = verify_link(_SECRET, query["t"][0], now=_NOW)

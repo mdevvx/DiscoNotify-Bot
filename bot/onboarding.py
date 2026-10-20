@@ -1,4 +1,4 @@
-"""What happens when PulseNotify joins a new server: make its slash commands
+"""What happens when DiscoNotify joins a new server: make its slash commands
 available there right away, start its free trial (when billing is on), and
 post an intro card with the commands needed to set it up.
 
@@ -15,18 +15,18 @@ from typing import TYPE_CHECKING, Any, Optional
 import discord
 
 from billing.access import Access, AccessReason
-from commands.pulsenotify_group import pulsenotify_group
+from commands.notify_group import notify_group
 from config import constants
 from ui import cards
 from utils.logger import get_logger
 
 if TYPE_CHECKING:
-    from bot.client import PulseNotifyBot
+    from bot.client import DiscoNotifyBot
 
 logger = get_logger(__name__)
 
 
-async def on_join(bot: "PulseNotifyBot", guild: discord.Guild) -> None:
+async def on_join(bot: "DiscoNotifyBot", guild: discord.Guild) -> None:
     """Every step is independent — one failing (e.g. no channel the bot can
     post in) never stops the others."""
     try:
@@ -55,7 +55,7 @@ async def sync_commands_to(bot: Any, guild: discord.abc.Snowflake) -> str:
     """"global" if the commands are already global (nothing to do),
     otherwise copies them into this server — visible immediately."""
     global_commands = await bot.tree.fetch_commands()
-    if any(command.name == pulsenotify_group.name for command in global_commands):
+    if any(command.name == notify_group.name for command in global_commands):
         return "global"
     bot.tree.copy_global_to(guild=guild)
     synced = await bot.tree.sync(guild=guild)
@@ -80,22 +80,22 @@ def intro_card(bot: Any, access: Optional[Access]) -> discord.ui.LayoutView:
     fields = [
         (
             "1. Add an account",
-            "`/pulsenotify account-add` → pick the platform, enter the channel or username, and choose where "
+            "`/notify account-add` → pick the platform, enter the channel or username, and choose where "
             "alerts post. *(Manage Server)*",
         ),
         (
             "2. Tune the alerts (optional)",
-            "`/pulsenotify alerts` — which alert types are on · `/pulsenotify account-set-mention` — who gets "
-            "pinged · `/pulsenotify account-set-message` — your own message",
+            "`/notify alerts` — which alert types are on · `/notify account-set-mention` — who gets "
+            "pinged · `/notify account-set-message` — your own message",
         ),
-        ("3. Check it", "`/pulsenotify status` — everything monitored here · `/pulsenotify help` — every command"),
+        ("3. Check it", "`/notify status` — everything monitored here · `/notify help` — every command"),
     ]
     if access is not None and access.reason == AccessReason.TRIAL and access.until is not None:
         fields.append(
             (
                 "Free trial",
                 f"Your {bot.settings.billing_trial_days}-day free trial has started (ends "
-                f"<t:{int(access.until.timestamp())}:D>). Keep it running with `/pulsenotify subscribe` — "
+                f"<t:{int(access.until.timestamp())}:D>). Keep it running with `/notify subscribe` — "
                 f"{bot.billing.price_label}/month, card or crypto.",
             )
         )

@@ -1,7 +1,7 @@
 """Process-level startup/shutdown orchestration.
 
 Discord connection lifecycle (login, gateway connect, per-guild readiness)
-is handled by discord.py and PulseNotifyBot.setup_hook(). What lives here is
+is handled by discord.py and DiscoNotifyBot.setup_hook(). What lives here is
 the layer above that: running the bot until something asks it to stop
 (Ctrl+C locally, SIGTERM in a container) and making sure `bot.close()` —
 which also closes the Supabase connection — always runs before the process
@@ -13,13 +13,13 @@ from __future__ import annotations
 import asyncio
 import signal
 
-from bot.client import PulseNotifyBot
+from bot.client import DiscoNotifyBot
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 
-async def run(bot: PulseNotifyBot, token: str) -> None:
+async def run(bot: DiscoNotifyBot, token: str) -> None:
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
 

@@ -269,7 +269,7 @@ class NotificationSender:
         self, channel_row: Dict[str, Any], discord_channel: Any, *, verify: bool = True
     ) -> Optional[discord.Webhook]:
         """Public (not just an internal `_send_to_channel()` helper) since
-        `/pulsenotify account-add` also calls this proactively — right when
+        `/notify account-add` also calls this proactively — right when
         a channel is first linked, rather than waiting for the first
         notification — so the admin can go rename/re-avatar the webhook in
         Discord's own UI before any alert ever uses it.

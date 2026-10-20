@@ -61,7 +61,7 @@ class FakeTree:
 
     async def sync(self, *, guild: Any = None):
         self.synced_to.append(guild)
-        return [FakeCommand("pulsenotify")]
+        return [FakeCommand("notify")]
 
 
 class FakeBilling:
@@ -101,7 +101,7 @@ async def test_commands_are_synced_to_a_new_server_when_not_global() -> None:
 
 async def test_already_global_commands_are_not_copied_again() -> None:
     """Copying global commands into a server shows each one twice there."""
-    bot = FakeBot(global_names=["pulsenotify"])
+    bot = FakeBot(global_names=["notify"])
 
     result = await onboarding.sync_commands_to(bot, FakeGuild([]))
 
@@ -137,8 +137,8 @@ def test_no_intro_channel_when_the_bot_cannot_post_anywhere() -> None:
 def test_intro_lists_the_setup_commands() -> None:
     text = plain_text(onboarding.intro_card(FakeBot(), None))
 
-    assert "Thanks for adding PulseNotify" in text
-    for command in ("/pulsenotify account-add", "/pulsenotify alerts", "/pulsenotify status", "/pulsenotify help"):
+    assert "Thanks for adding DiscoNotify" in text
+    for command in ("/notify account-add", "/notify alerts", "/notify status", "/notify help"):
         assert command in text
     assert "Free trial" not in text  # billing off
 
@@ -149,7 +149,7 @@ def test_intro_mentions_the_trial_and_price_when_billing_is_on() -> None:
     text = plain_text(onboarding.intro_card(FakeBot(billing=True), access))
 
     assert "7-day free trial has started" in text
-    assert "/pulsenotify subscribe" in text and "$2.99/month" in text
+    assert "/notify subscribe" in text and "$2.99/month" in text
 
 
 # ── the whole join ──────────────────────────────────────────────────────

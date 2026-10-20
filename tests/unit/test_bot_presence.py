@@ -1,4 +1,4 @@
-"""Which servers the bot is in right now (pulsenotify_guilds.bot_present) —
+"""Which servers the bot is in right now (notify_guilds.bot_present) —
 what the website's "pick your server" list relies on."""
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from tests.unit.fakes import FakeDatabase
 
 
 def _present(db: FakeDatabase) -> Dict[int, bool]:
-    return {int(row["guild_id"]): row["bot_present"] for row in db.tables["pulsenotify_guilds"].rows}
+    return {int(row["guild_id"]): row["bot_present"] for row in db.tables["notify_guilds"].rows}
 
 
 async def test_joining_and_leaving_flip_the_flag_and_keep_the_row() -> None:
@@ -42,7 +42,7 @@ class _Bot:
         self.guilds_repo = GuildRepository(db)  # type: ignore[arg-type]
         self.handlers: Dict[str, Any] = {}
         self.guilds: List[Any] = []
-        self.user = "PulseNotify"
+        self.user = "DiscoNotify"
         self.maintenance = type("M", (), {"active": False})()
         self.billing = None
 

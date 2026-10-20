@@ -1,4 +1,4 @@
-"""_format_usage: the parameter-hint string shown in /pulsenotify help,
+"""_format_usage: the parameter-hint string shown in /notify help,
 derived from a command's real parameters so it can't drift out of sync
 with what a subcommand actually accepts.
 
@@ -36,7 +36,7 @@ def test_no_parameters_returns_empty_usage() -> None:
 
 def test_required_parameter_shown_without_brackets() -> None:
     command = _FakeCommand(name="account-remove", parameters=[_FakeParam("account", required=True)])
-    assert _format_usage(command) == "/pulsenotify account-remove account"  # type: ignore[arg-type]
+    assert _format_usage(command) == "/notify account-remove account"  # type: ignore[arg-type]
 
 
 def test_optional_parameter_shown_in_brackets() -> None:
@@ -50,5 +50,5 @@ def test_optional_parameter_shown_in_brackets() -> None:
     )
     assert (
         _format_usage(command)  # type: ignore[arg-type]
-        == "/pulsenotify account-set-message account message [event_type]"
+        == "/notify account-set-message account message [event_type]"
     )

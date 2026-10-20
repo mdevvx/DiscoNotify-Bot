@@ -1,4 +1,4 @@
-"""`/pulsenotify subscribe` and `/pulsenotify cancel`.
+"""`/notify subscribe` and `/notify cancel`.
 
 Card payments go through Polar (billing/polar.py): `subscribe` creates a
 hosted checkout for this server and `cancel` opens Polar's customer portal,
@@ -22,7 +22,7 @@ from discord.ext import commands
 
 from billing.access import AccessReason, describe_access, parse_time
 from billing.service import BillingService, BillingUnavailable
-from commands.pulsenotify_group import pulsenotify_group
+from commands.notify_group import notify_group
 from ui import cards
 from utils.logger import get_logger
 from utils.user_messages import friendly_platform_error
@@ -93,17 +93,17 @@ async def _report_error(interaction: discord.Interaction, error: Exception) -> N
         pass
 
 
-# ── /pulsenotify subscribe ──────────────────────────────────────────────
+# ── /notify subscribe ──────────────────────────────────────────────
 
 
-@pulsenotify_group.command(name="subscribe", description="Subscribe this server to PulseNotify (monthly, card or crypto).")
+@notify_group.command(name="subscribe", description="Subscribe this server to DiscoNotify (monthly, card or crypto).")
 @app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.checks.cooldown(3, 30.0, key=lambda interaction: (interaction.guild_id, interaction.user.id))
 async def subscribe(interaction: discord.Interaction) -> None:
     assert interaction.guild is not None
     billing = _billing(interaction)
     if not billing.enabled:
-        await cards.reply(interaction, "PulseNotify is free on this server — no subscription needed.", ephemeral=True)
+        await cards.reply(interaction, "DiscoNotify is free on this server — no subscription needed.", ephemeral=True)
         return
 
     guild_id = interaction.guild.id
@@ -111,7 +111,7 @@ async def subscribe(interaction: discord.Interaction) -> None:
     row = await billing.billing_row(guild_id)
     lines = [f"This server: {describe_access(access, row, price_label=billing.price_label)}"]
     if access.reason == AccessReason.WHITELISTED:
-        await cards.reply(interaction, *lines, title="PulseNotify subscription", ephemeral=True)
+        await cards.reply(interaction, *lines, title="DiscoNotify subscription", ephemeral=True)
         return
 
     lines.append(f"**{billing.price_label}/month** per server — every feature and platform.")
@@ -124,14 +124,14 @@ async def subscribe(interaction: discord.Interaction) -> None:
         guild_name=interaction.guild.name,
     )
     if already_subscribed:
-        lines.append("💳 A card subscription is already set up — change the card or cancel it with `/pulsenotify cancel`.")
+        lines.append("💳 A card subscription is already set up — change the card or cancel it with `/notify cancel`.")
     elif website_url:
         buttons.append(_link(f"Subscribe on the website — {billing.price_label}/month", website_url, "⭐"))
         lines.append(
-            "Subscribing happens on the **PulseNotify website**: choose 💳 **card** (renews monthly by itself) or "
+            "Subscribing happens on the **DiscoNotify website**: choose 💳 **card** (renews monthly by itself) or "
             "🪙 **crypto** (prepaid for 3, 6 or 12 months), pay, and the site shows you the result right away. "
             "During the free trial your card is saved but **nothing is charged until the trial ends** — cancel "
-            "before then with `/pulsenotify cancel` and you pay nothing."
+            "before then with `/notify cancel` and you pay nothing."
         )
         lines.append("-# The link is personal to this server and works for 30 minutes — run this command again for a new one.")
     elif billing.card_available:
@@ -146,7 +146,7 @@ async def subscribe(interaction: discord.Interaction) -> None:
         buttons.append(_link(f"Subscribe by card — {billing.price_label}/month", url, "💳"))
         lines.append(
             "💳 **Card** renews monthly by itself. During the free trial your card is saved but **nothing is "
-            "charged until the trial ends** — cancel before then with `/pulsenotify cancel` and you pay nothing."
+            "charged until the trial ends** — cancel before then with `/notify cancel` and you pay nothing."
         )
 
     crypto_url = None if (website_url or already_subscribed) else billing.subscribe_url(guild_id)
@@ -162,23 +162,23 @@ async def subscribe(interaction: discord.Interaction) -> None:
     await cards.reply(
         interaction,
         *lines,
-        title="⭐ PulseNotify subscription",
+        title="⭐ DiscoNotify subscription",
         extra=[discord.ui.ActionRow(*buttons)] if buttons else (),
         ephemeral=True,
     )
 
 
-# ── /pulsenotify cancel ─────────────────────────────────────────────────
+# ── /notify cancel ─────────────────────────────────────────────────
 
 
-@pulsenotify_group.command(name="cancel", description="Cancel this server's PulseNotify subscription or change its card.")
+@notify_group.command(name="cancel", description="Cancel this server's DiscoNotify subscription or change its card.")
 @app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.checks.cooldown(3, 30.0, key=lambda interaction: (interaction.guild_id, interaction.user.id))
 async def cancel(interaction: discord.Interaction) -> None:
     assert interaction.guild is not None
     billing = _billing(interaction)
     if not billing.enabled:
-        await cards.reply(interaction, "PulseNotify is free on this server — there's nothing to cancel.", ephemeral=True)
+        await cards.reply(interaction, "DiscoNotify is free on this server — there's nothing to cancel.", ephemeral=True)
         return
 
     guild_id = interaction.guild.id
@@ -206,7 +206,7 @@ async def cancel(interaction: discord.Interaction) -> None:
             who = f"<@{payer}> (who subscribed) or the server owner" if payer else "the server owner"
             lines.append(
                 f"🔒 The billing portal shows the payer's email and card details, so only {who} can open it. "
-                "Ask them to run `/pulsenotify cancel`."
+                "Ask them to run `/notify cancel`."
             )
     await cards.reply(
         interaction,

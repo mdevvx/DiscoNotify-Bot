@@ -1,4 +1,4 @@
-# Website integration — subscribing on the PulseNotify website
+# Website integration — subscribing on the DiscoNotify website
 
 This is the spec for the website side of "website mode": people subscribe on
 your website, get a Polar checkout link, pay, and come back to a page that
@@ -11,11 +11,11 @@ creates card checkouts itself and none of this is needed.
 
 There are **two ways in**, and both end at the same checkout:
 
-- **A. From Discord** — `/pulsenotify subscribe` gives a signed link: the server is already chosen and the person already identified (section 1–2).
+- **A. From Discord** — `/notify subscribe` gives a signed link: the server is already chosen and the person already identified (section 1–2).
 - **B. Straight from the website** — "Log in with Discord", then **pick your server from a list** of the servers you manage that the bot is in. No server IDs to type (section 2B).
 
 ```
-/pulsenotify subscribe ──► "Subscribe on the website" button (signed link)
+/notify subscribe ──► "Subscribe on the website" button (signed link)
         │
         ▼
  GET /subscribe?t=<token>     verify token → show server, price, trial → [Pay by card]
@@ -30,7 +30,7 @@ There are **two ways in**, and both end at the same checkout:
         │
         ▼
  the bot lists Polar's subscriptions (≤ 1 min), activates the server and posts
- "✅ Payment received" in the channel where /pulsenotify subscribe was used
+ "✅ Payment received" in the channel where /notify subscribe was used
 ```
 
 ## What the website needs (server side — a static page can't do this)
@@ -40,7 +40,7 @@ There are **two ways in**, and both end at the same checkout:
 | `BILLING_LINK_SECRET` | The **same** random string as the bot's. Never sent to the browser. |
 | `POLAR_WEB_TOKEN` | A Polar **organization access token** with only `checkouts:write` and `checkouts:read`. Make a separate one — not the bot's token (that one can open billing portals). |
 | `POLAR_PRODUCT_ID` | The same monthly product the bot uses. |
-| `SITE_URL` | e.g. `https://pulsenotify.duoplus.org` |
+| `SITE_URL` | e.g. `https://disconotify.com` |
 | `DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET` | Only for the server picker (way B). The bot's Discord application → OAuth2: add the redirect `{SITE_URL}/auth/callback` and copy/reset the client secret. Server side only. |
 | `SESSION_SECRET` | A long random string for signing the login session cookie (way B). |
 | `SUPABASE_URL`, `SUPABASE_SERVICE_KEY` | Only for the optional "activating your server…" step below. Server side only. |
@@ -83,15 +83,15 @@ Always verify on the server, on **every** request that uses the token.
 
 ## 2. `GET /subscribe?t=…` — the page (way A)
 
-- Token invalid or expired → **warning** alert: "This link has expired. Run `/pulsenotify subscribe` in your server for a new one."
-- Valid → show the server name (`n`) — **HTML-escape it**: it's whatever the server's admin typed — the price ($2.99/month), and if `d > 0`: "Free trial: your card is saved now and **nothing is charged for `d` more days**. Cancel before then with `/pulsenotify cancel` and you pay nothing."
+- Token invalid or expired → **warning** alert: "This link has expired. Run `/notify subscribe` in your server for a new one."
+- Valid → show the server name (`n`) — **HTML-escape it**: it's whatever the server's admin typed — the price ($2.99/month), and if `d > 0`: "Free trial: your card is saved now and **nothing is charged for `d` more days**. Cancel before then with `/notify cancel` and you pay nothing."
 - A **Pay by card** button (a form that POSTs the token to `/api/checkout`) and, if you offer crypto, **Pay with crypto**.
 - Links to Terms, Privacy and Refund Policy next to the button.
 
 ## 2B. Way B — Log in with Discord and pick a server
 
 When someone opens `/subscribe` **without** a token, show **"Log in with Discord"** instead of an
-ID box. After login they see only the servers they can manage that PulseNotify is in, each with
+ID box. After login they see only the servers they can manage that DiscoNotify is in, each with
 its subscription state, and choose one.
 
 1. **Redirect to Discord:** `https://discord.com/oauth2/authorize?client_id=…&response_type=code&scope=identify%20guilds&redirect_uri={SITE_URL}/auth/callback&state=<random>&prompt=none`. Keep `state` in a short-lived `HttpOnly` cookie and check it on return (stops login CSRF).
@@ -104,15 +104,15 @@ const canManage = (g) => g.owner || (BigInt(g.permissions) & (MANAGE_GUILD | ADM
 const manageable = guilds.filter(canManage);          // g.id, g.name, g.icon; permissions is a string
 ```
 
-4. **Which of them have the bot, and their state** — two reads with the Supabase service key, server side (header `Accept-Profile: pulsenotify`):
+4. **Which of them have the bot, and their state** — two reads with the Supabase service key, server side (header `Accept-Profile: disconotify`):
 
 ```
-GET {SUPABASE_URL}/rest/v1/pulsenotify_guilds?guild_id=in.(id1,id2,…)&bot_present=eq.true&select=guild_id
-GET {SUPABASE_URL}/rest/v1/pulsenotify_billing?guild_id=in.(id1,id2,…)&select=guild_id,trial_ends_at,paid_until,whitelisted,card_status,card_cancels_at
+GET {SUPABASE_URL}/rest/v1/notify_guilds?guild_id=in.(id1,id2,…)&bot_present=eq.true&select=guild_id
+GET {SUPABASE_URL}/rest/v1/notify_billing?guild_id=in.(id1,id2,…)&select=guild_id,trial_ends_at,paid_until,whitelisted,card_status,card_cancels_at
 ```
 
-   - Servers **without** the bot: show **Add PulseNotify** → `https://discord.com/oauth2/authorize?client_id=…&scope=bot%20applications.commands&permissions=537021440&guild_id=<id>&disable_guild_select=true`.
-   - Servers **with** the bot: show the state — "Free trial — N days left", "Active until …", "Whitelisted", or "No subscription" — and a **Subscribe** button, **disabled** when `card_status` is `trialing`/`active`/`past_due` without `card_cancels_at` ("Already subscribed — manage it with `/pulsenotify cancel` in Discord"). Duplicate subscriptions mean double charges.
+   - Servers **without** the bot: show **Add DiscoNotify** → `https://discord.com/oauth2/authorize?client_id=…&scope=bot%20applications.commands&permissions=537021440&guild_id=<id>&disable_guild_select=true`.
+   - Servers **with** the bot: show the state — "Free trial — N days left", "Active until …", "Whitelisted", or "No subscription" — and a **Subscribe** button, **disabled** when `card_status` is `trialing`/`active`/`past_due` without `card_cancels_at` ("Already subscribed — manage it with `/notify cancel` in Discord"). Duplicate subscriptions mean double charges.
    - Trial days for the checkout: `max(0, ceil((trial_ends_at − now) / 1 day))`; no billing row yet → the full trial (7).
 5. **Session:** store in a server-side session (cookie `HttpOnly; Secure; SameSite=Lax`, ~30 minutes): the user's ID and name, and the list of server IDs they may subscribe. **Never trust a server ID from the browser** — `/api/checkout` must check it against that list.
 6. They choose a server → the page posts `guild_id` to `/api/checkout` (section 3). The metadata gets `guild_id` and `user_id` (from the login — so the bot thanks them, and they can open the billing portal); there's no channel, so the bot sends the confirmation to the server owner by DM, falling back to the server's system channel.
@@ -133,7 +133,7 @@ if (req.body.t) {                                     // way A
   const session = getSession(req);                    // your session lookup
   if (!session || !session.manageableGuildIds.includes(req.body.guild_id)) return res.status(403).send("Not allowed");
   guildId = req.body.guild_id; userId = session.userId;
-  trialDays = await trialDaysFor(guildId);            // from pulsenotify_billing, see 2B step 4
+  trialDays = await trialDaysFor(guildId);            // from notify_billing, see 2B step 4
 }
 
 const metadata = { guild_id: guildId };               // the bot finds the payment by this
@@ -178,9 +178,9 @@ Send `Cache-Control: no-store` on this page. Map the result:
 |---|---|---|
 | `status: "succeeded"` | ✅ **Success** | "Payment received. Your server will be switched on within about 2 minutes, and the bot confirms in your Discord channel." If `trial_end` is set: "Your card is saved — the first charge is on {trial_end date}." |
 | `status: "confirmed"` | ⚠️ **Warning** | "Your payment is being processed. Don't pay again — check Discord in a few minutes." |
-| `status: "open"`, or no `checkout_id` | ⚠️ **Warning** | "The payment wasn't completed. If you closed the checkout, run `/pulsenotify subscribe` again." |
-| `status: "expired"` | ⚠️ **Warning** | "This checkout expired. Run `/pulsenotify subscribe` in Discord for a new link." |
-| `status: "failed"` | ❌ **Error** | "The payment didn't go through and nothing was charged. Try another card from `/pulsenotify subscribe`, or contact support@…" |
+| `status: "open"`, or no `checkout_id` | ⚠️ **Warning** | "The payment wasn't completed. If you closed the checkout, run `/notify subscribe` again." |
+| `status: "expired"` | ⚠️ **Warning** | "This checkout expired. Run `/notify subscribe` in Discord for a new link." |
+| `status: "failed"` | ❌ **Error** | "The payment didn't go through and nothing was charged. Try another card from `/notify subscribe`, or contact support@…" |
 | Polar 404 / other error / your backend failing | ❌ **Error** | "We couldn't confirm your payment. If you were charged, contact support@… with your email — your payment is safe." |
 
 Use `metadata.guild_id` from the response if you want to show or check which server this was for.
@@ -190,8 +190,8 @@ Use `metadata.guild_id` from the response if you want to show or check which ser
 After a `succeeded` checkout the bot needs up to a minute to notice. The page can poll your backend every ~5 s for up to ~2 minutes and turn "Activating…" into "✅ Active". The backend reads one row (service key, server side only):
 
 ```
-GET {SUPABASE_URL}/rest/v1/pulsenotify_billing?guild_id=eq.{guild_id}&select=card_status,paid_until,trial_ends_at
-Headers: apikey: {SERVICE_KEY}, Authorization: Bearer {SERVICE_KEY}, Accept-Profile: pulsenotify
+GET {SUPABASE_URL}/rest/v1/notify_billing?guild_id=eq.{guild_id}&select=card_status,paid_until,trial_ends_at
+Headers: apikey: {SERVICE_KEY}, Authorization: Bearer {SERVICE_KEY}, Accept-Profile: disconotify
 ```
 
 Active when `card_status` is `trialing` or `active` for this checkout's server. Only use the `guild_id` from a checkout Polar confirmed as `succeeded`, return only those fields, and rate-limit it. If it doesn't turn active after ~2 minutes, show a ⚠️ warning: "Your payment is confirmed; activation is taking longer than usual — it will switch on automatically, or contact support."
@@ -200,7 +200,7 @@ Active when `card_status` is `trialing` or `active` for this checkout's server. 
 
 Same token, so the server is authenticated: create the NOWPayments payment with
 `order_id = "<guild_id>-<anything unique>"` and insert the `pending` row into
-`pulsenotify.pulsenotify_payments` as described in the README ("Payments
+`disconotify.notify_payments` as described in the README ("Payments
 setup", NOWPayments). Show a ✅ / ⚠️ / ❌ alert in the same way.
 
 ## 6. Security checklist

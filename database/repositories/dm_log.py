@@ -8,7 +8,7 @@ from typing import Optional
 
 from database.client import Database
 
-_TABLE = "pulsenotify_dm_log"
+_TABLE = "notify_dm_log"
 _MAX_ERROR = 200
 
 

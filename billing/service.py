@@ -3,9 +3,9 @@ card payments through Polar, crypto payments made on the website, and
 upgrade reminders.
 
 Pricing: BILLING_PRICE_USD per month ($2.99 by default) — it must equal the
-price of the Polar product. Card: `/pulsenotify subscribe` creates a hosted
+price of the Polar product. Card: `/notify subscribe` creates a hosted
 Polar checkout for the server (the server ID travels as metadata.guild_id)
-and `/pulsenotify cancel` opens Polar's customer portal. Crypto
+and `/notify cancel` opens Polar's customer portal. Crypto
 (NOWPayments) is prepaid in 3/6/12-month blocks, paid on the website
 (BILLING_SUBSCRIBE_URL).
 
@@ -19,7 +19,7 @@ them with the provider itself:
   a server it's in, and then refreshes each known subscription every few
   minutes (renewals, cancellations);
 - crypto: the website creates the NOWPayments payment and inserts a
-  `pending` row in pulsenotify_payments (guild_id, provider 'nowpayments',
+  `pending` row in notify_payments (guild_id, provider 'nowpayments',
   external_id = payment_id, months, amount_usd); the poller checks it with
   NOWPayments and credits the months once it's paid.
 """
@@ -56,7 +56,7 @@ _ACCESS_CACHE_TTL = datetime.timedelta(seconds=60)
 # After the first full scan, look this far back for new card subscriptions.
 _CARD_DISCOVERY_LOOKBACK = datetime.timedelta(days=3)
 _ACTIVE_CARD_STATUSES = frozenset({"active", "past_due", "trialing"})
-# A checkout link is reused for this long, so /pulsenotify subscribe pressed
+# A checkout link is reused for this long, so /notify subscribe pressed
 # repeatedly (or by many admins) makes one Polar API call, not one each.
 _CHECKOUT_CACHE_TTL = datetime.timedelta(minutes=10)
 _MAX_ID_DIGITS = 19  # a Discord snowflake fits a bigint
@@ -269,7 +269,7 @@ class BillingService:
         """A fresh hosted Polar checkout for this server. During the free
         trial the card is saved and the first charge is when the trial ends;
         afterwards it's charged straight away. `user_id`/`channel_id` (who
-        ran /pulsenotify subscribe, and where) travel with the subscription,
+        ran /notify subscribe, and where) travel with the subscription,
         so the confirmation is posted back in that channel."""
         if self._polar is None or self._polar_product_id is None:
             raise BillingUnavailable("Card payments aren't available yet. Please check back soon.")
@@ -487,7 +487,7 @@ class BillingService:
         if not subscription_id:
             return
         if guild_id is None:
-            self._known_subscriptions.add(subscription_id)  # not a PulseNotify server checkout
+            self._known_subscriptions.add(subscription_id)  # not a DiscoNotify server checkout
             return
         row = await self._repo.get(guild_id)
         if row is not None and row.get("card_subscription_id") == subscription_id:

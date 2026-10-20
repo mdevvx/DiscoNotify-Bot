@@ -157,40 +157,40 @@ class FakeDatabase:
 
     def __init__(self) -> None:
         self.tables: Dict[str, FakeTable] = {
-            "pulsenotify_guilds": FakeTable(unique_on=[("guild_id",)], defaults={"enabled": True, "bot_present": True}),
-            "pulsenotify_platform_accounts": FakeTable(
+            "notify_guilds": FakeTable(unique_on=[("guild_id",)], defaults={"enabled": True, "bot_present": True}),
+            "notify_platform_accounts": FakeTable(
                 unique_on=[("id",), ("guild_id", "platform", "platform_account_id")],
                 defaults={"enabled": True, "status": "active", "consecutive_failures": 0, "content_cursor": None},
                 has_generated_id=True,
             ),
-            "pulsenotify_events": FakeTable(
+            "notify_events": FakeTable(
                 unique_on=[("account_id", "event_type", "platform_event_id")],
                 defaults={"notified": False, "metadata": {}},
                 has_generated_id=True,
             ),
-            "pulsenotify_live_states": FakeTable(unique_on=[("account_id",)], defaults={"is_live": False}),
-            "pulsenotify_notification_channels": FakeTable(
+            "notify_live_states": FakeTable(unique_on=[("account_id",)], defaults={"is_live": False}),
+            "notify_notification_channels": FakeTable(
                 unique_on=[("id",), ("guild_id", "channel_id")],
                 defaults={"is_valid": True, "name": None, "webhook_url": None},
                 has_generated_id=True,
             ),
-            "pulsenotify_account_channels": FakeTable(unique_on=[("account_id", "channel_id")]),
-            "pulsenotify_alert_configurations": FakeTable(
+            "notify_account_channels": FakeTable(unique_on=[("account_id", "channel_id")]),
+            "notify_alert_configurations": FakeTable(
                 unique_on=[("id",), ("account_id", "event_type")],
                 defaults={"enabled": True, "mention_role_id": None, "embed_enabled": True, "custom_message": None},
                 has_generated_id=True,
             ),
-            "pulsenotify_billing": FakeTable(
+            "notify_billing": FakeTable(
                 unique_on=[("guild_id",)], defaults={"whitelisted": False, "paid_until": None, "reminders_sent": 0}
             ),
-            "pulsenotify_bot_state": FakeTable(unique_on=[("key",)]),
-            "pulsenotify_payments": FakeTable(
+            "notify_bot_state": FakeTable(unique_on=[("key",)]),
+            "notify_payments": FakeTable(
                 unique_on=[("provider", "external_id")],
                 defaults={"status": "pending", "metadata": dict, "created_at": _now_iso},
                 has_generated_id=True,
             ),
-            "pulsenotify_dm_log": FakeTable(unique_on=[], defaults={"created_at": _now_iso, "error": None, "payment_id": None}),
-            "pulsenotify_platform_health": FakeTable(
+            "notify_dm_log": FakeTable(unique_on=[], defaults={"created_at": _now_iso, "error": None, "payment_id": None}),
+            "notify_platform_health": FakeTable(
                 unique_on=[("platform",)],
                 defaults={
                     "status": "disabled",

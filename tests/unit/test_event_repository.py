@@ -64,6 +64,6 @@ async def test_mark_notified_sets_notified_flag(repo: EventRepository) -> None:
     await repo.mark_notified(row["id"])
 
     fake_db = repo._db  # type: ignore[attr-defined]
-    stored = fake_db.tables["pulsenotify_events"].rows[0]
+    stored = fake_db.tables["notify_events"].rows[0]
     assert stored["notified"] is True
     assert stored["notified_at"] is not None

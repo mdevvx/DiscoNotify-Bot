@@ -2,7 +2,7 @@
 
 Polar is a merchant of record: it charges the customer, handles sales tax
 and pays the seller out. The flow:
-- `/pulsenotify subscribe` creates a Checkout Session for the server
+- `/notify subscribe` creates a Checkout Session for the server
   (POST /checkouts/) with metadata.guild_id and a trial of the days the
   server has left. Polar hosts the payment page;
 - once it's paid, the subscription carries that metadata, and the bot finds

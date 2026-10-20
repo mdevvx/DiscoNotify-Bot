@@ -1,10 +1,10 @@
-"""`/pulsenotify status` and `/pulsenotify global status`.
+"""`/notify status` and `/notify global status`.
 
-- `/pulsenotify status` — this server only: whether monitoring is on, and
+- `/notify status` — this server only: whether monitoring is on, and
   for every account it monitors: the account (linked), where its alerts
   post, how many alert types are on, who gets pinged, whether it's live,
   when it was last checked and when its last alert went out.
-- `/pulsenotify global status` — the bot as a whole: uptime, latency,
+- `/notify global status` — the bot as a whole: uptime, latency,
   server count, database, and every platform's health.
 
 Only reports what's actually true right now — nothing is fabricated for
@@ -20,7 +20,7 @@ import discord
 from discord.ext import commands
 
 from billing.access import subscription_details
-from commands.pulsenotify_group import global_group, pulsenotify_group
+from commands.notify_group import global_group, notify_group
 from config import constants
 from database.repositories.events import EventRepository
 from database.repositories.live_states import LiveStateRepository
@@ -43,11 +43,11 @@ _MORE_LINE_ROOM = 80  # kept free for each platform's "…and N more" line
 _MAX_ERROR_LENGTH = 120
 
 
-# ── /pulsenotify status (this server) ───────────────────────────────────
+# ── /notify status (this server) ───────────────────────────────────
 
 
-@pulsenotify_group.command(
-    name="status", description="Show what PulseNotify monitors in this server and how each account is doing."
+@notify_group.command(
+    name="status", description="Show what DiscoNotify monitors in this server and how each account is doing."
 )
 async def status(interaction: discord.Interaction) -> None:
     bot = interaction.client
@@ -67,7 +67,7 @@ async def status(interaction: discord.Interaction) -> None:
         configs_by_account.setdefault(config["account_id"], []).append(config)
 
     channel_ids = {channel["channel_id"] for rows in channels_by_account.values() for channel in rows}
-    state = "🟢 Monitoring **on**" if enabled else "🔴 Monitoring **paused** — `/pulsenotify toggle` to resume"
+    state = "🟢 Monitoring **on**" if enabled else "🔴 Monitoring **paused** — `/notify toggle` to resume"
     overview = f"{state} · **{len(accounts)}** account(s) · **{len(channel_ids)}** alert channel(s)"
     billing = bot.billing  # type: ignore[attr-defined]
     fields = []
@@ -80,7 +80,7 @@ async def status(interaction: discord.Interaction) -> None:
 
     # Discord rejects a message over 4,000 characters, so account lines are
     # added only while they fit (25 accounts with long error notes came to
-    # ~7,500); the rest are counted and pointed to /pulsenotify account-list.
+    # ~7,500); the rest are counted and pointed to /notify account-list.
     budget = _TEXT_BUDGET - len(overview) - sum(len(name) + len(value) for name, value in fields)
     budget -= len(guild.name) + len(_format_intervals(intervals, accounts)) + 100
     for platform in _ordered_platforms(accounts):
@@ -100,7 +100,7 @@ async def status(interaction: discord.Interaction) -> None:
             lines.append(line)
             budget -= len(line) + 1
         if len(rows) > len(lines):
-            more = f"-# …and {len(rows) - len(lines)} more — `/pulsenotify account-list`"
+            more = f"-# …and {len(rows) - len(lines)} more — `/notify account-list`"
             lines.append(more)
             budget -= len(more) + 1
         label = _PLATFORM_LABELS.get(platform, platform.title())
@@ -110,7 +110,7 @@ async def status(interaction: discord.Interaction) -> None:
 
     body = [overview]
     if not accounts:
-        body.append("No accounts monitored yet — add one with `/pulsenotify account-add`.")
+        body.append("No accounts monitored yet — add one with `/notify account-add`.")
 
     await cards.reply(
         interaction,
@@ -221,10 +221,10 @@ def _relative(iso_time: Optional[str]) -> Optional[str]:
     return f"<t:{int(moment.timestamp())}:R>"
 
 
-# ── /pulsenotify global status ──────────────────────────────────────────
+# ── /notify global status ──────────────────────────────────────────
 
 
-@global_group.command(name="status", description="Bot owner only: PulseNotify's health across every server.")
+@global_group.command(name="status", description="Bot owner only: DiscoNotify's health across every server.")
 async def global_status(interaction: discord.Interaction) -> None:
     bot = interaction.client
     # Bot owners: the Discord application's owner/team plus DISCORD_OWNER_IDS
@@ -254,7 +254,7 @@ async def global_status(interaction: discord.Interaction) -> None:
             ("Database", "🟢 Connected" if db_connected else "🔴 Disconnected"),
             ("Platform Monitoring", platform_status),
         ],
-        footer=f"{constants.BOT_NAME} v{constants.BOT_VERSION} · /pulsenotify status shows this server only",
+        footer=f"{constants.BOT_NAME} v{constants.BOT_VERSION} · /notify status shows this server only",
         ephemeral=True,
     )
 
@@ -267,7 +267,7 @@ async def _format_platform_health(bot: commands.Bot) -> str:
 
     Account counts are queried fresh from the database rather than read
     from PlatformScheduler's cached worker count — that cache only
-    refreshes once per poll cycle, so right after /pulsenotify account-add
+    refreshes once per poll cycle, so right after /notify account-add
     it would otherwise still show the pre-add count until the next cycle ran.
     """
     registered = bot.monitoring.registered_platforms  # type: ignore[attr-defined]
@@ -318,6 +318,6 @@ def _format_uptime(started_at: "datetime.datetime | None") -> str:
 
 
 async def setup(bot: commands.Bot) -> None:
-    """No Cog needed — both commands attach to the shared pulsenotify_group
+    """No Cog needed — both commands attach to the shared notify_group
     at import time (the decorators above); bot/client.py registers that
     group to the tree once, after every command-contributing extension loads."""

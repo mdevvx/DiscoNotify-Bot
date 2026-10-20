@@ -1,5 +1,5 @@
 """Where billing meets the rest of the bot: the monitoring scheduler only
-polls servers that may be monitored (fixes /pulsenotify toggle off never
+polls servers that may be monitored (fixes /notify toggle off never
 actually pausing anything), the command gate, and the billing commands."""
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Set
 import pytest
 
 from billing.access import Access, AccessReason
-from bot.client import PulseNotifyCommandTree
+from bot.client import DiscoNotifyCommandTree
 from commands.admin.billing import cancel, subscribe
 from commands.admin.whitelist import WhitelistCog
 from tests.unit.fake_interactions import FakeFollowup, FakeResponse, FakeUser
@@ -97,7 +97,7 @@ class FakeBilling:
         self.whitelisted: List[int] = []
         self.reason = AccessReason.TRIAL if allowed else AccessReason.EXPIRED
         self.row: Any = None
-        self.site: Optional[str] = "https://pulsenotify.duoplus.org/crypto"
+        self.site: Optional[str] = "https://disconotify.com/crypto"
         self.checkouts: List[Dict[str, Any]] = []
         self.portal_for: List[int] = []
         self.payer: Optional[int] = 5
@@ -197,20 +197,20 @@ class FakeTree:
 
 async def _check(bot: FakeBot, command: str) -> "tuple[bool, FakeInteraction]":
     interaction = FakeInteraction(bot, command)
-    allowed = await PulseNotifyCommandTree.interaction_check(FakeTree(bot), interaction)  # type: ignore[arg-type]
+    allowed = await DiscoNotifyCommandTree.interaction_check(FakeTree(bot), interaction)  # type: ignore[arg-type]
     return allowed, interaction
 
 
 async def test_a_server_without_access_is_told_to_subscribe() -> None:
-    allowed, interaction = await _check(FakeBot(allowed=False), "pulsenotify account-add")
+    allowed, interaction = await _check(FakeBot(allowed=False), "notify account-add")
 
     reply = interaction.response.messages[0]
     assert allowed is False
     assert reply["ephemeral"] is True
     assert "Subscription needed" in reply["content"]
-    assert "/pulsenotify subscribe" in reply["content"] and "$1/month" in reply["content"]
+    assert "/notify subscribe" in reply["content"] and "$1/month" in reply["content"]
     assert "every setting is kept" in reply["content"]
-    assert _link_urls(reply["view"]) == []  # the message points to /pulsenotify subscribe, which creates the checkout
+    assert _link_urls(reply["view"]) == []  # the message points to /notify subscribe, which creates the checkout
 
 
 def _link_urls(view: Any) -> List[str]:
@@ -238,7 +238,7 @@ def test_subscription_needed_says_what_ended() -> None:
 
 
 async def test_maintenance_blocks_every_command_for_members() -> None:
-    for command in ("pulsenotify account-add", "pulsenotify status", "pulsenotify subscribe"):
+    for command in ("notify account-add", "notify status", "notify subscribe"):
         allowed, interaction = await _check(FakeBot(maintenance=True), command)
 
         reply = interaction.response.messages[0]
@@ -249,18 +249,18 @@ async def test_maintenance_blocks_every_command_for_members() -> None:
 
 async def test_the_owner_can_still_use_commands_during_maintenance() -> None:
     bot = FakeBot(maintenance=True)
-    interaction = FakeInteraction(bot, "pulsenotify account-add", user_id=_OWNER)
+    interaction = FakeInteraction(bot, "notify account-add", user_id=_OWNER)
 
-    allowed = await PulseNotifyCommandTree.interaction_check(FakeTree(bot), interaction)  # type: ignore[arg-type]
+    allowed = await DiscoNotifyCommandTree.interaction_check(FakeTree(bot), interaction)  # type: ignore[arg-type]
 
     assert allowed is True
 
 
 async def test_maintenance_pauses_monitoring_everywhere() -> None:
-    from bot.client import PulseNotifyBot
+    from bot.client import DiscoNotifyBot
 
     bot = FakeBot(maintenance=True)
-    allowed = await PulseNotifyBot._monitorable_guilds(bot, {1, 2, 3})  # type: ignore[arg-type]
+    allowed = await DiscoNotifyBot._monitorable_guilds(bot, {1, 2, 3})  # type: ignore[arg-type]
 
     assert allowed == set()
 
@@ -315,7 +315,7 @@ async def test_a_missing_state_table_means_not_in_maintenance() -> None:
 
     class BrokenRepo:
         async def get(self, key: str) -> Any:
-            raise RuntimeError("relation pulsenotify_bot_state does not exist")
+            raise RuntimeError("relation notify_bot_state does not exist")
 
     state = Maintenance(BrokenRepo())  # type: ignore[arg-type]
     await state.load()
@@ -356,12 +356,12 @@ async def test_maintenance_on_asks_to_confirm_and_only_confirm_turns_it_on() -> 
 @pytest.mark.parametrize(
     "command",
     [
-        "pulsenotify subscribe",
-        "pulsenotify cancel",
-        "pulsenotify status",
-        "pulsenotify help",
-        "pulsenotify toggle",
-        "pulsenotify global status",
+        "notify subscribe",
+        "notify cancel",
+        "notify status",
+        "notify help",
+        "notify toggle",
+        "notify global status",
     ],
 )
 async def test_billing_and_owner_commands_always_work(command: str) -> None:
@@ -371,7 +371,7 @@ async def test_billing_and_owner_commands_always_work(command: str) -> None:
 
 
 async def test_a_server_with_access_can_use_everything() -> None:
-    allowed, _ = await _check(FakeBot(allowed=True), "pulsenotify account-add")
+    allowed, _ = await _check(FakeBot(allowed=True), "notify account-add")
 
     assert allowed is True
 
@@ -399,23 +399,23 @@ async def test_subscribe_creates_a_card_checkout_for_this_server_and_links_crypt
     assert reply["ephemeral"] is True  # the checkout link is for the person who asked
     assert _link_urls(reply["view"]) == [
         "https://buy.polar.sh/co_1",
-        "https://pulsenotify.duoplus.org/crypto?guild_id=1",
+        "https://disconotify.com/crypto?guild_id=1",
     ]
     assert bot.billing.checkouts == [{"guild_id": 1, "user_id": 5, "channel_id": 555}]
     assert "$1/month" in reply["content"] and "nothing is charged until the trial ends" in reply["content"]
-    assert "`/pulsenotify cancel`" in reply["content"]
+    assert "`/notify cancel`" in reply["content"]
 
 
 async def test_subscribe_in_website_mode_gives_one_signed_link_and_creates_no_checkout() -> None:
     bot = FakeBot()
-    bot.billing.website = "https://pulsenotify.duoplus.org/subscribe"
+    bot.billing.website = "https://disconotify.com/subscribe"
     interaction = FakeInteraction(bot)
 
     await subscribe.callback(interaction)  # type: ignore[arg-type]
 
     reply = interaction.response.messages[0]
     assert reply["ephemeral"] is True
-    assert _link_urls(reply["view"]) == ["https://pulsenotify.duoplus.org/subscribe?t=signed.token"]
+    assert _link_urls(reply["view"]) == ["https://disconotify.com/subscribe?t=signed.token"]
     assert bot.billing.checkouts == []  # the website creates the checkout
     assert bot.billing.website_links == [{"guild_id": 1, "user_id": 5, "channel_id": 555, "guild_name": "Custom Bots"}]
     assert "website" in reply["content"] and "works for 30 minutes" in reply["content"]
@@ -423,7 +423,7 @@ async def test_subscribe_in_website_mode_gives_one_signed_link_and_creates_no_ch
 
 async def test_website_mode_adds_no_second_subscription_button_for_a_running_card_subscription() -> None:
     bot = FakeBot()
-    bot.billing.website = "https://pulsenotify.duoplus.org/subscribe"
+    bot.billing.website = "https://disconotify.com/subscribe"
     bot.billing.reason = AccessReason.PAID
     bot.billing.row = {"card_status": "active", "card_customer_id": "cus_1"}
     interaction = FakeInteraction(bot)
@@ -611,12 +611,12 @@ def _discord_error(code: int, status: int = 403) -> Exception:
 
 
 def _dm_bot(recipient: Any, dm_log: Any) -> Any:
-    from bot.client import PulseNotifyBot
+    from bot.client import DiscoNotifyBot
 
     bot = type("B", (), {})()
     bot.get_user = lambda user_id: recipient
     bot.dm_log = dm_log
-    bot._dm_user = PulseNotifyBot._dm_user.__get__(bot)
+    bot._dm_user = DiscoNotifyBot._dm_user.__get__(bot)
     return bot
 
 
@@ -648,7 +648,7 @@ async def test_any_other_dm_error_is_logged_as_failed_with_a_short_reason() -> N
 async def test_a_dm_still_goes_out_when_the_log_cant_be_written() -> None:
     class Down(_DmLog):
         async def add(self, **row: Any) -> None:
-            raise RuntimeError("relation pulsenotify_dm_log does not exist")
+            raise RuntimeError("relation notify_dm_log does not exist")
 
     recipient = _Recipient()
     assert await _dm_bot(recipient, Down())._dm_user(5, object(), guild_id=1, kind="payment_success") is True
@@ -656,7 +656,7 @@ async def test_a_dm_still_goes_out_when_the_log_cant_be_written() -> None:
 
 
 async def test_an_abandoned_checkout_is_dmed_once_and_never_again() -> None:
-    from bot.client import PulseNotifyBot
+    from bot.client import DiscoNotifyBot
 
     payments = [
         {"id": "p-new", "guild_id": 1, "requested_by": 5},
@@ -673,7 +673,7 @@ async def test_an_abandoned_checkout_is_dmed_once_and_never_again() -> None:
     bot.billing = Billing(allowed=False)
     bot.billing.website = None
     bot.get_guild = lambda guild_id: type("G", (), {"id": guild_id, "name": "Gaming Hub"})()
-    bot.send_abandoned_checkout_reminders = PulseNotifyBot.send_abandoned_checkout_reminders.__get__(bot)
+    bot.send_abandoned_checkout_reminders = DiscoNotifyBot.send_abandoned_checkout_reminders.__get__(bot)
 
     await bot.send_abandoned_checkout_reminders()
 
@@ -682,7 +682,7 @@ async def test_an_abandoned_checkout_is_dmed_once_and_never_again() -> None:
 
 
 async def test_the_server_owner_is_dmed_an_upgrade_reminder_with_the_link() -> None:
-    from bot.client import PulseNotifyBot
+    from bot.client import DiscoNotifyBot
     from ui.cards import plain_text
 
     owner = _Recipient()
@@ -706,7 +706,7 @@ async def test_the_server_owner_is_dmed_an_upgrade_reminder_with_the_link() -> N
     bot.get_user = lambda user_id: owner
     bot.dm_log = _DmLog()
     for name in ("send_upgrade_reminders", "_reminder_card", "_dm_owner", "_dm_user"):
-        setattr(bot, name, getattr(PulseNotifyBot, name).__get__(bot))
+        setattr(bot, name, getattr(DiscoNotifyBot, name).__get__(bot))
 
     await bot.send_upgrade_reminders()
 
@@ -717,7 +717,7 @@ async def test_the_server_owner_is_dmed_an_upgrade_reminder_with_the_link() -> N
     assert "trial has ended" in text and "Gaming Hub" in text
     assert _link_urls(owner.sent[0]) == [
         "https://buy.polar.sh/co_1",
-        "https://pulsenotify.duoplus.org/crypto?guild_id=1",
+        "https://disconotify.com/crypto?guild_id=1",
     ]
     assert marked == [1]
 
@@ -743,12 +743,12 @@ class FakeCtx:
 async def test_whitelist_is_a_text_command_not_in_the_slash_menu() -> None:
     """Discord can't hide a slash subcommand from individual users, so the
     owner's whitelist must not be one."""
-    from commands.pulsenotify_group import pulsenotify_group
+    from commands.notify_group import notify_group
     from discord import app_commands
 
-    import commands.admin.billing  # noqa: F401  (registers /pulsenotify subscribe)
+    import commands.admin.billing  # noqa: F401  (registers /notify subscribe)
 
-    names = [c.qualified_name for c in pulsenotify_group.walk_commands() if isinstance(c, app_commands.Command)]
+    names = [c.qualified_name for c in notify_group.walk_commands() if isinstance(c, app_commands.Command)]
     assert not any("whitelist" in name for name in names)
 
 
@@ -817,7 +817,7 @@ async def test_every_alert_off_means_configs_exist_and_none_are_on() -> None:
     repo = AlertConfigurationRepository(db)  # type: ignore[arg-type]
     await repo.seed_defaults(1, "all-off", ["video_published", "short_published"])
     await repo.seed_defaults(1, "one-on", ["video_published", "short_published"])
-    for row in db.tables["pulsenotify_alert_configurations"].rows:
+    for row in db.tables["notify_alert_configurations"].rows:
         if row["account_id"] == "all-off" or row["event_type"] == "short_published":
             row["enabled"] = False
 

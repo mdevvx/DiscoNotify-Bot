@@ -53,4 +53,4 @@ async def test_is_enabled_only_creates_one_row_per_guild(repo: GuildRepository) 
     await repo.is_enabled(123)
 
     fake_db = repo._db  # type: ignore[attr-defined]
-    assert len(fake_db.tables["pulsenotify_guilds"].rows) == 1
+    assert len(fake_db.tables["notify_guilds"].rows) == 1

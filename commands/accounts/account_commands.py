@@ -1,12 +1,12 @@
-"""`/pulsenotify account-add|account-remove|account-list|account-set-message|
+"""`/notify account-add|account-remove|account-list|account-set-message|
 account-set-mention|account-info|alerts` — account registration (Phase 4)
 plus per-account alert configuration (Phase 4's account-set-message, and
 Phase 8's account-set-mention/alerts/account-info).
 
-Flattened as direct subcommands of the shared pulsenotify_group rather
+Flattened as direct subcommands of the shared notify_group rather
 than nested under their own "account" subcommand group: Discord doesn't
 allow mixing plain subcommands and subcommand groups as siblings under
-the same parent, and `/pulsenotify toggle`/`status` are plain subcommands
+the same parent, and `/notify toggle`/`status` are plain subcommands
 — so these are too, for consistency and to avoid that conflict.
 
 Platform-agnostic by design (section 52) — the `platform` choice list is
@@ -36,7 +36,7 @@ from commands.accounts.modals import (
     CustomMessageModal,
     MentionModal,
 )
-from commands.pulsenotify_group import pulsenotify_group
+from commands.notify_group import notify_group
 from notifications.templates import format_role_mention
 from ui import cards
 from utils.logger import get_logger
@@ -114,7 +114,7 @@ async def _account_autocomplete(interaction: discord.Interaction, current: str) 
     ]
 
 
-@pulsenotify_group.command(
+@notify_group.command(
     name="account-add", description="Start monitoring a platform account and post alerts to a channel."
 )
 @app_commands.describe(platform="Which platform to monitor — a form opens for the details")
@@ -124,7 +124,7 @@ async def account_add(interaction: discord.Interaction, platform: app_commands.C
     await interaction.response.send_modal(AddAccountModal(platform.value))
 
 
-@pulsenotify_group.command(name="account-remove", description="Stop monitoring an account.")
+@notify_group.command(name="account-remove", description="Stop monitoring an account.")
 @app_commands.describe(account="The account to stop monitoring")
 @app_commands.autocomplete(account=_account_autocomplete)
 @app_commands.checks.has_permissions(manage_guild=True)
@@ -213,7 +213,7 @@ class RemoveAccountConfirmView(discord.ui.LayoutView):
             pass  # the prompt was dismissed; nothing to update
 
 
-@pulsenotify_group.command(name="account-list", description="List accounts being monitored in this server.")
+@notify_group.command(name="account-list", description="List accounts being monitored in this server.")
 async def account_list(interaction: discord.Interaction) -> None:
     assert interaction.guild is not None
     bot = interaction.client
@@ -221,7 +221,7 @@ async def account_list(interaction: discord.Interaction) -> None:
     if not accounts:
         await cards.reply(
             interaction,
-            "No accounts are being monitored in this server yet. Use `/pulsenotify account-add` to add one.",
+            "No accounts are being monitored in this server yet. Use `/notify account-add` to add one.",
             title="Monitored Accounts",
             ephemeral=True,
         )
@@ -236,7 +236,7 @@ async def account_list(interaction: discord.Interaction) -> None:
     await cards.reply(interaction, "\n".join(lines), title="Monitored Accounts", footer=f"{len(accounts)} account(s)")
 
 
-@pulsenotify_group.command(
+@notify_group.command(
     name="account-set-message", description="Set a custom notification message for an account (opens a form)."
 )
 @app_commands.describe(account="The account to customize")
@@ -248,7 +248,7 @@ async def account_set_message(interaction: discord.Interaction, account: str) ->
         await interaction.response.send_modal(CustomMessageModal(*resolved))
 
 
-@pulsenotify_group.command(
+@notify_group.command(
     name="account-set-mention", description="Choose who an account's alerts mention (opens a form)."
 )
 @app_commands.describe(account="The account to configure")
@@ -261,7 +261,7 @@ async def account_set_mention(interaction: discord.Interaction, account: str) ->
         await interaction.response.send_modal(MentionModal(*resolved, guild_id=interaction.guild.id))
 
 
-@pulsenotify_group.command(
+@notify_group.command(
     name="alerts", description="Turn an account's alert types and embeds on or off (opens a form)."
 )
 @app_commands.describe(account="The account to configure")
@@ -273,7 +273,7 @@ async def alerts(interaction: discord.Interaction, account: str) -> None:
         await interaction.response.send_modal(AlertsModal(*resolved))
 
 
-@pulsenotify_group.command(
+@notify_group.command(
     name="account-info", description="Show an account's full alert configuration — per event type."
 )
 @app_commands.describe(account="The account to inspect")
@@ -309,5 +309,5 @@ async def account_info(interaction: discord.Interaction, account: str) -> None:
 
 
 async def setup(bot: commands.Bot) -> None:
-    """No Cog needed — these attach to the shared pulsenotify_group at
+    """No Cog needed — these attach to the shared notify_group at
     import time (the decorators above)."""

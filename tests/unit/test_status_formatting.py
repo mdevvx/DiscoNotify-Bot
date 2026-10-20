@@ -2,7 +2,7 @@
 must never fabricate data for unregistered platforms or unset quota
 fields (section 14: no sensitive/fabricated internal info), and must
 reflect the database's current state rather than a stale scheduler cache
-(a real bug: right after /pulsenotify account-add, the scheduler's own
+(a real bug: right after /notify account-add, the scheduler's own
 worker-count cache doesn't refresh until its next poll cycle, up to 60s
 later — /status must not show a stale pre-add count in that window)."""
 

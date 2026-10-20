@@ -1,4 +1,4 @@
-"""`/pulsenotify help` — every command, grouped by what people want to do,
+"""`/notify help` — every command, grouped by what people want to do,
 one short line each, with the subscription highlighted at the top.
 
 The groups and short descriptions are written for readability, but the
@@ -16,15 +16,15 @@ from discord import app_commands
 from discord.ext import commands
 
 from billing.access import describe_access
-from commands.pulsenotify_group import pulsenotify_group
+from commands.notify_group import notify_group
 from config import constants
 from ui import cards
 
-# Every `/pulsenotify global …` command is bot-owner only: hidden from
-# /pulsenotify help for everyone else (the commands refuse non-owners too).
-OWNER_ONLY_PREFIX = "pulsenotify global "
+# Every `/notify global …` command is bot-owner only: hidden from
+# /notify help for everyone else (the commands refuse non-owners too).
+OWNER_ONLY_PREFIX = "notify global "
 
-# (section title, [(command name under /pulsenotify, one-line description)])
+# (section title, [(command name under /notify, one-line description)])
 _SECTIONS: Sequence[Tuple[str, Sequence[Tuple[str, str]]]] = (
     (
         "🚀 Get started",
@@ -49,7 +49,7 @@ _SECTIONS: Sequence[Tuple[str, Sequence[Tuple[str, str]]]] = (
             ("account-remove", "Stop monitoring an account"),
         ),
     ),
-    ("⚙️ Server", (("toggle", "Pause or resume PulseNotify in this server"),)),
+    ("⚙️ Server", (("toggle", "Pause or resume DiscoNotify in this server"),)),
 )
 
 # Shown with 🛡️ — they need the Manage Server permission.
@@ -66,12 +66,12 @@ _ADMIN_COMMANDS = {
 _HIDDEN = {"help", "subscribe", "cancel"}  # these have their own box at the top
 
 
-@pulsenotify_group.command(name="help", description="Show all PulseNotify commands and what they do.")
+@notify_group.command(name="help", description="Show all DiscoNotify commands and what they do.")
 async def help_command(interaction: discord.Interaction) -> None:
     bot = interaction.client
     registered = {
         command.qualified_name: command
-        for command in pulsenotify_group.walk_commands()
+        for command in notify_group.walk_commands()
         if isinstance(command, app_commands.Command)
     }
     is_owner = await bot.is_owner(interaction.user)  # type: ignore[attr-defined]
@@ -81,12 +81,12 @@ async def help_command(interaction: discord.Interaction) -> None:
     if subscribe_box is not None:
         view.add_item(subscribe_box)
 
-    blocks: List[str] = ["Every command starts with `/pulsenotify`. 🛡️ = needs the **Manage Server** permission."]
+    blocks: List[str] = ["Every command starts with `/notify`. 🛡️ = needs the **Manage Server** permission."]
     listed = set()
     for title, entries in _SECTIONS:
         lines = []
         for name, description in entries:
-            qualified = f"pulsenotify {name}"
+            qualified = f"notify {name}"
             if qualified not in registered:
                 continue
             listed.add(qualified)
@@ -96,7 +96,7 @@ async def help_command(interaction: discord.Interaction) -> None:
 
     extra_lines = []
     for qualified, command in sorted(registered.items()):
-        name = qualified.removeprefix("pulsenotify ")
+        name = qualified.removeprefix("notify ")
         if qualified in listed or name in _HIDDEN or qualified.startswith(OWNER_ONLY_PREFIX):
             continue
         extra_lines.append(_line(name, command.description or ""))
@@ -110,7 +110,7 @@ async def help_command(interaction: discord.Interaction) -> None:
         cards.container(
             *blocks,
             title=f"📖 {constants.BOT_NAME} help",
-            footer=f"{constants.BOT_NAME} v{constants.BOT_VERSION} · pulsenotify.duoplus.org",
+            footer=f"{constants.BOT_NAME} v{constants.BOT_VERSION} · disconotify.com",
         )
     )
     await cards.reply(interaction, view=view, ephemeral=True)
@@ -118,7 +118,7 @@ async def help_command(interaction: discord.Interaction) -> None:
 
 def _line(name: str, description: str) -> str:
     shield = " 🛡️" if name in _ADMIN_COMMANDS else ""
-    return f"`/pulsenotify {name}`{shield} — {description}"
+    return f"`/notify {name}`{shield} — {description}"
 
 
 async def _subscribe_box(interaction: discord.Interaction) -> Optional[discord.ui.Container]:
@@ -129,9 +129,9 @@ async def _subscribe_box(interaction: discord.Interaction) -> Optional[discord.u
     access = await billing.access(interaction.guild.id)
     row = await billing.billing_row(interaction.guild.id)
     return cards.container(
-        f"**`/pulsenotify subscribe`** 🛡️ — keep alerts running in this server: **{billing.price_label}/month**, "
+        f"**`/notify subscribe`** 🛡️ — keep alerts running in this server: **{billing.price_label}/month**, "
         "card or crypto.",
-        "`/pulsenotify cancel` 🛡️ — cancel any time; paid time is never cut short.",
+        "`/notify cancel` 🛡️ — cancel any time; paid time is never cut short.",
         f"This server: {describe_access(access, row, price_label=billing.price_label)}",
         title="⭐ Subscription",
         tone=cards.WARNING if not access.allowed else cards.INFO,
@@ -150,7 +150,7 @@ def _owner_section(bot: discord.Client, registered: Dict[str, app_commands.Comma
     lines += [
         f"`{prefix}sync [global]` — sync slash commands",
         f"`{prefix}whitelist add|remove|list` — servers that don't pay",
-        f"`{prefix}maintenance on|off` — pause PulseNotify everywhere",
+        f"`{prefix}maintenance on|off` — pause DiscoNotify everywhere",
     ]
     return "**👑 Owner only** *(only you see this)*\n" + "\n".join(lines)
 
@@ -164,9 +164,9 @@ def _format_usage(command: app_commands.Command) -> str:
 
 
 def _qualified_name(command: app_commands.Command) -> str:
-    return getattr(command, "qualified_name", None) or f"pulsenotify {command.name}"
+    return getattr(command, "qualified_name", None) or f"notify {command.name}"
 
 
 async def setup(bot: commands.Bot) -> None:
-    """No Cog needed — `help` attaches to the shared pulsenotify_group at
+    """No Cog needed — `help` attaches to the shared notify_group at
     import time (the decorator above)."""

@@ -6,7 +6,7 @@ Hand everything below the line to the AI/engineer building the panel. It is self
 
 ## Task
 
-Build **Hunter Hub**, a secure internal admin panel for my company. It is a **multi-product hub**: one login, and a product switcher (like workspaces) that changes the whole panel to that product's admin. The first product is **PulseNotify** (a Discord bot that sends social-media alerts, billed per server). More products will be added later, so the hub must make adding a product cheap and must not hard-code PulseNotify into the shell.
+Build **Hunter Hub**, a secure internal admin panel for my company. It is a **multi-product hub**: one login, and a product switcher (like workspaces) that changes the whole panel to that product's admin. The first product is **DiscoNotify** (a Discord bot that sends social-media alerts, billed per server). More products will be added later, so the hub must make adding a product cheap and must not hard-code DiscoNotify into the shell.
 
 Admins only. Nobody else can sign in, ever.
 
@@ -33,20 +33,20 @@ Admins only. Nobody else can sign in, ever.
 
 - Left sidebar: product switcher at the top (logo, name, health dot), then the selected product's navigation. Top bar: global search (⌘K / Ctrl+K command palette: jump to a product, a server, a customer, a payment), theme toggle, admin menu (profile, MFA, sign out).
 - Products come from a registry, not code branches: table `hub_products` (`slug`, `name`, `description`, `icon`, `status`, `schema_name`). Each product is a folder `src/products/<slug>/` exporting `{ manifest, navigation, routes }`, and the shell renders whatever is registered. Adding a product = adding a folder + a row. Write a short `docs/ADDING_A_PRODUCT.md`.
-- A hub **Home** page: one card per product with 3 headline numbers each (for PulseNotify: servers with the bot, active subscriptions, MRR), plus a "needs attention" list across products.
+- A hub **Home** page: one card per product with 3 headline numbers each (for DiscoNotify: servers with the bot, active subscriptions, MRR), plus a "needs attention" list across products.
 - Hub-level pages: **Admins** (owner only: invite, change role/product access, deactivate, see last login), **Audit log** (every action by every admin, filterable, exportable to CSV), **Settings** (theme default, session lengths read-only).
 
-## PulseNotify product — pages and functions
+## DiscoNotify product — pages and functions
 
-Data lives in the Postgres schema `pulsenotify` of the same Supabase project (use the `Accept-Profile`/`Content-Profile` header or `db: { schema: 'pulsenotify' }` in the server client). Introspect it first; the repo's `database/migrations/*.sql` is the source of truth. Key tables:
+Data lives in the Postgres schema `disconotify` of the same Supabase project (use the `Accept-Profile`/`Content-Profile` header or `db: { schema: 'disconotify' }` in the server client). Introspect it first; the repo's `database/migrations/*.sql` is the source of truth. Key tables:
 
 | Table | What it holds |
 |---|---|
-| `pulsenotify_guilds` | Discord servers: `guild_id`, name, `bot_present`, settings, timestamps |
-| `pulsenotify_billing` | One row per server: `trial_ends_at`, `paid_until`, `whitelisted` (+`whitelist_note`, `whitelisted_by`, `whitelisted_at`), card fields `card_subscription_id`/`card_customer_id`/`card_status`/`card_cancels_at`, `reminders_sent`, `last_reminder_at` |
-| `pulsenotify_payments` | Ledger: `provider` (`polar` or `nowpayments`), `external_id`, `months`, `amount_usd`, `status` (pending/paid/failed/expired), `requested_by`, `channel_id`, `created_at`, `paid_at` |
-| `pulsenotify_platform_accounts`, `pulsenotify_notification_channels`, `pulsenotify_alert_configurations`, `pulsenotify_events`, `pulsenotify_live_states` | What each server monitors and what was sent |
-| `pulsenotify_platform_health`, `pulsenotify_audit_logs`, `pulsenotify_bot_state` | Platform status, bot-side audit trail, maintenance flag |
+| `notify_guilds` | Discord servers: `guild_id`, name, `bot_present`, settings, timestamps |
+| `notify_billing` | One row per server: `trial_ends_at`, `paid_until`, `whitelisted` (+`whitelist_note`, `whitelisted_by`, `whitelisted_at`), card fields `card_subscription_id`/`card_customer_id`/`card_status`/`card_cancels_at`, `reminders_sent`, `last_reminder_at` |
+| `notify_payments` | Ledger: `provider` (`polar` or `nowpayments`), `external_id`, `months`, `amount_usd`, `status` (pending/paid/failed/expired), `requested_by`, `channel_id`, `created_at`, `paid_at` |
+| `notify_platform_accounts`, `notify_notification_channels`, `notify_alert_configurations`, `notify_events`, `notify_live_states` | What each server monitors and what was sent |
+| `notify_platform_health`, `notify_audit_logs`, `notify_bot_state` | Platform status, bot-side audit trail, maintenance flag |
 
 All IDs are Discord snowflakes (bigint) — **treat them as strings in JavaScript** (they exceed the safe integer range). Show them copyable.
 
@@ -58,9 +58,9 @@ Pages:
 4. **Payments** — ledger with filters (provider, status, date range, amount), totals, CSV export, link each row to its server and, for card payments, to the Polar dashboard (`https://polar.sh/dashboard/...` — build the link from `card_subscription_id`; open in new tab). Read-only here: refunds and cancellations are done in Polar/NOWPayments; the panel never calls them with write permissions.
 5. **Subscriptions health** — a work list: card `past_due`, cancelled-but-still-active (ends soon), crypto payments stuck `pending` > 1h, payments marked `failed` (e.g. underpaid), servers with two card subscriptions, sandbox leftovers (rows with card fields but no matching live payment).
 6. **Reminders & alerts** — upcoming and recent upgrade reminders (DM) per server, plus a feed of billing events (renewals, failed charges, cancellations, failed crypto payments), a "send a reminder now" action for one server (rate limited; writes `reminders_sent`/`last_reminder_at` so the bot's schedule stays consistent — or simply resets them to trigger the bot; document which).
-7. **Platform health** — per-platform status from `pulsenotify_platform_health`, quota use, error counts, last successful poll; plus a **maintenance mode** toggle (writes `pulsenotify_bot_state`, owner/admin only, confirmation + step-up).
-8. **Audit** — the product's slice of the hub audit log plus `pulsenotify_audit_logs` from the bot, merged by time.
-9. **Settings (read-only view)** — price, trial days, grace days, reminder schedule as the bot currently runs them (stored in `pulsenotify_bot_state` or shown as "configured on the bot's host"; don't build editing for env vars).
+7. **Platform health** — per-platform status from `notify_platform_health`, quota use, error counts, last successful poll; plus a **maintenance mode** toggle (writes `notify_bot_state`, owner/admin only, confirmation + step-up).
+8. **Audit** — the product's slice of the hub audit log plus `notify_audit_logs` from the bot, merged by time.
+9. **Settings (read-only view)** — price, trial days, grace days, reminder schedule as the bot currently runs them (stored in `notify_bot_state` or shown as "configured on the bot's host"; don't build editing for env vars).
 
 Every list: server-side pagination, URL-encoded filters (shareable links), empty states, loading skeletons, error states with a retry — and a "last updated" stamp.
 
@@ -98,7 +98,7 @@ src/
   app/(hub)/page.tsx               # hub home
   app/(hub)/p/[product]/...        # resolves to src/products/<slug>
   app/(hub)/admins, audit, settings
-  products/pulsenotify/{manifest.ts,navigation.ts,pages/*,queries/*,actions/*}
+  products/disconotify/{manifest.ts,navigation.ts,pages/*,queries/*,actions/*}
   lib/{supabase-server.ts,auth.ts,audit.ts,roles.ts,validation.ts}
   middleware.ts
 supabase/migrations/               # the hub schema above
@@ -111,7 +111,7 @@ docs/ADDING_A_PRODUCT.md, SECURITY.md
 
 ## Deliverables and acceptance
 
-1. Working app with the hub shell, login + MFA, product switcher, and the full PulseNotify product above.
+1. Working app with the hub shell, login + MFA, product switcher, and the full DiscoNotify product above.
 2. The `hub` schema migration and a seed script for the first owner.
 3. Tests: allowlist and role enforcement (unit), an end-to-end login → switch product → whitelist a server → see it in the audit log.
 4. Docs: README (run, deploy, env), ADDING_A_PRODUCT.md, SECURITY.md (threat model, what each role can do).

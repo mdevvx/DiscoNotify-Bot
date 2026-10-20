@@ -14,7 +14,7 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-_TABLE = "pulsenotify_platform_accounts"
+_TABLE = "notify_platform_accounts"
 
 # Consecutive poll-cycle failures (not retry attempts within one poll —
 # RetryPolicy already handles those) before an account that hasn't been

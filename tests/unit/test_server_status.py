@@ -1,5 +1,5 @@
-"""/pulsenotify status (this server only), /pulsenotify global status
-(bot owners only), and /pulsenotify help listing commands nested in the
+"""/notify status (this server only), /notify global status
+(bot owners only), and /notify help listing commands nested in the
 "global" subcommand group."""
 
 from __future__ import annotations
@@ -158,7 +158,7 @@ def test_account_line_without_a_channel_says_so() -> None:
     assert "no alert channel" in _line(_row(), channels=[])
 
 
-# ── /pulsenotify status ─────────────────────────────────────────────────
+# ── /notify status ─────────────────────────────────────────────────
 
 
 async def test_server_status_lists_only_this_servers_accounts(db: FakeDatabase) -> None:
@@ -173,7 +173,7 @@ async def test_server_status_lists_only_this_servers_accounts(db: FakeDatabase) 
     await status.callback(interaction)  # type: ignore[arg-type]
 
     text = interaction.response.messages[0]["content"]
-    assert "Hunter Bots — PulseNotify status" in text
+    assert "Hunter Bots — DiscoNotify status" in text
     assert "**1** account(s) · **1** alert channel(s)" in text
     assert "@lifeafterwinning" in text and "@someone-elses" not in text
     assert "→ <#555>" in text
@@ -185,7 +185,7 @@ async def test_server_status_with_no_accounts_says_how_to_add_one(db: FakeDataba
 
     await status.callback(interaction)  # type: ignore[arg-type]
 
-    assert "/pulsenotify account-add" in interaction.response.messages[0]["content"]
+    assert "/notify account-add" in interaction.response.messages[0]["content"]
 
 
 async def test_server_status_shows_when_monitoring_is_paused(db: FakeDatabase) -> None:
@@ -196,7 +196,7 @@ async def test_server_status_shows_when_monitoring_is_paused(db: FakeDatabase) -
     assert "paused" in interaction.response.messages[0]["content"]
 
 
-# ── /pulsenotify global status ──────────────────────────────────────────
+# ── /notify global status ──────────────────────────────────────────
 
 
 async def test_global_status_is_refused_for_anyone_but_the_bot_owner(db: FakeDatabase) -> None:
@@ -216,11 +216,11 @@ async def test_global_status_works_for_the_bot_owner_privately(db: FakeDatabase)
 
     reply = interaction.response.messages[0]
     assert reply["ephemeral"] is True
-    assert "PulseNotify Global Status" in reply["content"]
+    assert "DiscoNotify Global Status" in reply["content"]
     assert "**2** server(s)" in reply["content"]
 
 
-# ── /pulsenotify help ───────────────────────────────────────────────────
+# ── /notify help ───────────────────────────────────────────────────
 
 
 async def test_help_is_grouped_and_lists_owner_tools_for_the_owner(db: FakeDatabase) -> None:
@@ -231,8 +231,8 @@ async def test_help_is_grouped_and_lists_owner_tools_for_the_owner(db: FakeDatab
     text = interaction.response.messages[0]["content"]
     for section in ("Get started", "Alerts", "Accounts", "Server", "Owner only"):
         assert section in text
-    assert "`/pulsenotify account-add` 🛡️ — Start monitoring" in text
-    assert "`/pulsenotify global status`" in text
+    assert "`/notify account-add` 🛡️ — Start monitoring" in text
+    assert "`/notify global status`" in text
     assert "`!maintenance on|off`" in text and "`!whitelist add|remove|list`" in text
 
 
@@ -243,7 +243,7 @@ async def test_help_hides_owner_only_commands_from_everyone_else(db: FakeDatabas
 
     text = interaction.response.messages[0]["content"]
     assert "global status" not in text and "Owner only" not in text and "maintenance" not in text
-    assert "`/pulsenotify status`" in text
+    assert "`/notify status`" in text
 
 
 async def test_help_puts_subscribe_first_when_billing_is_on(db: FakeDatabase) -> None:
@@ -251,7 +251,7 @@ async def test_help_puts_subscribe_first_when_billing_is_on(db: FakeDatabase) ->
 
     bot = FakeBot(db)
     bot.billing = BillingService(BillingRepository(db), enabled=True)  # type: ignore[arg-type]
-    db.tables["pulsenotify_guilds"].rows.append({"guild_id": _GUILD_ID, "enabled": True})
+    db.tables["notify_guilds"].rows.append({"guild_id": _GUILD_ID, "enabled": True})
     interaction = FakeInteraction(bot)
 
     await help_command.callback(interaction)  # type: ignore[arg-type]
@@ -259,7 +259,7 @@ async def test_help_puts_subscribe_first_when_billing_is_on(db: FakeDatabase) ->
     view = interaction.response.messages[0]["view"]
     first = [child for child in view.children if isinstance(child, discord.ui.Container)][0]
     first_text = " ".join(item.content for item in first.walk_children() if isinstance(item, discord.ui.TextDisplay))
-    assert "Subscription" in first_text and "`/pulsenotify subscribe`" in first_text
+    assert "Subscription" in first_text and "`/notify subscribe`" in first_text
     assert "Free trial" in first_text  # this server's state
 
 
@@ -287,7 +287,7 @@ def _details(reason: str, row: Dict[str, Any], *, allowed: bool = True, until: O
 def test_subscription_section_for_a_renewing_card() -> None:
     text = _details("paid", {"card_status": "active"}, until=_T + 20 * _DAY)
     assert "Paid until" in text and "renews automatically" in text
-    assert "Cancel any time: `/pulsenotify cancel`" in text
+    assert "Cancel any time: `/notify cancel`" in text
 
 
 def test_subscription_section_for_a_cancelled_card() -> None:
@@ -311,14 +311,14 @@ def test_subscription_section_when_whitelisted_has_nothing_to_manage() -> None:
 
 def test_subscription_section_when_expired_says_how_to_turn_alerts_back_on() -> None:
     text = _details("expired", {}, allowed=False)
-    assert "Turn alerts back on: `/pulsenotify subscribe` — $2.99/month" in text
+    assert "Turn alerts back on: `/notify subscribe` — $2.99/month" in text
 
 
 async def test_status_shows_the_subscription_section_and_turns_red_without_access(db: FakeDatabase) -> None:
     bot = FakeBot(db)
     bot.billing = BillingService(BillingRepository(db), enabled=True)  # type: ignore[arg-type]
-    db.tables["pulsenotify_guilds"].rows.append({"guild_id": _GUILD_ID, "enabled": True})
-    db.tables["pulsenotify_billing"].rows.append({"guild_id": _GUILD_ID, "trial_ends_at": "2020-01-01T00:00:00+00:00"})
+    db.tables["notify_guilds"].rows.append({"guild_id": _GUILD_ID, "enabled": True})
+    db.tables["notify_billing"].rows.append({"guild_id": _GUILD_ID, "trial_ends_at": "2020-01-01T00:00:00+00:00"})
     interaction = FakeInteraction(bot)
 
     await status.callback(interaction)  # type: ignore[arg-type]
@@ -350,7 +350,7 @@ async def test_status_with_many_long_accounts_stays_under_discords_limit(db: Fak
     bot = FakeBot(db)
     for i, platform in enumerate(["youtube"] * 10 + ["kick"] * 5 + ["instagram"] * 5 + ["twitter"] * 5):
         row = await bot.accounts_repo.add(_GUILD_ID, platform, f"id{i}" * 8, f"@a_very_long_creator_name_{i:02d}")
-        db.tables["pulsenotify_platform_accounts"].rows[-1].update(status="error", last_error="something went wrong " * 10)
+        db.tables["notify_platform_accounts"].rows[-1].update(status="error", last_error="something went wrong " * 10)
         channel = await bot.channels_repo.get_or_create(_GUILD_ID, 10**17 + i, name=f"alerts-{i}")
         await bot.channels_repo.link_account(_GUILD_ID, row["id"], channel["id"])
     interaction = FakeInteraction(bot)
@@ -360,4 +360,4 @@ async def test_status_with_many_long_accounts_stays_under_discords_limit(db: Fak
     view = interaction.response.messages[0]["view"]
     total = sum(len(item.content) for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay))
     assert total <= 4000
-    assert "more — `/pulsenotify account-list`" in interaction.response.messages[0]["content"]
+    assert "more — `/notify account-list`" in interaction.response.messages[0]["content"]

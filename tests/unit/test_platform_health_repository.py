@@ -81,7 +81,7 @@ async def test_increment_requests_resets_on_a_new_day(db: FakeDatabase, repo: Pl
     await repo.increment_requests("youtube", by=5)
 
     yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
-    db.tables["pulsenotify_platform_health"].rows[0]["requests_today_reset_at"] = yesterday
+    db.tables["notify_platform_health"].rows[0]["requests_today_reset_at"] = yesterday
 
     await repo.increment_requests("youtube", by=2)
 

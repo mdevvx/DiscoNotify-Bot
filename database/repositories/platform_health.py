@@ -15,7 +15,7 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-_TABLE = "pulsenotify_platform_health"
+_TABLE = "notify_platform_health"
 
 
 class PlatformHealthRepository:

@@ -129,7 +129,7 @@ def clock() -> Clock:
 @pytest.fixture
 def db() -> FakeDatabase:
     database = FakeDatabase()
-    database.tables["pulsenotify_guilds"].rows.append({"guild_id": _GUILD, "enabled": True})
+    database.tables["notify_guilds"].rows.append({"guild_id": _GUILD, "enabled": True})
     return database
 
 
@@ -140,14 +140,14 @@ def _service(db: FakeDatabase, clock: Clock, **kwargs: Any) -> BillingService:
 
 
 def _row(db: FakeDatabase) -> Dict[str, Any]:
-    return db.tables["pulsenotify_billing"].rows[0]
+    return db.tables["notify_billing"].rows[0]
 
 
 def _website_row(
     db: FakeDatabase, provider: str, external_id: str, *, months: int, amount_usd: float, created_at: datetime.datetime = _START
 ) -> None:
     """What the website inserts after creating a payment."""
-    db.tables["pulsenotify_payments"].rows.append(
+    db.tables["notify_payments"].rows.append(
         {
             "id": f"row-{external_id}",
             "guild_id": _GUILD,
@@ -192,7 +192,7 @@ async def test_billing_off_gives_everyone_access_and_writes_nothing(db: FakeData
 
     assert access.allowed and access.reason == AccessReason.BILLING_OFF
     assert await service.allowed_guild_ids({_GUILD, 2}) == {_GUILD, 2}
-    assert db.tables["pulsenotify_billing"].rows == []
+    assert db.tables["notify_billing"].rows == []
 
 
 async def test_a_server_gets_a_7_day_trial_then_loses_access(db: FakeDatabase, clock: Clock) -> None:
@@ -243,7 +243,7 @@ async def test_a_paid_card_subscription_is_found_and_grants_access_until_the_per
 
     access = await service.access(_GUILD)
     assert access.reason == AccessReason.PAID and access.until == period_end
-    payments = db.tables["pulsenotify_payments"].rows
+    payments = db.tables["notify_payments"].rows
     assert [(p["provider"], p["external_id"], p["status"]) for p in payments] == [("polar", "sub_1", "paid")]
     assert announced == [("polar", 7, 555, AccessReason.PAID)]  # confirmation goes back to the channel it was started from
     assert "renews automatically by card" in describe_access(access, _row(db))
@@ -259,8 +259,8 @@ async def test_subscriptions_without_a_server_id_or_for_unknown_servers_are_igno
 
     await service.poll_once()
 
-    assert db.tables["pulsenotify_payments"].rows == []
-    assert db.tables["pulsenotify_billing"].rows == []
+    assert db.tables["notify_payments"].rows == []
+    assert db.tables["notify_billing"].rows == []
 
 
 async def test_the_first_scan_reads_everything_then_only_the_last_few_days(db: FakeDatabase, clock: Clock) -> None:
@@ -400,7 +400,7 @@ async def test_subscribing_again_after_cancelling_replaces_the_old_subscription(
     await service.poll_once()
 
     assert _row(db)["card_subscription_id"] == "sub_new" and _row(db)["card_status"] == "active"
-    assert sorted(p["external_id"] for p in db.tables["pulsenotify_payments"].rows) == ["sub_new", "sub_old"]
+    assert sorted(p["external_id"] for p in db.tables["notify_payments"].rows) == ["sub_new", "sub_old"]
 
 
 async def test_a_polar_outage_doesnt_stop_crypto_payments_being_credited(db: FakeDatabase, clock: Clock) -> None:
@@ -419,7 +419,7 @@ async def test_a_polar_outage_doesnt_stop_crypto_payments_being_credited(db: Fak
 
 async def test_the_checkout_carries_the_server_the_requester_and_the_remaining_trial(db: FakeDatabase, clock: Clock) -> None:
     polar = FakePolar()
-    service = _service(db, clock, polar=polar, polar_success_url="https://pulsenotify.duoplus.org/thanks")
+    service = _service(db, clock, polar=polar, polar_success_url="https://disconotify.com/thanks")
     await service.access(_GUILD)
     clock.advance(days=2, hours=1)  # 4 days 23 hours of trial left
 
@@ -432,7 +432,7 @@ async def test_the_checkout_carries_the_server_the_requester_and_the_remaining_t
         "product_id": "prod_1",
         "metadata": {"guild_id": "1", "user_id": "7", "channel_id": "555"},
         "trial_days": 5,  # rounded up: the card isn't charged before the trial ends
-        "success_url": "https://pulsenotify.duoplus.org/thanks",
+        "success_url": "https://disconotify.com/thanks",
     }
     assert polar.checkouts[1]["trial_days"] == 0  # trial over — charged straight away
 
@@ -515,7 +515,7 @@ async def test_an_old_pending_non_crypto_row_expires(db: FakeDatabase, clock: Cl
 
     await service.poll_once()
 
-    assert db.tables["pulsenotify_payments"].rows[0]["status"] == "expired"
+    assert db.tables["notify_payments"].rows[0]["status"] == "expired"
 
 
 async def test_the_startup_check_warns_when_the_polar_price_differs(db: FakeDatabase, clock: Clock, caplog: pytest.LogCaptureFixture) -> None:
@@ -577,7 +577,7 @@ async def test_failed_and_expired_crypto_payments_grant_nothing(db: FakeDatabase
 
     await service.poll_once()
 
-    statuses = sorted(row["status"] for row in db.tables["pulsenotify_payments"].rows)
+    statuses = sorted(row["status"] for row in db.tables["notify_payments"].rows)
     assert statuses == ["expired", "failed"]
     assert _row(db).get("paid_until") is None
 
@@ -597,7 +597,7 @@ async def test_a_crypto_row_that_doesnt_match_nowpayments_is_not_credited(
 
     await service.poll_once()
 
-    assert db.tables["pulsenotify_payments"].rows[0]["status"] == "failed"
+    assert db.tables["notify_payments"].rows[0]["status"] == "failed"
     assert _row(db).get("paid_until") is None
 
 
@@ -605,9 +605,9 @@ async def test_a_crypto_row_that_doesnt_match_nowpayments_is_not_credited(
 
 
 def test_website_links_carry_the_server_id(db: FakeDatabase, clock: Clock) -> None:
-    service = _service(db, clock, subscribe_url="https://pulsenotify.duoplus.org/subscribe?ref=bot")
+    service = _service(db, clock, subscribe_url="https://disconotify.com/subscribe?ref=bot")
 
-    assert service.subscribe_url(42) == "https://pulsenotify.duoplus.org/subscribe?ref=bot&guild_id=42"
+    assert service.subscribe_url(42) == "https://disconotify.com/subscribe?ref=bot&guild_id=42"
     assert with_server("https://x.org/servers/{guild_id}/pay", 42) == "https://x.org/servers/42/pay"
     assert _service(db, clock).subscribe_url(42) is None
 
@@ -895,10 +895,10 @@ async def test_a_crypto_payment_nowpayments_has_never_heard_of_is_closed_quietly
         await service.poll_once()
     assert len([r for r in caplog.records if "NOWPayments has no payment" in r.message]) == 1  # once, no traceback
     assert not any(r.exc_info for r in caplog.records)
-    assert db.tables["pulsenotify_payments"].rows[0]["status"] == "pending"
+    assert db.tables["notify_payments"].rows[0]["status"] == "pending"
 
     clock.advance(days=4)
     await service.poll_once()
 
-    assert db.tables["pulsenotify_payments"].rows[0]["status"] == "expired"
+    assert db.tables["notify_payments"].rows[0]["status"] == "expired"
     assert events == []

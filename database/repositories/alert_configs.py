@@ -12,7 +12,7 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-_TABLE = "pulsenotify_alert_configurations"
+_TABLE = "notify_alert_configurations"
 
 # Sensible defaults seeded when an account is first added (section 7's
 # example: "Live Ended: OFF" while everything else defaults on). A missing

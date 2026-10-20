@@ -24,10 +24,10 @@ logger = get_logger(__name__)
 # swallow).
 UNIQUE_VIOLATION = "23505"
 
-# Every PulseNotify table lives in this schema rather than `public` (see
+# Every DiscoNotify table lives in this schema rather than `public` (see
 # migrations/0005). It must also be listed under the project's exposed
 # Data API schemas, or Postgrest rejects every query.
-DB_SCHEMA = "pulsenotify"
+DB_SCHEMA = "disconotify"
 
 
 def is_unique_violation(error: Exception) -> bool:
@@ -56,7 +56,7 @@ class Database:
         )
         # Fail fast at startup if credentials or the schema are wrong, rather
         # than surfacing a confusing error on the first command a user runs.
-        await self._client.table("pulsenotify_guilds").select("guild_id").limit(1).execute()
+        await self._client.table("notify_guilds").select("guild_id").limit(1).execute()
 
     async def close(self) -> None:
         if self._client is None:

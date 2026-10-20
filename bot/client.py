@@ -1,4 +1,4 @@
-"""The PulseNotify Discord client.
+"""The DiscoNotify Discord client.
 
 Owns the services every command/cog needs (database, repositories,
 monitoring, notification delivery) and the startup/shutdown lifecycle.
@@ -24,7 +24,7 @@ from billing.polar import PolarClient
 from billing.repository import BillingRepository
 from billing.service import BillingEvent, BillingService
 from bot.events import handle_app_command_error, register_events
-from commands.pulsenotify_group import pulsenotify_group
+from commands.notify_group import notify_group
 from config.settings import Settings
 from database.client import Database
 from database.repositories.accounts import PlatformAccountRepository
@@ -52,8 +52,8 @@ logger = get_logger(__name__)
 
 # Extensions to load at startup. `sync` is a real Cog (a text command, not
 # a slash command); the rest are plain modules that decorate their
-# subcommand against the shared `pulsenotify_group` at import time — see
-# commands/pulsenotify_group.py. New platforms/command groups register here.
+# subcommand against the shared `notify_group` at import time — see
+# commands/notify_group.py. New platforms/command groups register here.
 _EXTENSIONS = (
     "commands.admin.status",
     "commands.admin.toggle",
@@ -71,15 +71,15 @@ _EXTENSIONS = (
 # subscribe/cancel link to the website. Bot-owner `global` commands are
 # never gated.
 _ALWAYS_ALLOWED = {
-    "pulsenotify toggle",
-    "pulsenotify status",
-    "pulsenotify help",
-    "pulsenotify subscribe",
-    "pulsenotify cancel",
+    "notify toggle",
+    "notify status",
+    "notify help",
+    "notify subscribe",
+    "notify cancel",
 }
 # How often to look for servers whose owner is due an upgrade reminder.
 _REMINDER_CHECK_EVERY = datetime.timedelta(minutes=10)
-_OWNER_GROUP_PREFIX = "pulsenotify global "
+_OWNER_GROUP_PREFIX = "notify global "
 # Discord error "Cannot send messages to this user".
 _DM_CLOSED = 50007
 # How the DM log names each billing event's DM.
@@ -94,7 +94,7 @@ _EVENT_DM_KINDS = {
 _DM_LOG_RETENTION_DAYS = 90
 
 
-class PulseNotifyCommandTree(app_commands.CommandTree):
+class DiscoNotifyCommandTree(app_commands.CommandTree):
     """Slash command tree that gates every command behind the guild's
     enabled flag and, when billing is on, an active trial/subscription."""
 
@@ -102,13 +102,13 @@ class PulseNotifyCommandTree(app_commands.CommandTree):
         if interaction.guild is None:
             return True
 
-        bot = cast("PulseNotifyBot", self.client)
+        bot = cast("DiscoNotifyBot", self.client)
         if bot.maintenance.active and not await bot.is_owner(interaction.user):
             await cards.reply(
                 interaction,
                 bot.maintenance.message,
                 "Your settings are safe, and alerts resume automatically when it's over.",
-                title="🛠️ PulseNotify is under maintenance",
+                title="🛠️ DiscoNotify is under maintenance",
                 tone=cards.WARNING,
                 ephemeral=True,
             )
@@ -123,8 +123,8 @@ class PulseNotifyCommandTree(app_commands.CommandTree):
         if not enabled:
             await cards.error(
                 interaction,
-                "PulseNotify is currently disabled in this server. "
-                "An administrator can run `/pulsenotify toggle` to re-enable it.",
+                "DiscoNotify is currently disabled in this server. "
+                "An administrator can run `/notify toggle` to re-enable it.",
             )
             return False
 
@@ -146,7 +146,7 @@ class PulseNotifyCommandTree(app_commands.CommandTree):
         await handle_app_command_error(interaction, error)
 
 
-class PulseNotifyBot(commands.Bot):
+class DiscoNotifyBot(commands.Bot):
     def __init__(self, settings: Settings) -> None:
         intents = discord.Intents.default()
         intents.message_content = True  # required to parse prefix commands like `sync`
@@ -154,9 +154,9 @@ class PulseNotifyBot(commands.Bot):
         super().__init__(
             command_prefix=settings.discord_command_prefix,
             intents=intents,
-            tree_cls=PulseNotifyCommandTree,
+            tree_cls=DiscoNotifyCommandTree,
             help_command=None,
-            # Shown under the bot's name, e.g. "/pulsenotify help | pulsenotify.duoplus.org".
+            # Shown under the bot's name, e.g. "/notify help | disconotify.com".
             # Set at login, so it's there from the first moment the bot is online.
             activity=discord.CustomActivity(name=settings.discord_status_text) if settings.discord_status_text else None,
             status=discord.Status.online,
@@ -216,9 +216,9 @@ class PulseNotifyBot(commands.Bot):
 
         await self._load_extensions()
         # Every extension above has now decorated its subcommand against
-        # the shared pulsenotify_group (see commands/pulsenotify_group.py)
+        # the shared notify_group (see commands/notify_group.py)
         # — register the fully-populated group to the tree exactly once.
-        self.tree.add_command(pulsenotify_group)
+        self.tree.add_command(notify_group)
         await self._resolve_owners()
 
         self._register_platform_adapters()
@@ -406,7 +406,7 @@ class PulseNotifyBot(commands.Bot):
             from commands.admin.billing import subscribe_buttons
             buttons = await subscribe_buttons(self.billing, guild_id, guild.name)
             view = cards.card(
-                f"You started subscribing **{guild.name}** to PulseNotify but haven't finished paying.",
+                f"You started subscribing **{guild.name}** to DiscoNotify but haven't finished paying.",
                 "Your checkout is still open — pick it up where you left off, or ignore this if you've changed your mind.",
                 title="🛒 Your checkout is waiting",
                 tone=cards.INFO,
@@ -432,7 +432,7 @@ class PulseNotifyBot(commands.Bot):
 
     async def _reminder_card(self, guild: discord.Guild, row: Dict[str, Any]) -> discord.ui.LayoutView:
         reminder = int(row.get("reminders_sent") or 0) + 1
-        title = "⏰ Your PulseNotify trial has ended" if not row.get("paid_until") else "⏰ Your PulseNotify subscription has ended"
+        title = "⏰ Your DiscoNotify trial has ended" if not row.get("paid_until") else "⏰ Your DiscoNotify subscription has ended"
         lines = [f"Server: **{guild.name}**", *subscription_needed(row, price_label=self.billing.price_label)]
         if reminder >= self.settings.billing_reminder_max:
             lines.append("-# This is the last reminder — we won't message you about this again.")
@@ -497,9 +497,9 @@ class PulseNotifyBot(commands.Bot):
             # Started during the free trial: card saved, nothing charged yet.
             first_charge = f"<t:{int(access.until.timestamp())}:D>" if access.until else "the end of the trial"
             view = cards.card(
-                f"{thanks}PulseNotify's card subscription{where} is set up — the first "
+                f"{thanks}DiscoNotify's card subscription{where} is set up — the first "
                 f"{self.billing.price_label} charge is on {first_charge}, when the free trial ends.",
-                "Cancel before then with `/pulsenotify cancel` and you pay nothing.",
+                "Cancel before then with `/notify cancel` and you pay nothing.",
                 title="✅ Subscription set up",
                 tone=cards.SUCCESS,
             )
@@ -507,7 +507,7 @@ class PulseNotifyBot(commands.Bot):
             until = f" — active until <t:{int(access.until.timestamp())}:D>" if access.until else ""
             method = "card" if payment["provider"] == "polar" else "crypto"
             view = cards.card(
-                f"{thanks}PulseNotify's subscription{where} is active{until}.",
+                f"{thanks}DiscoNotify's subscription{where} is active{until}.",
                 f"Paid by {method} · {payment['months']} month(s)",
                 title="✅ Payment received",
                 tone=cards.SUCCESS,
@@ -538,7 +538,7 @@ class PulseNotifyBot(commands.Bot):
         if event.kind == "card_renewed":
             summary, tone = f"card renewed · {price}", cards.SUCCESS
             mine = cards.card(
-                f"PulseNotify's card payment for **{name}** went through ({price})."
+                f"DiscoNotify's card payment for **{name}** went through ({price})."
                 + (f" Active until {until}." if until else ""),
                 title="✅ Subscription renewed",
                 tone=cards.SUCCESS,
@@ -547,25 +547,25 @@ class PulseNotifyBot(commands.Bot):
             summary, tone = "card charge failed (retrying)", cards.WARNING
             mine = cards.card(
                 f"The card payment for **{name}** didn't go through. It will be retried automatically — alerts keep running meanwhile.",
-                "To use a different card, run `/pulsenotify cancel` to open your billing page and update it.",
+                "To use a different card, run `/notify cancel` to open your billing page and update it.",
                 title="⚠️ Card payment failed",
                 tone=cards.WARNING,
             )
         elif event.kind == "card_cancel_scheduled":
             summary, tone = "card cancelled, ends at period end", cards.WARNING
             mine = cards.card(
-                f"The PulseNotify subscription for **{name}** was cancelled. Alerts keep working until {until}, and you won't be charged again."
+                f"The DiscoNotify subscription for **{name}** was cancelled. Alerts keep working until {until}, and you won't be charged again."
                 if until
-                else f"The PulseNotify subscription for **{name}** was cancelled. You won't be charged again.",
-                "Changed your mind? Run `/pulsenotify subscribe` any time.",
+                else f"The DiscoNotify subscription for **{name}** was cancelled. You won't be charged again.",
+                "Changed your mind? Run `/notify subscribe` any time.",
                 title="ℹ️ Subscription cancelled",
                 tone=cards.WARNING,
             )
         elif event.kind == "card_ended":
             summary, tone = "card subscription ended", cards.ERROR
             mine = cards.card(
-                f"The PulseNotify card subscription for **{name}** has ended, so alerts are paused. Every setting is kept.",
-                "Switch it back on with `/pulsenotify subscribe`.",
+                f"The DiscoNotify card subscription for **{name}** has ended, so alerts are paused. Every setting is kept.",
+                "Switch it back on with `/notify subscribe`.",
                 title="⏸️ Subscription ended",
                 tone=cards.ERROR,
             )
@@ -601,7 +601,7 @@ class PulseNotifyBot(commands.Bot):
                 logger.info("Couldn't DM bot owner %s a billing alert.", owner_id)
 
     async def close(self) -> None:
-        logger.info("Shutting down PulseNotify...")
+        logger.info("Shutting down DiscoNotify...")
         if self._billing_task is not None:
             self._billing_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
