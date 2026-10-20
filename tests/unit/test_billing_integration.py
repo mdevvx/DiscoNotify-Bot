@@ -705,7 +705,7 @@ async def test_the_server_owner_is_dmed_an_upgrade_reminder_with_the_link() -> N
     bot.billing.website = None
     bot.get_user = lambda user_id: owner
     bot.dm_log = _DmLog()
-    for name in ("send_upgrade_reminders", "_reminder_card", "_dm_owner", "_dm_user", "_post_in_guild"):
+    for name in ("send_upgrade_reminders", "_reminder_card", "_dm_owner", "_dm_user"):
         setattr(bot, name, getattr(PulseNotifyBot, name).__get__(bot))
 
     await bot.send_upgrade_reminders()

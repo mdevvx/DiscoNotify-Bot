@@ -419,16 +419,15 @@ class PulseNotifyBot(commands.Bot):
     async def send_upgrade_reminders(self) -> None:
         """DMs the owner of every server whose trial or subscription has run
         out (schedule: BillingService.reminders_due). If the owner's DMs are
-        closed, the reminder goes to the server's intro channel instead."""
+        closed, the reminder is skipped — it's never posted in a channel."""
         guilds = {guild.id: guild for guild in self.guilds}
         for row in await self.billing.reminders_due(guilds):
             guild = guilds.get(int(row["guild_id"]))
             if guild is None:
                 continue
             view = await self._reminder_card(guild, row)
-            delivered = await self._dm_owner(guild, view, kind="expiry_reminder") or await self._post_in_guild(guild, view)
-            if not delivered:
-                logger.warning("Couldn't deliver the upgrade reminder for server %s anywhere.", guild.id)
+            if not await self._dm_owner(guild, view, kind="expiry_reminder"):
+                logger.info("Couldn't DM the owner of server %s the upgrade reminder (DMs closed?).", guild.id)
             await self.billing.mark_reminded(row)
 
     async def _reminder_card(self, guild: discord.Guild, row: Dict[str, Any]) -> discord.ui.LayoutView:
@@ -488,7 +487,7 @@ class PulseNotifyBot(commands.Bot):
     async def _announce_payment(self, payment: Dict[str, Any], access: Access) -> None:
         """Posts "payment received" in the channel the payment was started
         from, or — for payments made on the website — DMs the server owner
-        (falling back to the server's intro channel)."""
+        (never posted in a channel)."""
         guild_id = int(payment["guild_id"])
         row = await self.billing.billing_row(guild_id) or {}
         thanks = f"Thanks <@{payment['requested_by']}>! " if payment.get("requested_by") else "Thank you! "
@@ -519,10 +518,8 @@ class PulseNotifyBot(commands.Bot):
             if channel_id:
                 channel = self.get_channel(int(channel_id)) or await self.fetch_channel(int(channel_id))
                 await channel.send(view=view, allowed_mentions=discord.AllowedMentions.none())  # type: ignore[union-attr]
-            elif guild is not None and not await self._dm_owner(
-                guild, view, kind="payment_success", payment_id=payment.get("id")
-            ):
-                await self._post_in_guild(guild, view)
+            elif guild is not None:
+                await self._dm_owner(guild, view, kind="payment_success", payment_id=payment.get("id"))
         finally:
             method = "card" if payment["provider"] == "polar" else "crypto"
             await self._alert_bot_owners(
@@ -530,8 +527,8 @@ class PulseNotifyBot(commands.Bot):
             )
 
     async def _announce_billing_event(self, event: BillingEvent) -> None:
-        """Tells the server (its owner, by DM or the intro channel) and the
-        bot owners what happened to a subscription after it began."""
+        """Tells the server's owner (by DM only) and the bot owners what
+        happened to a subscription after it began."""
         guild = self.get_guild(event.guild_id)
         name = guild.name if guild is not None else f"server {event.guild_id}"
         until = f"<t:{int(event.until.timestamp())}:D>" if event.until else None
@@ -583,8 +580,7 @@ class PulseNotifyBot(commands.Bot):
             summary, tone = "crypto payment expired unpaid", cards.INFO  # bot owners only
         if mine is not None and guild is not None:
             payment_id = (event.payment or {}).get("id")
-            if not await self._dm_owner(guild, mine, kind=_EVENT_DM_KINDS[event.kind], payment_id=payment_id):
-                await self._post_in_guild(guild, mine)
+            await self._dm_owner(guild, mine, kind=_EVENT_DM_KINDS[event.kind], payment_id=payment_id)
         await self._alert_bot_owners(f"Billing: {event.kind.replace('_', ' ')}", summary, event.guild_id, event.payment, tone)
 
     async def _alert_bot_owners(
