@@ -48,12 +48,13 @@ def test_settings_requires_discord_token(monkeypatch: pytest.MonkeyPatch) -> Non
 
 def test_settings_platform_keys_are_optional(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_required_env(monkeypatch)
-    for var in ("TWITTER_ENABLED", "YOUTUBE_API_KEY", "TWITCH_CLIENT_ID", "KICK_CLIENT_ID"):
+    for var in ("TWITTER_ENABLED", "TIKTOK_ENABLED", "YOUTUBE_API_KEY", "TWITCH_CLIENT_ID", "KICK_CLIENT_ID"):
         monkeypatch.delenv(var, raising=False)
 
     settings = Settings(_env_file=None)  # type: ignore[call-arg]
 
     assert settings.twitter_enabled is True  # X needs no key
+    assert settings.tiktok_enabled is True  # nor does TikTok
     assert settings.youtube_api_key is None
 
 

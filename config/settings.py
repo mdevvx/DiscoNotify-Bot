@@ -51,6 +51,11 @@ class Settings(BaseSettings):
     # 30 timeline requests per 15 minutes); this is the fastest it goes.
     twitter_enabled: bool = Field(default=True, alias="TWITTER_ENABLED")
     twitter_min_poll_interval_seconds: float = Field(default=60.0, alias="TWITTER_MIN_POLL_INTERVAL_SECONDS")
+    # TikTok needs no key either — see platforms/tiktok/adapter.py. Each
+    # account is checked every 4s × the number of accounts, never faster
+    # than this.
+    tiktok_enabled: bool = Field(default=True, alias="TIKTOK_ENABLED")
+    tiktok_min_poll_interval_seconds: float = Field(default=120.0, alias="TIKTOK_MIN_POLL_INTERVAL_SECONDS")
     youtube_api_key: Optional[str] = Field(default=None, alias="YOUTUBE_API_KEY")
     twitch_client_id: Optional[str] = Field(default=None, alias="TWITCH_CLIENT_ID")
     twitch_client_secret: Optional[str] = Field(default=None, alias="TWITCH_CLIENT_SECRET")
@@ -75,9 +80,8 @@ class Settings(BaseSettings):
     # platforms/instagram/adapter.py's poll_interval_seconds().
     instagram_hourly_call_limit: int = Field(default=200, alias="INSTAGRAM_HOURLY_CALL_LIMIT")
     instagram_min_poll_interval_seconds: float = Field(default=30.0, alias="INSTAGRAM_MIN_POLL_INTERVAL_SECONDS")
-    # Facebook and TikTok have no adapter (Phase 7) — neither platform
-    # offers an official, ToS-compliant way to monitor a page/creator that
-    # hasn't individually authorized this app. See README's Phase 7
+    # Facebook has no adapter (Phase 7) — Meta offers no official way to
+    # monitor a Page that hasn't authorized this app. See README's Phase 7
     # section for the research behind that conclusion.
 
     # Monitoring framework configuration (section 28: one place for these,

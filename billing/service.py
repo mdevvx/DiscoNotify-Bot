@@ -34,7 +34,7 @@ from urllib.parse import urlencode, urlsplit, urlunsplit
 
 from billing.access import Access, AccessReason, evaluate, parse_time, utcnow
 from billing.links import sign_link
-from billing.nowpayments import EXPIRED_STATUSES, FAILED_STATUSES, PAID_STATUSES, NowPaymentsClient
+from billing.nowpayments import EXPIRED_STATUSES, FAILED_STATUSES, PAID_STATUSES, NowPaymentsClient, PaymentNotFound
 from billing.polar import PolarClient, PolarError
 from billing.repository import BillingRepository
 from utils.errors import PermanentPlatformError
@@ -139,6 +139,7 @@ class BillingService:
         self._clock = clock
         self._cache: Dict[int, Tuple[datetime.datetime, Access]] = {}
         self._last_card_refresh: Optional[datetime.datetime] = None
+        self._unknown_logged: Set[str] = set()
         self._full_scan_done = False
         self._checkout_cache: Dict[Tuple[int, int, int], Tuple[datetime.datetime, str]] = {}
         self._known_subscriptions: Set[str] = set()
@@ -593,7 +594,11 @@ class BillingService:
     async def _check_crypto_payment(self, payment: Dict[str, Any]) -> None:
         if self._nowpayments is None:
             return
-        remote = await self._nowpayments.get_payment(payment["external_id"])
+        try:
+            remote = await self._nowpayments.get_payment(payment["external_id"])
+        except PaymentNotFound:
+            await self._unknown_crypto_payment(payment)
+            return
         status = remote.get("payment_status")
         if status in PAID_STATUSES:
             problem = self._crypto_mismatch(payment, remote)
@@ -617,6 +622,27 @@ class BillingService:
         elif status in EXPIRED_STATUSES or self._expired(payment, _CRYPTO_PAYMENT_TTL):
             await self._repo.set_payment_status(payment["id"], "expired")
             await self._emit(BillingEvent("crypto_expired", int(payment["guild_id"]), payment=payment))
+
+    async def _unknown_crypto_payment(self, payment: Dict[str, Any]) -> None:
+        """NOWPayments doesn't know this payment: made under another API key
+        or in the other (sandbox / live) mode, or not created there at all.
+        Nothing can be learned about it, so it's quietly closed once it's past
+        the normal payment window (no alert to the server) — until then it's
+        logged once, not on every poll."""
+        key = str(payment["id"])
+        if self._expired(payment, _CRYPTO_PAYMENT_TTL):
+            logger.info("Closing payment %s: NOWPayments has no record of it.", key)
+            await self._repo.set_payment_status(payment["id"], "expired")
+            self._unknown_logged.discard(key)
+        elif key not in self._unknown_logged:
+            self._unknown_logged.add(key)
+            logger.warning(
+                "NOWPayments has no payment %s (id %s) — is NOWPAYMENTS_API_KEY / NOWPAYMENTS_SANDBOX the "
+                "ones it was made with? It will be closed once it's %d days old.",
+                key,
+                payment.get("external_id"),
+                _CRYPTO_PAYMENT_TTL.days,
+            )
 
     @staticmethod
     def _crypto_mismatch(payment: Dict[str, Any], remote: Dict[str, Any]) -> Optional[str]:

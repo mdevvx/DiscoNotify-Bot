@@ -2,7 +2,7 @@
 "Business Discovery".
 
 API research first done 2026-09-15 and re-verified against the live API on
-2026-10-12, not scraped/undocumented endpoints — see
+2026-10-12 — see
 [[project-platform-api-policy]] / README.md for the standing policy this
 follows, and the README's Instagram setup steps for getting credentials.
 

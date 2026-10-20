@@ -1,10 +1,10 @@
 # PulseNotify
 
-A multi-tenant Discord bot that watches social/streaming accounts (YouTube, Twitch, Kick, X/Twitter, Instagram, Facebook, TikTok) and posts alerts to Discord when they post or go live. Every server's configuration — accounts, channels, alert settings, enabled/disabled state — is fully isolated by `guild_id`.
+A multi-tenant Discord bot that watches social/streaming accounts (YouTube, Twitch, Kick, X/Twitter, Instagram, TikTok, Facebook) and posts alerts to Discord when they post or go live. Every server's configuration — accounts, channels, alert settings, enabled/disabled state — is fully isolated by `guild_id`.
 
-**Platforms currently offered:** YouTube, Kick, Instagram, Twitter / X. **On hold:** Twitch (an adapter exists under `platforms/` but isn't registered or offered in `/pulsenotify account-add`) and TikTok (no adapter yet).
+**Platforms currently offered:** YouTube, Kick, Instagram, Twitter / X, TikTok. **On hold:** Twitch (an adapter exists under `platforms/` but isn't registered or offered in `/pulsenotify account-add`). **Not available:** Facebook (no adapter).
 
-This is being built in phases. **Phases 1–6 are complete, Phase 7 is partially complete, and Phase 8 is partially complete.** YouTube, Twitch, Kick, X/Twitter, and Instagram are all working end-to-end: `/pulsenotify account-add` registers an account, the monitoring framework polls it, and real Discord notifications go out for new videos/Shorts (YouTube), new posts (X/Twitter, Instagram), and live start/end (YouTube, Twitch, Kick). Facebook and TikTok have **no adapter** — see the Phase 7 section below for why: neither platform offers an official way to monitor an account that hasn't individually authorized this app. Per-account alert configuration (which event types notify, embeds, role mentions) can now be viewed and changed entirely via slash commands — see the Commands section.
+This is being built in phases. **Phases 1–6 are complete, Phase 7 is partially complete, and Phase 8 is partially complete.** YouTube, Twitch, Kick, X/Twitter, Instagram and TikTok are all working end-to-end: `/pulsenotify account-add` registers an account, the monitoring framework polls it, and real Discord notifications go out for new videos/Shorts (YouTube), new posts (X/Twitter, Instagram), new videos (TikTok), and live start/end (YouTube, Twitch, Kick). Facebook has **no adapter** — see the Phase 7 section below for why: Meta offers no official way to monitor a Page that hasn't individually authorized this app. Per-account alert configuration (which event types notify, embeds, role mentions) can now be viewed and changed entirely via slash commands — see the Commands section.
 
 ## Status
 
@@ -16,7 +16,7 @@ This is being built in phases. **Phases 1–6 are complete, Phase 7 is partially
 | 4 | YouTube adapter, `/pulsenotify account-add\|account-remove\|account-list`, notification embeds + sender | ✅ Done |
 | 5 | Twitch adapter (live/offline detection) | ✅ Done |
 | 6 | Kick adapter (live/offline detection) | ✅ Done |
-| 7 | X/Twitter, Instagram, Facebook, TikTok adapters | ⚠️ Partial — X/Twitter (free, no key) and Instagram done; Facebook not built; TikTok on hold |
+| 7 | X/Twitter, Instagram, Facebook, TikTok adapters | ⚠️ Partial — X/Twitter and TikTok (free, no key) and Instagram done; Facebook not built |
 | 8 | `/pulsenotify alerts` (per-event-type enabled/embed toggles + viewing), `/pulsenotify account-set-mention` (role mentions), `/pulsenotify account-info` (view full config incl. custom message) | ⚠️ Partial — analytics and general admin tooling deliberately **skipped**, at the user's explicit choice (2026-09-15) |
 
 ### Platform API policy (applies to every platform integration)
@@ -27,7 +27,8 @@ Before any platform integration is built: verify that platform's *current* offic
 - **Twitch (Phase 5) and Kick (Phase 6)** were deliberate polling choices too, also with sign-off where the tradeoff was real: EventSub-style webhooks are the "correct" push-based approach for both, but need a public HTTPS endpoint this project doesn't have; Twitch's EventSub WebSocket transport (which would avoid that) turned out to require a *user* access token capped far too low for monitoring arbitrary streamers, so it isn't viable at all. Polling is cheap enough on both platforms' free app-token tiers that there's no quota pressure forcing the webhook infrastructure question the way there was for YouTube.
 - **X/Twitter** is free and needs no key, but X limits how often timelines can be read, so each X account is checked less often as more accounts are added (see the Twitter / X adapter section).
 - **Instagram** uses Meta's official Business Discovery API: it works for any public Business/Creator account (not personal ones), needs the operator's own Meta app + Facebook Page + professional Instagram account, and needs no App Review for the operator's own use. See the Instagram adapter section below.
-- **Facebook and TikTok (Phase 7) have no adapter.** Both platforms' official APIs are built entirely around a creator/Page connecting *their own* account to your app — the opposite of monitoring one you don't control — with no Instagram-Business-Discovery-style exception for either. Facebook's closest equivalent ("Page Public Content Access") requires Meta Business Verification and is scoped to "analyze/display" use cases with no guarantee a notification bot qualifies; TikTok's developer platform has no discovery/monitoring surface at all. Revisit if either platform's policy changes.
+- **TikTok** is free and needs no key: the bot reads the public creator embed TikTok provides for showing a profile on websites. It alerts new videos only (the embed has no live status), and each TikTok account is checked less often as more accounts are added (see the TikTok adapter section).
+- **Facebook (Phase 7) has no adapter.** Meta's API is built around a Page connecting *its own* account to your app, with no Instagram-Business-Discovery-style exception. The closest equivalent ("Page Public Content Access") requires Meta Business Verification and is scoped to "analyze/display" use cases with no guarantee a notification bot qualifies. Revisit if Meta's policy changes.
 
 ## Requirements
 
@@ -59,7 +60,8 @@ Before any platform integration is built: verify that platform's *current* offic
    - `KICK_CLIENT_ID` / `KICK_CLIENT_SECRET` — from a [Kick app](https://kick.com/settings/developer).
    - X (Twitter) needs no key — it's on by default (`TWITTER_ENABLED`); see the Twitter / X adapter section.
    - `INSTAGRAM_ACCESS_TOKEN` / `INSTAGRAM_BUSINESS_ACCOUNT_ID` — a non-expiring Page token + the IG user ID of your *own* Instagram professional account. Step-by-step in "Instagram setup" below.
-   - There's no Facebook or TikTok key to set — neither has an adapter (see the Phase 7 section above).
+   - TikTok needs no key either — it's on by default (`TIKTOK_ENABLED`); see the TikTok adapter section.
+   - There's no Facebook key to set — it has no adapter (see the Phase 7 section above).
 
    `MONITORING_*`/`YOUTUBE_*` tuning variables (polling intervals, retry/backoff, rate limits, health thresholds, quota budgets) are all optional too — sensible defaults are baked in; see `.env.example` for the full list.
 
@@ -240,6 +242,7 @@ platforms/
   twitch/                 live/offline only — app-token polling, no adapter-level quota budgeting needed (see Twitch adapter section)
   kick/                   live/offline only — same shape as twitch/, one endpoint does both identifier resolution and live status
   twitter/                new posts (no key needed) — see Twitter / X adapter section
+  tiktok/                 new videos (no key needed) — see TikTok adapter section
   instagram/              new posts + Reels via Business Discovery — see the Instagram adapter section and its setup steps
 monitoring/
   manager.py            single start()/stop() entry point; owns one PlatformScheduler per registered adapter
@@ -400,6 +403,30 @@ When X reports a window is used up, that kind of request waits for the reset (ot
 - Checks go by the account's user ID, so an account that changes its @handle keeps working (alerts link to the new handle).
 - `TWITTER_ENABLED=false` turns X off.
 
+## TikTok adapter (platforms/tiktok/)
+
+Alerts for new **videos** from any public TikTok account. **No API key and no cost** — the bot reads the account's public creator embed (`tiktok.com/embed/@name`, the page TikTok provides for showing a profile on websites), which returns the account's ID, name, avatar and its latest ~10 videos with caption and cover image. There is no live-stream alert: the embed doesn't show live status.
+
+**Check speed:** TikTok publishes no request limit for the embed, so the bot is deliberately gentle: one request per account per check (shared by every server that follows the account), at most one request every 1.5 seconds, and an interval of 4 seconds × the number of different TikTok accounts:
+
+| Different TikTok accounts | Checked every |
+|---|---|
+| 1–30 | 2 minutes (`TIKTOK_MIN_POLL_INTERVAL_SECONDS`) |
+| 100 | ~6.7 minutes |
+| 300 | 20 minutes |
+
+**Errors**
+- If TikTok blocks the bot's requests (HTTP 403/429/503 or a bot-check page), all TikTok checks pause for 10 minutes (or the time TikTok asks for); other platforms aren't affected. Adding an account then says "TikTok is busy right now, try again in about N minutes".
+- Timeouts and server errors are retried automatically with the usual backoff; the account shows as "couldn't be checked just now — retrying" in `/pulsenotify status` and recovers by itself.
+- An account TikTok stops showing is only marked invalid after it has been missing in three separate checks at least five minutes apart, so one bad answer can't switch off a working account.
+
+**Notes**
+- Added by @username or profile URL (a video link works too; short `vm.tiktok.com` links can't be resolved and say so). Private accounts and unknown usernames can't be added.
+- A newly added account's existing videos are never alerted; an account with no videos gets its first one alerted.
+- The account is stored by its numeric ID, but TikTok's embed is looked up by username: an account that **changes its username** shows as missing, is marked invalid after the checks above, and has to be re-added.
+- Check speed and errors are visible in `/pulsenotify status` like every other platform.
+- `TIKTOK_ENABLED=false` turns TikTok off.
+
 ## Instagram adapter (platforms/instagram/)
 
 New posts and Reels from any public Instagram **Business or Creator** account, via Meta's official **Business Discovery** API — no authorization from the monitored account needed. Verified against the live Graph API (v26.0) on 2026-10-12.
@@ -435,12 +462,11 @@ You need your own Instagram **Business or Creator** account linked to a **Facebo
 
 A Page token fetched with an extended user token **doesn't expire**. Fetched with the short-lived one, it expires within hours — the startup check warns about exactly that. Meta's separate *data access* window (about 90 days) is renewed whenever you generate a token through the app again; the startup check warns two weeks before it ends.
 
-## Facebook and TikTok (no adapter)
+## Facebook (no adapter)
 
-Neither platform has an official, ToS-compliant way for this bot to monitor a Page/creator that hasn't individually authorized the app — confirmed by research before writing any code, per the standing platform-API policy:
+Meta has no official, ToS-compliant way for this bot to monitor a Page that hasn't individually authorized the app — confirmed by research before writing any code, per the standing platform-API policy:
 
 - **Facebook**: reading a Page's posts/feed always needs that Page's admin to authorize the app (`pages_read_engagement`/`pages_read_user_content`) and pass App Review. The closest exception, "Page Public Content Access," would let an approved app read *any* public Page's posts without that Page's cooperation — but it requires Meta Business Verification (a real identity-verification process) and its only listed allowed use case is "analyze and/or display posts and engagement," which a Discord alert bot fits ambiguously at best. Not built this phase; revisit if the operator completes that verification and review.
-- **TikTok**: every official developer surface (the Content Posting API and everything else) is built around a creator connecting *their own* account to your app — the opposite of monitoring a creator you don't control. No discovery/monitoring endpoint exists at all.
 
 ## Guild isolation
 

@@ -1,7 +1,7 @@
 """Twitch Helix API adapter — live/offline detection (Phase 5).
 
 API research (2026-09-15), verified against Twitch's current developer
-documentation, not scraped/undocumented endpoints — see
+documentation — see
 [[project-platform-api-policy]] / README.md for the standing policy this
 follows:
 

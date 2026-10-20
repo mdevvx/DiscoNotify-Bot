@@ -100,6 +100,11 @@ class FakeInteraction:
         self.client = FakeClient(db, adapter)
         self.response = FakeResponse()
         self.followup = FakeFollowup()
+        self.deferred_privately: Optional[bool] = None
+        self.placeholder_deleted = False
+
+    async def delete_original_response(self) -> None:
+        self.placeholder_deleted = True
 
 
 @pytest.fixture
@@ -164,8 +169,8 @@ async def test_everyone_picked_in_the_form_confirms_with_a_single_at_sign(db: Fa
 async def test_a_channel_the_bot_cannot_post_in_is_refused_up_front(db: FakeDatabase) -> None:
     interaction = await _submit(db, channel=FakeTextChannel(bot_can_post=False))
 
-    assert interaction.response.messages[0]["ephemeral"] is True
-    assert "Send Messages" in interaction.response.messages[0]["content"]
+    assert interaction.followup.messages[0]["ephemeral"] is True
+    assert "Send Messages" in interaction.followup.messages[0]["content"]
     assert await interaction.client.accounts_repo.list_by_guild(1) == []
 
 
@@ -251,6 +256,7 @@ async def test_a_different_account_with_a_similar_name_is_not_a_duplicate(db: Fa
         ("kick", "xqc", "676", ["xqc", "XQC", "@xqc", "https://kick.com/xqc", "kick.com/XQC/"]),
         ("instagram", "pajamabillionaire", "17841400572798814", ["pajamabillionaire", "@PajamaBillionaire", "https://www.instagram.com/pajamabillionaire/", "instagram.com/pajamabillionaire?igsh=abc"]),
         ("twitter", "Cookedcom", "2008104784159805440", ["@cookedcom", "Cookedcom", "https://x.com/cookedcom", "https://twitter.com/Cookedcom/status/2110162914594443689", "x.com/cookedcom/"]),
+        ("tiktok", "khaby.lame", "6797", ["@khaby.lame", "KHABY.lame", "https://www.tiktok.com/@khaby.lame", "https://www.tiktok.com/@khaby.lame/video/7694797676306615583", "tiktok.com/@khaby.lame/"]),
     ],
 )
 def test_duplicates_are_recognised_on_every_platform(platform: str, stored_username: str, stored_id: str, spellings: list) -> None:
@@ -283,15 +289,15 @@ async def test_a_server_at_its_account_limit_cant_add_more(db: FakeDatabase) -> 
 
     interaction = await _submit(db)
 
-    assert "already monitors 25 accounts" in interaction.response.messages[0]["content"]
+    assert "already monitors 25 accounts" in interaction.followup.messages[0]["content"]
     assert len(db.tables["pulsenotify_platform_accounts"].rows) == 25
 
 
 async def test_a_blank_identifier_is_refused(db: FakeDatabase) -> None:
     interaction = await _submit(db, identifier="   ")
 
-    assert interaction.response.messages[0]["ephemeral"] is True
-    assert interaction.response.deferred is False
+    assert interaction.followup.messages[0]["ephemeral"] is True
+    assert interaction.response.deferred is True  # acknowledged privately, then refused
 
 
 # ── submitting the real form ────────────────────────────────────────────
@@ -362,3 +368,53 @@ async def test_a_token_or_permission_problem_is_never_shown_to_members(db: FakeD
     for technical in ("token", "permission", "Cannot call API", "2034048970642813"):
         assert technical not in message
     assert await interaction.client.accounts_repo.list_by_guild(1) == []
+
+
+async def test_the_form_is_acknowledged_before_any_database_call(db: FakeDatabase) -> None:
+    """Discord gives 3 seconds to respond; a slow database read used to run
+    first and the submit died with "Unknown interaction" (2026-10-20)."""
+    interaction = FakeInteraction(db, FakeAdapter())
+    order = []
+
+    async def defer(*, ephemeral: bool = False, thinking: bool = False) -> None:
+        order.append(("defer", ephemeral))
+
+    original = interaction.client.accounts_repo.list_by_guild
+
+    async def list_by_guild(guild_id: int):
+        order.append(("database", None))
+        return await original(guild_id)
+
+    interaction.response.defer = defer  # type: ignore[method-assign]
+    interaction.client.accounts_repo.list_by_guild = list_by_guild  # type: ignore[method-assign]
+
+    await AddAccountModal("youtube").apply(  # type: ignore[arg-type]
+        interaction, identifier="@example", channel=FakeTextChannel(), role_id=None
+    )
+
+    assert order[0] == ("defer", True)
+
+
+async def test_the_success_card_is_public_and_replaces_the_private_placeholder(db: FakeDatabase) -> None:
+    interaction = await _submit(db)
+
+    assert interaction.placeholder_deleted
+    assert interaction.followup.messages[0]["ephemeral"] is False
+
+
+async def test_a_form_that_expired_before_it_could_be_acknowledged_changes_nothing(db: FakeDatabase) -> None:
+    import discord
+
+    interaction = FakeInteraction(db, FakeAdapter())
+
+    async def expired(*, ephemeral: bool = False, thinking: bool = False) -> None:
+        raise discord.NotFound(type("R", (), {"status": 404, "reason": "Not Found"})(), {"code": 10062, "message": "Unknown interaction"})
+
+    interaction.response.defer = expired  # type: ignore[method-assign]
+
+    await AddAccountModal("youtube").apply(  # type: ignore[arg-type]
+        interaction, identifier="@example", channel=FakeTextChannel(), role_id=None
+    )
+
+    assert db.tables["pulsenotify_platform_accounts"].rows == []
+    assert interaction.followup.messages == [] and interaction.response.messages == []

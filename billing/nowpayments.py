@@ -28,6 +28,11 @@ FAILED_STATUSES = frozenset({"failed", "refunded"})
 EXPIRED_STATUSES = frozenset({"expired"})
 
 
+class PaymentNotFound(PermanentPlatformError):
+    """NOWPayments has no payment with that ID — typically one made under another
+    API key or in the other (sandbox / live) mode."""
+
+
 class NowPaymentsClient:
     def __init__(
         self,
@@ -104,5 +109,7 @@ class NowPaymentsClient:
             raise RateLimitedError(f"NOWPayments rate limited: {message}", retry_after=60)
         if 400 <= response.status_code < 500:
             # e.g. "amountTo is too small" — below the coin's minimum.
+            if response.status_code == 404 or "payment not found" in str(message).lower():
+                raise PaymentNotFound(f"NOWPayments: {message}")
             raise PermanentPlatformError(f"NOWPayments: {message}")
         raise TransientPlatformError(f"NOWPayments error {response.status_code}: {message}")

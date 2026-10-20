@@ -868,3 +868,37 @@ async def test_failed_and_expired_crypto_payments_raise_alerts(db: FakeDatabase,
     await service.poll_once()
 
     assert sorted(events) == ["crypto_expired", "crypto_failed"]
+
+
+async def test_a_crypto_payment_nowpayments_has_never_heard_of_is_closed_quietly_after_the_window(
+    db: FakeDatabase, clock: Clock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Made under another API key or in the other sandbox/live mode: not an
+    error to dump on every poll, and no alert to the server when it closes."""
+    from billing.nowpayments import PaymentNotFound
+
+    class Unknown(FakeNowPayments):
+        async def get_payment(self, payment_id: str):
+            raise PaymentNotFound("NOWPayments: Payment not found")
+
+    events = []
+    service = _service(db, clock, nowpayments=Unknown())
+
+    async def on_event(event: Any) -> None:
+        events.append(event)
+
+    service.on_event = on_event
+    _website_row(db, "nowpayments", "np-1", months=1, amount_usd=5.0, created_at=clock.now)
+
+    with caplog.at_level("WARNING"):
+        await service.poll_once()
+        await service.poll_once()
+    assert len([r for r in caplog.records if "NOWPayments has no payment" in r.message]) == 1  # once, no traceback
+    assert not any(r.exc_info for r in caplog.records)
+    assert db.tables["pulsenotify_payments"].rows[0]["status"] == "pending"
+
+    clock.advance(days=4)
+    await service.poll_once()
+
+    assert db.tables["pulsenotify_payments"].rows[0]["status"] == "expired"
+    assert events == []

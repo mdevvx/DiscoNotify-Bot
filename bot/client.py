@@ -24,7 +24,6 @@ from billing.polar import PolarClient
 from billing.repository import BillingRepository
 from billing.service import BillingEvent, BillingService
 from bot.events import handle_app_command_error, register_events
-from commands.admin.billing import subscribe_buttons
 from commands.pulsenotify_group import pulsenotify_group
 from config.settings import Settings
 from database.client import Database
@@ -40,6 +39,8 @@ from platforms.instagram.adapter import InstagramAdapter
 from platforms.instagram.client import InstagramClient
 from platforms.kick.adapter import KickAdapter
 from platforms.kick.client import KickClient
+from platforms.tiktok.adapter import TikTokAdapter
+from platforms.tiktok.client import TikTokClient
 from platforms.twitter.adapter import TwitterAdapter
 from platforms.twitter.client import TwitterClient
 from platforms.youtube.adapter import YouTubeAdapter
@@ -256,7 +257,7 @@ class PulseNotifyBot(commands.Bot):
         not stop the bot" rule. Each future platform follows this same
         if-key-present-register pattern.
 
-        Only finalized platforms are registered: YouTube, Kick, Instagram, X.
+        Only finalized platforms are registered: YouTube, Kick, Instagram, X, TikTok.
         The Twitch adapter exists under platforms/ but is held
         back until finalized — see the matching note on _PLATFORM_CHOICES
         in commands/accounts/account_commands.py."""
@@ -309,6 +310,14 @@ class PulseNotifyBot(commands.Bot):
         else:
             logger.warning("TWITTER_ENABLED=false — X (Twitter) monitoring is disabled.")
 
+        if self.settings.tiktok_enabled:
+            tiktok_client = TikTokClient(timeout_seconds=self.settings.monitoring_http_timeout_seconds)
+            self.monitoring.register_adapter(
+                TikTokAdapter(tiktok_client, min_poll_interval_seconds=self.settings.tiktok_min_poll_interval_seconds)
+            )
+        else:
+            logger.warning("TIKTOK_ENABLED=false — TikTok monitoring is disabled.")
+
     async def _resolve_owners(self) -> None:
         owner_ids = set(self.settings.discord_owner_ids)
         try:
@@ -328,7 +337,7 @@ class PulseNotifyBot(commands.Bot):
         maintenance is on, otherwise the configured DISCORD_STATUS_TEXT."""
         if self.maintenance.active:
             await self.change_presence(
-                status=discord.Status.dnd, activity=discord.CustomActivity(name="🛠️ Under maintenance — back soon")
+                status=discord.Status.dnd, activity=discord.CustomActivity(name="🛠️ Under maintenance")
             )
             return
         text = self.settings.discord_status_text
@@ -392,6 +401,9 @@ class PulseNotifyBot(commands.Bot):
             guild = self.get_guild(guild_id)
             if guild is None:
                 continue
+            # Imported here, not at the top: importing the module registers its
+            # slash commands, and the extension loader would then register them twice.
+            from commands.admin.billing import subscribe_buttons
             buttons = await subscribe_buttons(self.billing, guild_id, guild.name)
             view = cards.card(
                 f"You started subscribing **{guild.name}** to PulseNotify but haven't finished paying.",
@@ -425,6 +437,9 @@ class PulseNotifyBot(commands.Bot):
         lines = [f"Server: **{guild.name}**", *subscription_needed(row, price_label=self.billing.price_label)]
         if reminder >= self.settings.billing_reminder_max:
             lines.append("-# This is the last reminder — we won't message you about this again.")
+        # Imported here, not at the top: importing the module registers its
+        # slash commands, and the extension loader would then register them twice.
+        from commands.admin.billing import subscribe_buttons
         buttons = await subscribe_buttons(self.billing, guild.id, guild.name)
         return cards.card(*lines, title=title, tone=cards.WARNING, extra=buttons)
 

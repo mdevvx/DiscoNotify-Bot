@@ -32,9 +32,9 @@ logger = get_logger(__name__)
 
 _HEALTH_ICONS = {"healthy": "🟢", "degraded": "🟡", "error": "🔴", "disabled": "⚪"}
 _ACCOUNT_ICONS = {"active": "🟢", "error": "🟡", "invalid": "🔴"}
-_PLATFORM_NAMES = {"youtube": "YouTube", "kick": "Kick", "instagram": "Instagram", "twitter": "Twitter / X"}
-_PLATFORM_LABELS = {"youtube": "▶️ YouTube", "kick": "🟩 Kick", "instagram": "📸 Instagram", "twitter": "𝕏 Twitter / X"}
-_PLATFORM_ORDER = ["youtube", "kick", "instagram", "twitter"]
+_PLATFORM_NAMES = {"youtube": "YouTube", "kick": "Kick", "instagram": "Instagram", "twitter": "Twitter / X", "tiktok": "TikTok"}
+_PLATFORM_LABELS = {"youtube": "▶️ YouTube", "kick": "🟩 Kick", "instagram": "📸 Instagram", "twitter": "𝕏 Twitter / X", "tiktok": "🎵 TikTok"}
+_PLATFORM_ORDER = ["youtube", "kick", "instagram", "twitter", "tiktok"]
 _MAX_ACCOUNTS_PER_PLATFORM = 15
 # Discord's limit is 4,000 characters of text per message; leave headroom.
 _TEXT_BUDGET = 3800
@@ -186,6 +186,8 @@ def account_url(platform: str, platform_account_id: str, username: str) -> Optio
         return f"https://www.instagram.com/{handle}/"
     if platform == "twitter":
         return f"https://x.com/{handle}"
+    if platform == "tiktok":
+        return f"https://www.tiktok.com/@{handle}"
     return None
 
 

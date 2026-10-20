@@ -61,6 +61,7 @@ PLATFORM_FORMS: Dict[str, PlatformForm] = {
         "Instagram", "Instagram account", "Username or instagram.com URL (Business/Creator only)"
     ),
     "twitter": PlatformForm("Twitter / X", "Twitter / X account", "@handle or x.com / twitter.com profile URL"),
+    "tiktok": PlatformForm("TikTok", "TikTok account", "@username or tiktok.com/@username profile link"),
 }
 
 
@@ -191,8 +192,34 @@ class _Form(discord.ui.Modal):
         logger.error("Error handling form %s (guild=%s)", type(self).__name__, interaction.guild_id, exc_info=error)
         try:
             await cards.error(interaction, "Something went wrong saving that — it's been logged. Please try again.")
+        except discord.NotFound:
+            logger.warning("Couldn't report the form error: the interaction had already expired.")
         except discord.HTTPException:
             logger.warning("Couldn't report the form error to the user.", exc_info=True)
+
+
+async def _acknowledge(interaction: discord.Interaction, what: str) -> bool:
+    """Tells Discord the form was received (privately, "thinking…"). False if
+    Discord's 3-second window had already passed — nothing can be sent
+    then, so the caller must stop before changing anything."""
+    try:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+    except discord.NotFound:
+        logger.warning(
+            "%s for guild %s expired before it could be acknowledged (Discord's 3 second limit); nothing was changed.",
+            what,
+            interaction.guild_id,
+        )
+        return False
+    return True
+
+
+async def _drop_placeholder(interaction: discord.Interaction) -> None:
+    """Removes the private "thinking…" message so a public reply can follow."""
+    try:
+        await interaction.delete_original_response()
+    except discord.HTTPException:
+        logger.debug("Couldn't remove the private placeholder message.", exc_info=True)
 
 
 def _picked_id(values: Sequence[Any]) -> Optional[int]:
@@ -248,6 +275,12 @@ class AddAccountModal(_Form):
         self, interaction: discord.Interaction, *, identifier: str, channel: Any, role_id: Optional[int]
     ) -> None:
         assert interaction.guild is not None
+        # Acknowledge first: Discord gives 3 seconds, and everything below
+        # (database reads, the platform lookup) can take longer. Private, so
+        # every refusal stays visible only to the person who submitted; the
+        # public "Account added" card replaces it on success.
+        if not await _acknowledge(interaction, "Add-account form"):
+            return
         bot = interaction.client
         form = PLATFORM_FORMS[self.platform]
         identifier = identifier.strip()
@@ -284,8 +317,6 @@ class AddAccountModal(_Form):
                     "or pick another channel.",
                 )
                 return
-
-        await interaction.response.defer(thinking=True)
 
         adapter = bot.monitoring.get_adapter(self.platform)  # type: ignore[attr-defined]
         if adapter is None:
@@ -346,6 +377,7 @@ class AddAccountModal(_Form):
             account_row["id"],
             channel.name,
         )
+        await _drop_placeholder(interaction)
         await cards.reply(
             interaction,
             f"Now monitoring **{account_ref.username}** on {form.name} — alerts will post in "
