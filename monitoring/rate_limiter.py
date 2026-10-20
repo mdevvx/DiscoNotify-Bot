@@ -61,6 +61,11 @@ class RateLimiter:
             self._entries.append((time.monotonic(), cost))
             return True
 
+    def remaining(self) -> int:
+        """Budget left in the current window (read-only, never waits)."""
+        self._evict_expired()
+        return max(self._budget - self._used(), 0)
+
     def _used(self) -> int:
         return sum(cost for _, cost in self._entries)
 

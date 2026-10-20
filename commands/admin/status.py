@@ -35,6 +35,7 @@ _ACCOUNT_ICONS = {"active": "🟢", "error": "🟡", "invalid": "🔴"}
 _PLATFORM_NAMES = {"youtube": "YouTube", "kick": "Kick", "instagram": "Instagram", "twitter": "Twitter / X", "tiktok": "TikTok"}
 _PLATFORM_LABELS = {"youtube": "▶️ YouTube", "kick": "🟩 Kick", "instagram": "📸 Instagram", "twitter": "𝕏 Twitter / X", "tiktok": "🎵 TikTok"}
 _PLATFORM_ORDER = ["youtube", "kick", "instagram", "twitter", "tiktok"]
+_QUOTA_PERIODS = {"youtube": " today", "instagram": " this hour"}
 _MAX_ACCOUNTS_PER_PLATFORM = 15
 # Discord's limit is 4,000 characters of text per message; leave headroom.
 _TEXT_BUDGET = 3800
@@ -282,10 +283,14 @@ async def _format_platform_health(bot: commands.Bot) -> str:
         icon = _HEALTH_ICONS.get(row["status"], "⚪") if row else "⚪"
         quota_note = ""
         if row is not None:
-            # quota_limit/quota_remaining are only set where the provider
-            # itself reports them back (none do yet) — requests_today is
-            # this bot's own count, always accurate once anything's polled.
-            if row.get("quota_limit"):
+            # quota_limit/quota_remaining are only set for platforms that
+            # have a quota (YouTube: units per day, Instagram: calls per
+            # hour); requests_today is this bot's own count, always accurate
+            # once anything's polled.
+            if row.get("quota_limit") and row.get("quota_remaining") is not None:
+                period = _QUOTA_PERIODS.get(platform, "")
+                quota_note = f" · {row['quota_remaining']:,} of {row['quota_limit']:,} quota left{period}"
+            elif row.get("quota_limit"):
                 quota_note = f" · {row['requests_today']}/{row['quota_limit']} quota units today"
             elif row.get("requests_today"):
                 quota_note = f" · {row['requests_today']} API requests today"

@@ -107,3 +107,16 @@ async def test_zero_requests_today_shows_no_quota_note() -> None:
     )
     text = await _format_platform_health(bot)  # type: ignore[arg-type]
     assert "requests today" not in text
+
+
+async def test_shows_what_is_left_when_the_bot_reports_its_remaining_quota() -> None:
+    health = {
+        "youtube": {"status": "healthy", "requests_today": 42, "quota_limit": 10_000, "quota_remaining": 9_500},
+        "instagram": {"status": "healthy", "requests_today": 9, "quota_limit": 200, "quota_remaining": 170},
+    }
+    bot = FakeBot(FakeMonitoring(["youtube", "instagram"], health), {"youtube": 1, "instagram": 1})
+
+    text = await _format_platform_health(bot)  # type: ignore[arg-type]
+
+    assert "9,500 of 10,000 quota left today" in text
+    assert "170 of 200 quota left this hour" in text

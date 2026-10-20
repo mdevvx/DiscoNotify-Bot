@@ -87,12 +87,23 @@ class PlatformScheduler:
             await self._task
             self._task = None
 
+    async def _report_quota(self) -> None:
+        """Writes the adapter's remaining quota, where it has one, for /status
+        and the admin panel. Never lets a failure here stop polling."""
+        try:
+            snapshot = self._adapter.quota_snapshot()
+            if snapshot is not None:
+                await self._health_tracker.set_quota(remaining=snapshot[0], limit=snapshot[1])
+        except Exception:
+            logger.warning("Couldn't record %s quota.", self._adapter.platform, exc_info=True)
+
     async def _run_loop(self) -> None:
         while not self._stop_event.is_set():
             await self._poll_all()
             if self._adapter.counts_own_requests:
                 self._health_tracker.record_requests(self._adapter.take_request_count())
             await self._health_tracker.flush()
+            await self._report_quota()
             self._update_poll_interval()
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=self._poll_interval)

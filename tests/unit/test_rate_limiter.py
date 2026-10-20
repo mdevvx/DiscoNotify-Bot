@@ -77,3 +77,14 @@ async def test_try_acquire_succeeds_again_once_the_window_frees_up() -> None:
     await asyncio.sleep(0.15)
 
     assert await limiter.try_acquire() is True
+
+
+async def test_remaining_shows_the_unspent_budget_and_recovers_when_the_window_passes() -> None:
+    limiter = RateLimiter(max_requests=5, period_seconds=0.2)
+    assert limiter.remaining() == 5
+
+    await limiter.acquire(cost=2)
+    assert limiter.remaining() == 3
+
+    await asyncio.sleep(0.25)
+    assert limiter.remaining() == 5

@@ -98,7 +98,8 @@ class YouTubeAdapter(PlatformAdapter):
     ) -> None:
         self._client = client
         self._clock = clock
-        self._budget = RateLimiter(max_requests=max(daily_quota_units, _LIST_COST), period_seconds=86400)
+        self._daily_quota_units = max(daily_quota_units, _LIST_COST)
+        self._budget = RateLimiter(max_requests=self._daily_quota_units, period_seconds=86400)
         self._usable_units_per_day = max(daily_quota_units * _QUOTA_HEADROOM, _UNITS_PER_CHECK)
         self._min_poll_interval = min_poll_interval_seconds
         self._poll_interval = min_poll_interval_seconds
@@ -119,6 +120,13 @@ class YouTubeAdapter(PlatformAdapter):
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+    def quota_snapshot(self) -> Optional[Tuple[int, int]]:
+        """The bot's own count of units left in its rolling 24 hours. Google
+        resets the real quota at midnight Pacific and the count starts from
+        zero when the bot restarts, so this is an estimate (it can only
+        overstate what's left after a restart)."""
+        return self._budget.remaining(), self._daily_quota_units
 
     def poll_interval_seconds(self, distinct_account_count: int) -> Optional[float]:
         """Fast as the quota allows: every channel gets checked once per

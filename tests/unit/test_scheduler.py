@@ -133,3 +133,35 @@ async def test_start_and_stop_run_and_terminate_the_background_loop() -> None:
     await scheduler.stop()
 
     assert adapter.fetch_calls >= 2
+
+
+async def test_a_platform_with_a_quota_has_it_written_each_cycle() -> None:
+    db = FakeDatabase()
+    adapter = FakeAdapter()
+    adapter.quota_snapshot = lambda: (70, 100)  # type: ignore[method-assign]
+    scheduler = _make_scheduler(db, adapter, [])
+
+    await scheduler._report_quota()
+
+    row = db.tables["pulsenotify_platform_health"].rows[0]
+    assert (row["quota_remaining"], row["quota_limit"]) == (70, 100)
+
+
+async def test_a_platform_without_a_quota_writes_none() -> None:
+    db = FakeDatabase()
+    scheduler = _make_scheduler(db, FakeAdapter(), [])
+
+    await scheduler._report_quota()
+
+    assert db.tables["pulsenotify_platform_health"].rows == []
+
+
+async def test_a_failure_reporting_quota_never_stops_polling() -> None:
+    adapter = FakeAdapter()
+
+    def broken():
+        raise RuntimeError("boom")
+
+    adapter.quota_snapshot = broken  # type: ignore[method-assign]
+
+    await _make_scheduler(FakeDatabase(), adapter, [])._report_quota()  # must not raise

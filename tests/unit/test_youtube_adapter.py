@@ -403,3 +403,12 @@ async def test_a_channel_added_before_its_first_upload_still_announces_that_uplo
     result = await adapter.fetch_updates(_ACCOUNT, cursor=baseline.next_cursor)
 
     assert [video["id"] for video in result.items] == ["first"]
+
+
+async def test_quota_snapshot_reports_the_units_left_of_the_daily_budget() -> None:
+    adapter = _make_adapter(FakeYouTubeClient(), daily_quota_units=100)
+    assert adapter.quota_snapshot() == (100, 100)
+
+    await adapter._budget.try_acquire(cost=30)
+
+    assert adapter.quota_snapshot() == (70, 100)

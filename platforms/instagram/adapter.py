@@ -99,6 +99,7 @@ class InstagramAdapter(PlatformAdapter):
         self._client = client
         self._clock = clock
         self._wall_clock = wall_clock
+        self._hourly_call_limit = max(hourly_call_limit, 1)
         self._usable_calls_per_hour = max(hourly_call_limit * _BUDGET_HEADROOM, 1.0)
         self._budget = RateLimiter(max_requests=max(int(self._usable_calls_per_hour), 1), period_seconds=3600)
         self._min_poll_interval = min_poll_interval_seconds
@@ -144,6 +145,16 @@ class InstagramAdapter(PlatformAdapter):
             logger.warning("INSTAGRAM_ACCESS_TOKEN is missing permission(s): %s.", ", ".join(sorted(missing)))
         if info.get("type") != "PAGE":
             logger.warning("INSTAGRAM_ACCESS_TOKEN is a %s token, not a Page token.", info.get("type"))
+
+    def quota_snapshot(self) -> Optional[Tuple[int, int]]:
+        """Calls left this hour, from Meta's own x-app-usage figure (a
+        percentage of the app's hourly limit). None until Meta has reported
+        one — nothing is guessed."""
+        usage = self._client.app_usage_percent
+        if usage is None:
+            return None
+        used = min(max(usage, 0), 100)
+        return round(self._hourly_call_limit * (100 - used) / 100), self._hourly_call_limit
 
     def poll_interval_seconds(self, distinct_account_count: int) -> Optional[float]:
         """One call per account per check against the hourly budget: 1

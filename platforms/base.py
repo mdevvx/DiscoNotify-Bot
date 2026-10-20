@@ -14,7 +14,7 @@ from __future__ import annotations
 import abc
 import enum
 from dataclasses import dataclass
-from typing import Any, ClassVar, Dict, FrozenSet, List, Optional
+from typing import Any, ClassVar, Dict, FrozenSet, List, Optional, Tuple
 
 from events.models import EventType, NormalizedEvent
 
@@ -152,6 +152,14 @@ class PlatformAdapter(abc.ABC):
         overrides this to poll as fast as that quota can sustain, so it
         neither wastes latency nor burns the whole budget early in the day
         and goes dark for the rest of it."""
+        return None
+
+    def quota_snapshot(self) -> Optional[Tuple[int, int]]:
+        """(remaining, limit) of the quota this adapter spends, when the
+        platform has one and its current value is known — written to
+        platform_health once per scheduler cycle. None (the default) for a
+        platform with no quota (Twitch, Kick, X, TikTok): nothing is
+        fabricated for those."""
         return None
 
     @abc.abstractmethod

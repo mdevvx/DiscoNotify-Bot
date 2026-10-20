@@ -389,3 +389,18 @@ async def test_instagram_counts_only_real_lookups() -> None:
     assert adapter.counts_own_requests is True
     assert adapter.take_request_count() == lookups == 3  # not one per tick
     assert adapter.take_request_count() == 0
+
+
+async def test_quota_snapshot_comes_from_metas_own_usage_figure() -> None:
+    client = FakeInstagramClient()
+    adapter = _make_adapter(client, hourly_call_limit=200)
+    assert adapter.quota_snapshot() is None  # Meta hasn't reported anything yet — nothing is guessed
+
+    client.app_usage_percent = 15
+    assert adapter.quota_snapshot() == (170, 200)
+
+    client.app_usage_percent = 100
+    assert adapter.quota_snapshot() == (0, 200)
+
+    client.app_usage_percent = 130  # never negative
+    assert adapter.quota_snapshot() == (0, 200)
