@@ -2,7 +2,7 @@
 card payments through Polar, crypto payments made on the website, and
 upgrade reminders.
 
-Pricing: BILLING_PRICE_USD per month ($2.99 by default) — it must equal the
+Pricing: BILLING_PRICE_USD per month ($1.99 by default) — it must equal the
 price of the Polar product. Card: `/notify subscribe` creates a hosted
 Polar checkout for the server (the server ID travels as metadata.guild_id)
 and `/notify cancel` opens Polar's customer portal. Crypto
@@ -108,7 +108,7 @@ class BillingService:
         repo: BillingRepository,
         *,
         enabled: bool,
-        price_usd: float = 2.99,
+        price_usd: float = 1.99,
         trial_days: int = 7,
         grace_days: int = 3,
         subscribe_url: Optional[str] = None,

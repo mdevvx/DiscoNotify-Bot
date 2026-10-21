@@ -117,7 +117,7 @@ class Settings(BaseSettings):
     # The monthly price per server, in USD, as shown in Discord — it must
     # equal the price of the Polar product. Crypto amounts (3/6/12 × this)
     # are set by the website.
-    billing_price_usd: float = Field(default=2.99, gt=0, alias="BILLING_PRICE_USD")
+    billing_price_usd: float = Field(default=1.99, gt=0, alias="BILLING_PRICE_USD")
     billing_trial_days: int = Field(default=7, alias="BILLING_TRIAL_DAYS")
     billing_grace_days: int = Field(default=3, alias="BILLING_GRACE_DAYS")
     billing_poll_interval_seconds: float = Field(default=60.0, alias="BILLING_POLL_INTERVAL_SECONDS")

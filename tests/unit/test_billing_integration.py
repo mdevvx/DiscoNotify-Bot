@@ -389,21 +389,16 @@ async def test_subscribe_says_free_while_billing_is_off() -> None:
     assert "free" in interaction.response.messages[0]["content"].lower()
 
 
-async def test_subscribe_creates_a_card_checkout_for_this_server_and_links_crypto() -> None:
+async def test_subscribe_without_the_website_never_creates_a_checkout_and_links_crypto() -> None:
     bot = FakeBot()
     interaction = FakeInteraction(bot)
 
     await subscribe.callback(interaction)  # type: ignore[arg-type]
 
     reply = (interaction.response.messages or interaction.followup.messages)[0]
-    assert reply["ephemeral"] is True  # the checkout link is for the person who asked
-    assert _link_urls(reply["view"]) == [
-        "https://buy.polar.sh/co_1",
-        "https://disconotify.com/crypto?guild_id=1",
-    ]
-    assert bot.billing.checkouts == [{"guild_id": 1, "user_id": 5, "channel_id": 555}]
-    assert "$1/month" in reply["content"] and "nothing is charged until the trial ends" in reply["content"]
-    assert "`/notify cancel`" in reply["content"]
+    assert reply["ephemeral"] is True
+    assert _link_urls(reply["view"]) == ["https://disconotify.com/crypto?guild_id=1"]
+    assert bot.billing.checkouts == []  # a direct Polar checkout link is never handed out
 
 
 async def test_subscribe_in_website_mode_gives_one_signed_link_and_creates_no_checkout() -> None:
@@ -457,30 +452,6 @@ async def test_a_server_with_a_running_card_subscription_gets_no_second_checkout
 
     assert bot.billing.checkouts == []
     assert "already set up" in interaction.response.messages[0]["content"]
-
-
-@pytest.mark.parametrize("user_id", [5, _OWNER])
-async def test_a_polar_problem_is_plain_english_for_everyone_the_owner_included(user_id: int) -> None:
-    """Real case 2026-10-16: the bot's owner saw "Polar 422: body.customer_id:
-    Customer does not exist". Details go to the log under a reference code."""
-    from billing.polar import PolarError
-    from utils.errors import PermanentPlatformError
-
-    for error in (
-        PolarError("Polar rejected the access token (403): missing scope — check POLAR_ACCESS_TOKEN"),
-        PermanentPlatformError("Polar 422: body.customer_id: Customer does not exist."),
-    ):
-        bot = FakeBot()
-        bot.billing.checkout_error = error
-        interaction = FakeInteraction(bot, user_id=user_id)
-
-        await subscribe.callback(interaction)  # type: ignore[arg-type]
-
-        text = (interaction.response.messages or interaction.followup.messages)[0]["content"]
-        assert "(Reference `" in text
-        for technical in ("Polar", "POLAR_ACCESS_TOKEN", "422", "customer_id", "scope", "token"):
-            assert technical not in text
-    assert "The card payment service isn't responding right now" in text or "We couldn't complete that" in text
 
 
 async def test_a_billing_page_polar_cant_open_is_explained_without_jargon() -> None:
@@ -715,10 +686,8 @@ async def test_the_server_owner_is_dmed_an_upgrade_reminder_with_the_link() -> N
     ]
     text = plain_text(owner.sent[0])
     assert "trial has ended" in text and "Gaming Hub" in text
-    assert _link_urls(owner.sent[0]) == [
-        "https://buy.polar.sh/co_1",
-        "https://disconotify.com/crypto?guild_id=1",
-    ]
+    assert _link_urls(owner.sent[0]) == ["https://disconotify.com/crypto?guild_id=1"]
+    assert bot.billing.checkouts == []
     assert marked == [1]
 
 

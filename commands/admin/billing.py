@@ -55,20 +55,13 @@ async def subscribe_buttons(
     billing: BillingService, guild_id: int, guild_name: Optional[str] = None
 ) -> List[discord.ui.Item]:
     """Link buttons for subscribing this server — the website's subscribe page
-    when subscribing happens there, otherwise a fresh card checkout and the
-    website's crypto page. For messages sent without a command to report
-    errors to (the reminder DMs): a failure just leaves that button out."""
+    when subscribing happens there, otherwise the website's crypto page. The
+    bot never hands out a direct card checkout link. For messages sent
+    without a command to report errors to (the reminder DMs)."""
     website_url = await billing.website_subscribe_url(guild_id, guild_name=guild_name)
     if website_url:
         return [discord.ui.ActionRow(_link(f"Subscribe on the website — {billing.price_label}/month", website_url, "⭐"))]
     buttons: List[discord.ui.Button] = []
-    if billing.card_available:
-        try:
-            buttons.append(
-                _link(f"Subscribe by card — {billing.price_label}/month", await billing.start_card_checkout(guild_id), "💳")
-            )
-        except Exception:
-            logger.warning("Couldn't create a card checkout for server %s.", guild_id, exc_info=True)
     crypto_url = billing.subscribe_url(guild_id)
     if crypto_url:
         buttons.append(_link("Pay with crypto — 3/6/12 months", crypto_url, "🪙"))
@@ -134,21 +127,6 @@ async def subscribe(interaction: discord.Interaction) -> None:
             "before then with `/notify cancel` and you pay nothing."
         )
         lines.append("-# The link is personal to this server and works for 30 minutes — run this command again for a new one.")
-    elif billing.card_available:
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        try:
-            url = await billing.start_card_checkout(
-                guild_id, user_id=interaction.user.id, channel_id=interaction.channel_id
-            )
-        except Exception as exc:
-            await _report_error(interaction, exc)
-            return
-        buttons.append(_link(f"Subscribe by card — {billing.price_label}/month", url, "💳"))
-        lines.append(
-            "💳 **Card** renews monthly by itself. During the free trial your card is saved but **nothing is "
-            "charged until the trial ends** — cancel before then with `/notify cancel` and you pay nothing."
-        )
-
     crypto_url = None if (website_url or already_subscribed) else billing.subscribe_url(guild_id)
     if crypto_url:
         buttons.append(_link("Pay with crypto — 3/6/12 months", crypto_url, "🪙"))
@@ -156,7 +134,7 @@ async def subscribe(interaction: discord.Interaction) -> None:
 
     if not buttons and not already_subscribed:
         lines.append(_NOT_READY)
-        logger.warning("Neither card (POLAR_*) nor crypto (BILLING_SUBSCRIBE_URL) payments are configured.")
+        logger.warning("The website subscribe page (BILLING_SUBSCRIBE_URL and BILLING_LINK_SECRET) is not configured.")
     else:
         lines.append(f"-# This server's ID is `{guild_id}`. Alerts switch on within about 2 minutes of paying.")
     await cards.reply(

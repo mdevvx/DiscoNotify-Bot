@@ -65,6 +65,7 @@ class FakeAdapter(PlatformAdapter):
             event_type=EventType.VIDEO_PUBLISHED,
             platform_event_id=raw_item["id"],
             title=raw_item.get("title"),
+            published_at=raw_item.get("published_at"),
         )
 
 
@@ -205,8 +206,9 @@ async def test_two_sessions_without_a_stream_id_get_different_ended_event_ids(ha
     """Regression test: with no stream ID, every session's "ended" event used
     the same id ("<account>-ended"), so the dedup ledger dropped every
     stream-ended alert after an account's first one."""
-    first = datetime.datetime(2026, 10, 12, 13, 0, tzinfo=datetime.timezone.utc)
-    second = datetime.datetime(2026, 10, 13, 9, 0, tzinfo=datetime.timezone.utc)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    first = now - datetime.timedelta(hours=5)
+    second = now - datetime.timedelta(hours=1)
     harness.adapter.live_queue = [
         LiveStatus(is_live=True, started_at=first),
         LiveStatus(is_live=False),
@@ -243,9 +245,9 @@ async def test_two_separate_live_sessions_without_a_stream_id_get_different_even
     the events table's unique key is (account_id, event_type,
     platform_event_id)."""
     harness.adapter.live_queue = [
-        LiveStatus(is_live=True, stream_id=None, started_at=datetime.datetime(2026, 1, 1)),
+        LiveStatus(is_live=True, stream_id=None, started_at=datetime.datetime.now() - datetime.timedelta(hours=5)),
         LiveStatus(is_live=False),
-        LiveStatus(is_live=True, stream_id=None, started_at=datetime.datetime(2026, 1, 2)),
+        LiveStatus(is_live=True, stream_id=None, started_at=datetime.datetime.now() - datetime.timedelta(hours=1)),
     ]
 
     await harness.worker.poll_once()  # goes live (session 1)
@@ -318,3 +320,34 @@ async def test_rate_limited_error_pauses_the_platform_not_the_account(harness: H
     assert row is not None
     assert row["consecutive_failures"] == 0
     assert row["status"] == "active"
+
+
+async def test_content_older_than_a_day_is_skipped_but_the_cursor_still_advances(harness: Harness) -> None:
+    """Resuming after a pause (expired trial, kicked and re-invited) must not
+    announce everything posted meanwhile."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    harness.adapter.pending_items = [
+        {"id": "old", "published_at": now - datetime.timedelta(days=3)},
+        {"id": "recent", "published_at": now - datetime.timedelta(hours=2)},
+        {"id": "unknown-age"},
+    ]
+
+    await harness.worker.poll_once()
+
+    assert [e.platform_event_id for e in harness.submitted] == ["recent", "unknown-age"]
+    assert (await harness.account_repo.get("acc-1"))["content_cursor"] == "next-cursor"
+
+
+async def test_the_ended_alert_of_a_stream_that_began_over_a_day_ago_is_skipped(harness: Harness) -> None:
+    await harness.live_state_repo.set_live(
+        guild_id=1,
+        account_id="acc-1",
+        stream_id="s1",
+        started_at=datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=3),
+    )
+    harness.adapter.live_queue = [LiveStatus(is_live=False)]
+
+    await harness.worker.poll_once()
+
+    assert [e for e in harness.submitted if e.event_type == EventType.STREAM_ENDED] == []
+    assert (await harness.live_state_repo.get("acc-1"))["is_live"] is False

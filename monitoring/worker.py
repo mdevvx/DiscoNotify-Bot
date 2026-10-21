@@ -30,9 +30,32 @@ logger = get_logger(__name__)
 # hammering it."
 _DEFAULT_RATE_LIMIT_WAIT_SECONDS = 60.0
 
+# Nothing older than this is announced. Alerts normally go out within
+# minutes, so this only bites when monitoring resumes after a pause (an
+# expired trial, a lapsed subscription, maintenance, the bot being kicked
+# and re-invited): a server then starts fresh instead of getting a burst of
+# alerts for everything posted while it was paused. The saved cursor still
+# advances past the skipped items, so they're never announced later either.
+MAX_ALERT_AGE = datetime.timedelta(hours=24)
+
 
 def _utcnow() -> datetime.datetime:
     return datetime.datetime.now(datetime.timezone.utc)
+
+
+def _is_stale(moment: object) -> bool:
+    """Whether `moment` (a datetime or ISO string) is older than MAX_ALERT_AGE.
+    Unknown or unparseable times are never stale: better a late alert than a lost one."""
+    if isinstance(moment, str):
+        try:
+            moment = datetime.datetime.fromisoformat(moment.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+    if not isinstance(moment, datetime.datetime):
+        return False
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=datetime.timezone.utc)
+    return _utcnow() - moment > MAX_ALERT_AGE
 
 
 class AccountWorker:
@@ -91,6 +114,14 @@ class AccountWorker:
         for raw_item in result.items:
             event = self._adapter.normalize_event(self._account_ref, raw_item)
             event = dataclasses.replace(event, guild_id=self._guild_id, account_id=self._account_id)
+            if _is_stale(event.published_at):
+                logger.info(
+                    "Skipping an old %s item for account %s (published %s).",
+                    self._account_ref.platform,
+                    self._account_id,
+                    event.published_at,
+                )
+                continue
             await self._submit_event(event)
 
     async def _fetch_updates(self):
@@ -147,6 +178,8 @@ class AccountWorker:
             # would be the same every time and only the first would send.
             ended_session = ended_stream_id or f"{self._account_id}-{(previous or {}).get('started_at')}"
             await self._live_state_repo.set_offline(guild_id=self._guild_id, account_id=self._account_id)
+            if _is_stale((previous or {}).get("started_at")):
+                return  # the stream began before a long pause; nobody wants its "ended" alert now
             await self._submit_event(
                 NormalizedEvent(
                     guild_id=self._guild_id,

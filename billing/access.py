@@ -69,7 +69,7 @@ def utcnow() -> datetime.datetime:
     return datetime.datetime.now(datetime.timezone.utc)
 
 
-def describe_access(access: Access, row: Optional[Dict[str, Any]], *, price_label: str = "$2.99") -> str:
+def describe_access(access: Access, row: Optional[Dict[str, Any]], *, price_label: str = "$1.99") -> str:
     """One line for /notify status and /notify subscribe."""
     row = row or {}
     if access.reason == AccessReason.BILLING_OFF:

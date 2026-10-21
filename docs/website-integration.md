@@ -84,7 +84,7 @@ Always verify on the server, on **every** request that uses the token.
 ## 2. `GET /subscribe?t=…` — the page (way A)
 
 - Token invalid or expired → **warning** alert: "This link has expired. Run `/notify subscribe` in your server for a new one."
-- Valid → show the server name (`n`) — **HTML-escape it**: it's whatever the server's admin typed — the price ($2.99/month), and if `d > 0`: "Free trial: your card is saved now and **nothing is charged for `d` more days**. Cancel before then with `/notify cancel` and you pay nothing."
+- Valid → show the server name (`n`) — **HTML-escape it**: it's whatever the server's admin typed — the price ($1.99/month), and if `d > 0`: "Free trial: your card is saved now and **nothing is charged for `d` more days**. Cancel before then with `/notify cancel` and you pay nothing."
 - A **Pay by card** button (a form that POSTs the token to `/api/checkout`) and, if you offer crypto, **Pay with crypto**.
 - Links to Terms, Privacy and Refund Policy next to the button.
 
