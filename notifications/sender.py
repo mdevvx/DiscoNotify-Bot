@@ -55,6 +55,8 @@ logger = get_logger(__name__)
 WebhookFromURL = Callable[..., discord.Webhook]
 ImageReady = Callable[[str], Awaitable[bool]]
 
+_HEAD_UNSUPPORTED_STATUSES = frozenset({400, 403, 405, 501})
+
 # How often, and for how long, to re-check a thumbnail that wasn't ready
 # when its alert went out. YouTube can take several minutes to generate
 # one for a fresh upload.
@@ -167,6 +169,10 @@ class NotificationSender:
             self._http = httpx.AsyncClient(timeout=_IMAGE_CHECK_TIMEOUT_SECONDS, follow_redirects=True)
         try:
             response = await self._http.head(url)
+            if response.status_code in _HEAD_UNSUPPORTED_STATUSES:
+                # Some CDNs (TikTok's) reject HEAD but serve the image on GET.
+                async with self._http.stream("GET", url) as streamed:
+                    response = streamed
         except httpx.HTTPError:
             return False
         return response.status_code == 200 and response.headers.get("content-type", "").startswith("image/")
