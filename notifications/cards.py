@@ -38,6 +38,8 @@ from events.models import EventType, NormalizedEvent
 _DESCRIPTION_MAX_LENGTH = 350
 _TITLE_MAX_LENGTH = 256
 _DEFAULT_COLOR = constants.COLOR_PRIMARY
+# TikTok's logo cyan.
+_TIKTOK_CYAN = 0x25F4EE
 
 
 @dataclass(frozen=True)
@@ -68,7 +70,7 @@ _STYLES: Dict[str, _PlatformStyle] = {
         name="Twitter / X", color=0x1D9BF0, button_label="Open on Twitter / X", footers={}, description_label="Post"
     ),
     "tiktok": _PlatformStyle(
-        name="TikTok", color=0xFE2C55, button_label="Watch on TikTok", footers={}, description_label="Caption"
+        name="TikTok", color=_TIKTOK_CYAN, button_label="Watch on TikTok", footers={}, description_label="Caption"
     ),
 }
 

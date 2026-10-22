@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import io
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
 import discord
@@ -56,6 +57,13 @@ WebhookFromURL = Callable[..., discord.Webhook]
 ImageReady = Callable[[str], Awaitable[bool]]
 
 _HEAD_UNSUPPORTED_STATUSES = frozenset({400, 403, 405, 501})
+
+# TikTok's signed cover links don't render when Discord fetches them itself
+# (the card shows no image), so the cover is downloaded and uploaded with the
+# alert instead, and the card points at the attachment.
+_ATTACHED_COVER_PLATFORMS = frozenset({"tiktok"})
+_COVER_FILENAME = "cover.jpg"
+_COVER_MAX_BYTES = 8 * 1024 * 1024
 
 # How often, and for how long, to re-check a thumbnail that wasn't ready
 # when its alert went out. YouTube can take several minutes to generate
@@ -131,11 +139,17 @@ class NotificationSender:
             event.thumbnail_url  # type: ignore[arg-type]
         )
         shown = dataclasses.replace(event, thumbnail_url=None) if image_pending else event
+        cover: Optional[bytes] = None
+        if shown.thumbnail_url and embed_enabled and event.platform in _ATTACHED_COVER_PLATFORMS:
+            cover = await self._download_image(shown.thumbnail_url)
+            shown = dataclasses.replace(shown, thumbnail_url=f"attachment://{_COVER_FILENAME}" if cover else None)
         layout = build_alert(shown, top_line=top_line, rich=embed_enabled)
 
         sent = []
         for channel_row in channels:
-            message = await self._send_to_channel(channel_row, layout=layout, allowed_mentions=allowed_mentions)
+            message = await self._send_to_channel(
+                channel_row, layout=layout, allowed_mentions=allowed_mentions, cover=cover
+            )
             if message is not None:
                 sent.append(message)
 
@@ -176,6 +190,23 @@ class NotificationSender:
         except httpx.HTTPError:
             return False
         return response.status_code == 200 and response.headers.get("content-type", "").startswith("image/")
+
+    @staticmethod
+    def _cover_file(cover: bytes) -> discord.File:
+        return discord.File(io.BytesIO(cover), filename=_COVER_FILENAME)
+
+    async def _download_image(self, url: str) -> Optional[bytes]:
+        """The image's bytes, or None if it can't be fetched (the alert then
+        goes out without it)."""
+        if self._http is None:
+            self._http = httpx.AsyncClient(timeout=_IMAGE_CHECK_TIMEOUT_SECONDS, follow_redirects=True)
+        try:
+            response = await self._http.get(url)
+        except httpx.HTTPError:
+            return None
+        if response.status_code != 200 or not response.headers.get("content-type", "").startswith("image/"):
+            return None
+        return response.content if len(response.content) <= _COVER_MAX_BYTES else None
 
     def _top_line(
         self,
@@ -220,6 +251,7 @@ class NotificationSender:
         *,
         layout: discord.ui.LayoutView,
         allowed_mentions: discord.AllowedMentions,
+        cover: Optional[bytes] = None,
     ) -> Optional[Any]:
         """Returns the sent message (for a later edit), or None if nothing
         was delivered."""
@@ -240,6 +272,8 @@ class NotificationSender:
         # every alert) — a deleted webhook surfaces as NotFound on send,
         # and is replaced right there.
         webhook = await self.get_or_create_webhook(channel_row, discord_channel, verify=False)
+        # A discord.File is used up by one send, so each attempt gets its own.
+        extra: Dict[str, Any] = {}
         for attempt in range(2):
             if webhook is None:
                 break
@@ -248,7 +282,9 @@ class NotificationSender:
                 # module's docstring for why: it would stomp any branding an
                 # admin has customized on this webhook in Discord's own UI.
                 # wait=True returns the message, so it can be edited later.
-                return await webhook.send(view=layout, allowed_mentions=allowed_mentions, wait=True)
+                if cover:
+                    extra = {"files": [self._cover_file(cover)]}
+                return await webhook.send(view=layout, allowed_mentions=allowed_mentions, wait=True, **extra)
             except discord.NotFound:
                 # The webhook itself was deleted from Discord's side (e.g.
                 # a server admin removed it manually) — forget it and send
@@ -262,7 +298,9 @@ class NotificationSender:
                 break
 
         try:
-            return await discord_channel.send(view=layout, allowed_mentions=allowed_mentions)
+            if cover:
+                extra = {"files": [self._cover_file(cover)]}
+            return await discord_channel.send(view=layout, allowed_mentions=allowed_mentions, **extra)
         except discord.Forbidden:
             await self._mark_invalid(channel_row, "missing permission to send messages")
         except discord.NotFound:

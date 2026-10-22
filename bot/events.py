@@ -38,6 +38,15 @@ def register_events(bot: "DiscoNotifyBot") -> None:
             await bot.guilds_repo.sync_presence(guild.id for guild in bot.guilds)
         except Exception:
             logger.warning("Couldn't sync which servers the bot is in.", exc_info=True)
+        # A server added while the bot was offline never got on_guild_join, so start its trial now.
+        # Servers that already have billing are untouched (access() only creates a missing row).
+        billing = getattr(bot, "billing", None)
+        if billing is not None and billing.enabled:
+            for guild in bot.guilds:
+                try:
+                    await billing.access(guild.id)
+                except Exception:
+                    logger.warning("Couldn't start the trial for server %s.", guild.id, exc_info=True)
 
     @bot.event
     async def on_guild_available(guild: discord.Guild) -> None:
