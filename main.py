@@ -30,6 +30,10 @@ async def main() -> None:
 
     logger.info("Starting DiscoNotify (environment=%s)...", settings.environment)
 
+    token = settings.discord_token
+    # Fingerprint only (length + ends), to compare against the known-good token.
+    logger.info("Discord token loaded: %d chars, %s...%s", len(token), token[:2], token[-2:])
+
     bot = DiscoNotifyBot(settings=settings)
     await run(bot, settings.discord_token)
 

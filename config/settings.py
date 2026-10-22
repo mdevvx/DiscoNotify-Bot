@@ -175,6 +175,18 @@ class Settings(BaseSettings):
             return None
         return value
 
+    @field_validator("discord_token", mode="before")
+    @classmethod
+    def _clean_discord_token(cls, value: object) -> object:
+        # Hosting dashboards keep pasted quotes, spaces and newlines verbatim,
+        # and Discord answers any of them with an opaque 401.
+        if not isinstance(value, str):
+            return value
+        token = value.strip().strip("\"'").strip()
+        if token.lower().startswith("bot "):
+            token = token[4:].strip()
+        return token
+
     @field_validator("log_level")
     @classmethod
     def _validate_log_level(cls, value: str) -> str:
