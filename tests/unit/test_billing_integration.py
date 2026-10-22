@@ -103,13 +103,9 @@ class FakeBilling:
         self.payer: Optional[int] = 5
         self.checkout_error: Optional[Exception] = None
         self.website: Optional[str] = None  # set to simulate "subscribing happens on the website"
-        self.website_links: List[Dict[str, Any]] = []
 
-    async def website_subscribe_url(self, guild_id: int, *, user_id: Any = None, channel_id: Any = None, guild_name: Any = None) -> Any:
-        if not self.website:
-            return None
-        self.website_links.append({"guild_id": guild_id, "user_id": user_id, "channel_id": channel_id, "guild_name": guild_name})
-        return f"{self.website}?t=signed.token"
+    def plain_subscribe_url(self) -> Any:
+        return self.website or None
 
     def subscribe_url(self, guild_id: int) -> Any:
         return f"{self.site}?guild_id={guild_id}" if self.site else None
@@ -401,7 +397,7 @@ async def test_subscribe_without_the_website_never_creates_a_checkout_and_links_
     assert bot.billing.checkouts == []  # a direct Polar checkout link is never handed out
 
 
-async def test_subscribe_in_website_mode_gives_one_signed_link_and_creates_no_checkout() -> None:
+async def test_subscribe_in_website_mode_gives_one_plain_link_and_creates_no_checkout() -> None:
     bot = FakeBot()
     bot.billing.website = "https://disconotify.com/subscribe"
     interaction = FakeInteraction(bot)
@@ -410,10 +406,9 @@ async def test_subscribe_in_website_mode_gives_one_signed_link_and_creates_no_ch
 
     reply = interaction.response.messages[0]
     assert reply["ephemeral"] is True
-    assert _link_urls(reply["view"]) == ["https://disconotify.com/subscribe?t=signed.token"]
+    assert _link_urls(reply["view"]) == ["https://disconotify.com/subscribe"]
     assert bot.billing.checkouts == []  # the website creates the checkout
-    assert bot.billing.website_links == [{"guild_id": 1, "user_id": 5, "channel_id": 555, "guild_name": "Custom Bots"}]
-    assert "website" in reply["content"] and "works for 30 minutes" in reply["content"]
+    assert "website" in reply["content"]
 
 
 async def test_website_mode_adds_no_second_subscription_button_for_a_running_card_subscription() -> None:
@@ -425,7 +420,7 @@ async def test_website_mode_adds_no_second_subscription_button_for_a_running_car
 
     await subscribe.callback(interaction)  # type: ignore[arg-type]
 
-    assert _link_urls(interaction.response.messages[0]["view"]) == [] and bot.billing.website_links == []
+    assert _link_urls(interaction.response.messages[0]["view"]) == []
 
 
 async def test_subscribe_without_card_or_crypto_set_up_says_it_isnt_ready() -> None:

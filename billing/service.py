@@ -171,6 +171,12 @@ class BillingService:
         result; without this the bot creates the card checkout itself."""
         return self._subscribe_url is not None and self._link_secret is not None
 
+    def plain_subscribe_url(self) -> Optional[str]:
+        """The website's subscribe page exactly as configured — no token, so
+        Discord's "Leaving Discord" prompt shows a short, clean link (None
+        unless website_mode)."""
+        return self._subscribe_url if self.website_mode else None  # type: ignore[return-value]
+
     async def website_subscribe_url(
         self,
         guild_id: int,
