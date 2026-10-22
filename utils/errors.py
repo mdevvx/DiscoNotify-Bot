@@ -60,3 +60,14 @@ class PermanentPlatformError(PlatformError):
     RetryPolicy re-raises this immediately instead of burning through retry
     attempts on something that will never succeed.
     """
+
+
+class PlatformPaused(DiscoNotifyError):
+    """Raised by a worker just before an API call that must not be made
+    because its platform is paused after a rate limit.
+
+    Not a failure of the account or the platform: nothing was called, so
+    nothing is recorded, and RetryPolicy never retries it. It exists so that
+    workers already waiting in line when one of them hits the limit stop
+    instead of each making a call that is certain to be refused.
+    """

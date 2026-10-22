@@ -23,6 +23,8 @@ class AccessReason(str, enum.Enum):
     PAID = "paid"
     GRACE = "grace"
     EXPIRED = "expired"
+    # A new server whose free trial hasn't been activated on the website yet.
+    NEEDS_ACTIVATION = "needs_activation"
 
 
 @dataclass(frozen=True)
@@ -48,6 +50,9 @@ def evaluate(row: Dict[str, Any], *, now: datetime.datetime, grace: datetime.tim
 
     if paid_until is not None and now < paid_until + grace:
         return Access(True, AccessReason.GRACE, paid_until + grace)
+
+    if row.get("activation_required") and trial_ends_at is None and paid_until is None:  # never paid either
+        return Access(False, AccessReason.NEEDS_ACTIVATION)
 
     return Access(False, AccessReason.EXPIRED)
 
@@ -86,12 +91,24 @@ def describe_access(access: Access, row: Optional[Dict[str, Any]], *, price_labe
         return f"✅ Paid until {_when(access.until, 'D')} — {how}"
     if access.reason == AccessReason.GRACE:
         return f"⚠️ Payment overdue — monitoring stops {_when(access.until, 'R')} unless renewed"
+    if access.reason == AccessReason.NEEDS_ACTIVATION:
+        return "🕐 Free trial not started yet — activate it on the website to begin"
     return "🔴 Subscription ended — monitoring is paused. Use `/notify subscribe`."
 
 
 def _when(moment: Optional[datetime.datetime], style: str) -> str:
     """<t:…> — Discord renders it in each viewer's own timezone."""
     return f"<t:{int(moment.timestamp())}:{style}>" if moment else "soon"
+
+
+def activation_needed(url: str) -> "list[str]":
+    """What a new server sees until its free trial is activated."""
+    return [
+        "This server's free trial hasn't been started yet. Activate it on the website — it takes a minute, "
+        "and the trial begins the moment you do.",
+        f"**{url}**",
+        "Log in with Discord, pick this server, and you're set. A server admin (Manage Server) can do it.",
+    ]
 
 
 def subscription_needed(row: Optional[Dict[str, Any]], *, price_label: str) -> "list[str]":

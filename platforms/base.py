@@ -129,6 +129,18 @@ class PlatformAdapter(abc.ABC):
     # per tick. The worker skips its own per-call counting for them.
     counts_own_requests: ClassVar[bool] = False
 
+    # How many times one check may be attempted when it fails for a transient
+    # reason. None = the monitoring default (MONITORING_MAX_RETRY_ATTEMPTS).
+    # A platform whose every request spends a scarce quota asks for fewer:
+    # each retry is another real call against the same budget.
+    max_retry_attempts: ClassVar[Optional[int]] = None
+
+    # Start the accounts' checks spread across part of the poll interval
+    # instead of all at the same instant, so a platform with a shared quota
+    # never fires a burst — and one that gets rate limited stops the rest of
+    # the line before they spend calls too.
+    spread_polls: ClassVar[bool] = False
+
     def supports(self, capability: Capability) -> bool:
         return capability in self.capabilities
 
@@ -189,6 +201,15 @@ class PlatformAdapter(abc.ABC):
         Synchronous and side-effect free by design — this is pure data
         transformation, not another API call.
         """
+
+    async def restore_state(self) -> None:
+        """Called once at startup, before polling begins: reload what this
+        adapter keeps across restarts (a quota counter, say). Must never
+        raise. Default no-op."""
+
+    async def persist_state(self) -> None:
+        """Called once per scheduler cycle: save what restore_state() reloads,
+        if it changed. Must never raise. Default no-op."""
 
     async def check_credentials(self) -> None:
         """Called once at startup. Logs a warning if the adapter's

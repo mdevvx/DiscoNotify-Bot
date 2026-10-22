@@ -117,6 +117,10 @@ class MonitoringManager:
                 await adapter.check_credentials()
             except Exception:
                 logger.warning("Credential check for %s failed.", adapter.platform, exc_info=True)
+            try:
+                await adapter.restore_state()
+            except Exception:
+                logger.warning("Couldn't restore %s state.", adapter.platform, exc_info=True)
         self._event_processor.start()
         await asyncio.gather(*(scheduler.start() for scheduler in self._schedulers.values()))
         self._started = True

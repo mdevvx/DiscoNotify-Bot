@@ -43,11 +43,12 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, ClassVar, Dict, FrozenSet, List, Optional, Set, Tuple
 
+from database.repositories.bot_state import BotStateRepository
 from events.models import NormalizedEvent
-from monitoring.rate_limiter import RateLimiter
+from monitoring.daily_quota import DailyQuota
 from platforms.base import AccountRef, Capability, FetchResult, LiveStatus, PlatformAdapter
 from platforms.youtube import parser
-from platforms.youtube.client import YouTubeClient
+from platforms.youtube.client import QuotaExceededError, YouTubeClient
 from utils.errors import PermanentPlatformError
 from utils.logger import get_logger
 
@@ -59,9 +60,12 @@ _MAX_IDS_PER_VIDEOS_CALL = 50
 # Worst case per channel per check: playlistItems.list + videos.list.
 _UNITS_PER_CHECK = 2
 # Fraction of the daily quota the polling cadence is sized against. The
-# rest is headroom for account-add lookups, uploads-playlist lookups after
-# a restart, and the in-memory budget resetting on every restart.
+# rest is headroom for account-add lookups and uploads-playlist lookups
+# after a restart.
 _QUOTA_HEADROOM = 0.9
+# Where the day's used units are kept (notify_bot_state) so a restart
+# doesn't make the bot forget what it already spent today.
+_STATE_KEY = "youtube_quota"
 _ACTIVE_BROADCAST_STATES = frozenset({"upcoming", "live"})
 _CURSOR_SEPARATOR = "|"
 
@@ -87,6 +91,9 @@ class YouTubeAdapter(PlatformAdapter):
         {Capability.VIDEOS, Capability.SHORTS, Capability.LIVE_STATUS}
     )
     counts_own_requests: ClassVar[bool] = True
+    # A retry is another call that spends units of the one daily quota.
+    max_retry_attempts: ClassVar[Optional[int]] = 2
+    spread_polls: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -95,11 +102,16 @@ class YouTubeAdapter(PlatformAdapter):
         daily_quota_units: int,
         min_poll_interval_seconds: float = 30.0,
         clock: Callable[[], float] = time.monotonic,
+        wall_clock: Callable[[], datetime.datetime] = lambda: datetime.datetime.now(datetime.timezone.utc),
+        state_store: Optional[BotStateRepository] = None,
     ) -> None:
         self._client = client
         self._clock = clock
         self._daily_quota_units = max(daily_quota_units, _LIST_COST)
-        self._budget = RateLimiter(max_requests=self._daily_quota_units, period_seconds=86400)
+        # Google's quota resets at midnight Pacific, so the count is per
+        # Pacific day — not a rolling 24 hours — and is saved across restarts.
+        self._budget = DailyQuota(self._daily_quota_units, clock=wall_clock)
+        self._state_store = state_store
         self._usable_units_per_day = max(daily_quota_units * _QUOTA_HEADROOM, _UNITS_PER_CHECK)
         self._min_poll_interval = min_poll_interval_seconds
         self._poll_interval = min_poll_interval_seconds
@@ -122,11 +134,31 @@ class YouTubeAdapter(PlatformAdapter):
         await self._client.aclose()
 
     def quota_snapshot(self) -> Optional[Tuple[int, int]]:
-        """The bot's own count of units left in its rolling 24 hours. Google
-        resets the real quota at midnight Pacific and the count starts from
-        zero when the bot restarts, so this is an estimate (it can only
-        overstate what's left after a restart)."""
+        """The bot's own count of units left today (Pacific time, when Google
+        resets the quota). Google reports no usage figure, so this counts
+        what the bot spent, saved across restarts; units spent by anything
+        else using the same API key aren't included."""
         return self._budget.remaining(), self._daily_quota_units
+
+    async def restore_state(self) -> None:
+        if self._state_store is None:
+            return
+        try:
+            self._budget.restore(await self._state_store.get(_STATE_KEY))
+        except Exception:
+            logger.warning("Couldn't reload today's YouTube quota count; starting from zero.", exc_info=True)
+
+    async def persist_state(self) -> None:
+        if self._state_store is None:
+            return
+        state = self._budget.take_state()
+        if state is None:
+            return
+        try:
+            await self._state_store.set(_STATE_KEY, state)
+        except Exception:
+            self._budget.mark_dirty()
+            raise
 
     def poll_interval_seconds(self, distinct_account_count: int) -> Optional[float]:
         """Fast as the quota allows: every channel gets checked once per
@@ -225,7 +257,11 @@ class YouTubeAdapter(PlatformAdapter):
             if cached is not None and self._clock() - cached.fetched_at < self._poll_interval / 2:
                 return cached
 
-            snapshot = await self._fetch_snapshot(account, cached)
+            try:
+                snapshot = await self._fetch_snapshot(account, cached)
+            except QuotaExceededError:
+                self._budget.exhaust()  # Google says it's gone — believe it, whatever our own count said
+                raise
             if snapshot is not None:
                 self._snapshots[channel_id] = snapshot
             return snapshot

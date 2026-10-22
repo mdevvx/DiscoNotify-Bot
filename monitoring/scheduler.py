@@ -12,6 +12,7 @@ without a bot restart.
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Awaitable, Callable, Dict, Optional, Set
 
 from database.repositories.accounts import PlatformAccountRepository
@@ -25,6 +26,13 @@ from platforms.base import AccountRef, PlatformAdapter
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# A platform that asks for spread-out polling (PlatformAdapter.spread_polls)
+# starts its accounts' checks across this fraction of the poll interval, with
+# at most _MAX_SPREAD_GAP_SECONDS between two of them.
+_SPREAD_FRACTION = 0.5
+_MAX_SPREAD_GAP_SECONDS = 30.0
+_MIN_WAIT_SECONDS = 1.0
 
 
 class PlatformScheduler:
@@ -97,16 +105,31 @@ class PlatformScheduler:
         except Exception:
             logger.warning("Couldn't record %s quota.", self._adapter.platform, exc_info=True)
 
+    async def _persist_state(self) -> None:
+        """Lets the adapter save what it keeps across restarts. Never lets a
+        failure here stop polling."""
+        try:
+            await self._adapter.persist_state()
+        except Exception:
+            logger.warning("Couldn't save %s state.", self._adapter.platform, exc_info=True)
+
     async def _run_loop(self) -> None:
         while not self._stop_event.is_set():
+            started = time.monotonic()
             await self._poll_all()
+            elapsed = time.monotonic() - started
             if self._adapter.counts_own_requests:
                 self._health_tracker.record_requests(self._adapter.take_request_count())
             await self._health_tracker.flush()
             await self._report_quota()
+            await self._persist_state()
             self._update_poll_interval()
+            # The time spent spreading the checks out counts toward the interval.
+            wait = self._poll_interval
+            if self._adapter.spread_polls:
+                wait = max(self._poll_interval - elapsed, min(self._poll_interval, _MIN_WAIT_SECONDS))
             try:
-                await asyncio.wait_for(self._stop_event.wait(), timeout=self._poll_interval)
+                await asyncio.wait_for(self._stop_event.wait(), timeout=wait)
             except asyncio.TimeoutError:
                 pass
 
@@ -123,8 +146,9 @@ class PlatformScheduler:
         if not self._workers:
             return
 
+        gap = self._spread_gap(len(self._workers))
         results = await asyncio.gather(
-            *(worker.poll_once() for worker in self._workers.values()),
+            *(self._poll_after(worker, index * gap) for index, worker in enumerate(self._workers.values())),
             return_exceptions=True,
         )
         for account_id, result in zip(self._workers.keys(), results):
@@ -134,6 +158,22 @@ class PlatformScheduler:
                 # genuinely unexpected slipped through, so it's logged but
                 # still must not stop the other accounts from being polled.
                 logger.error("Unexpected error polling account %s: %s", account_id, result, exc_info=result)
+
+    def _spread_gap(self, worker_count: int) -> float:
+        """Seconds between one account's check starting and the next's — 0
+        for a platform that doesn't ask for spreading."""
+        if not self._adapter.spread_polls or worker_count < 2:
+            return 0.0
+        return min(self._poll_interval * _SPREAD_FRACTION / worker_count, _MAX_SPREAD_GAP_SECONDS)
+
+    async def _poll_after(self, worker: AccountWorker, delay: float) -> None:
+        if delay > 0:
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=delay)
+                return  # shutting down
+            except asyncio.TimeoutError:
+                pass
+        await worker.poll_once()
 
     def _update_poll_interval(self) -> None:
         distinct_accounts = len({worker.platform_account_id for worker in self._workers.values()})

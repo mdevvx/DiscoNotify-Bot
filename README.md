@@ -80,6 +80,8 @@ Before any platform integration is built: verify that platform's *current* offic
    - [database/migrations/0010_bot_present.sql](database/migrations/0010_bot_present.sql) — which servers the bot is in (website server list)
    - [database/migrations/0011_dm_log.sql](database/migrations/0011_dm_log.sql) — DM delivery log
    - [database/migrations/0012_rename_to_disconotify.sql](database/migrations/0012_rename_to_disconotify.sql) — renames the schema to `disconotify` and tables to `notify_*`
+   - [database/migrations/0013_email_and_trial_activation.sql](database/migrations/0013_email_and_trial_activation.sql) — trial activation, email contacts / templates / outbox, and the `notify_activate_trial()` function the website calls (**run it before deploying this bot version**)
+   - [database/migrations/0014_more_email_templates.sql](database/migrations/0014_more_email_templates.sql) — three more default templates (renewed, ended, lapsed-subscription reminder)
 
    Then add `disconotify` under **Project Settings > Data API > Exposed schemas**. All tables live in that schema, not `public`, and the bot can't reach them until the schema is exposed.
 
@@ -97,9 +99,9 @@ Before any platform integration is built: verify that platform's *current* offic
    | Embed Links | Link previews when an alert type's embed is switched off |
    | Mention Everyone | Pinging @everyone and roles that aren't set as mentionable (without it alerts still post, the ping just doesn't notify) |
 
-   Permissions integer **`537021440`** — invite link (Application ID from *General Information*):
+   Permissions integer **`537021568`** (the previous list plus **View Audit Log**, which lets the bot see who added it so it can DM them the trial activation link) — invite link (Application ID from *General Information*):
    ```
-   https://discord.com/oauth2/authorize?client_id=YOUR_CLIENT_ID&scope=bot+applications.commands&permissions=537021440
+   https://discord.com/oauth2/authorize?client_id=YOUR_CLIENT_ID&scope=bot+applications.commands&permissions=537021568
    ```
    Not needed: Administrator, Manage Server, Read Message History, Attach Files, Manage Messages. Members' slash commands are gated by Manage Server on the member's side, not the bot's. Per-channel overrides: in each alert channel the bot needs View Channel, Send Messages and Manage Webhooks.
 
@@ -120,7 +122,7 @@ Before any platform integration is built: verify that platform's *current* offic
 
    (`!` is the default prefix, set by `DISCORD_COMMAND_PREFIX` in `.env`.)
 
-   **New servers set themselves up:** when the bot joins a server it syncs its commands there automatically (so `/notify` works right away — skipped when the commands are already global, since copying global commands into a server makes Discord show each one twice), starts the free trial if billing is on, and posts a welcome card with the setup commands in the server's system channel (or the first channel it can post in). See `bot/onboarding.py`. Avoid mixing `!sync` (per-server) with `!sync global` in the same server for the same reason — duplicate commands.
+   **New servers set themselves up:** when the bot joins a server it syncs its commands there automatically (so `/notify` works right away — skipped when the commands are already global, since copying global commands into a server makes Discord show each one twice), and — if billing is on — DMs **the admin who added the bot** (found in the audit log) a link to activate the free trial on the website. Nothing is posted in the server. See `bot/onboarding.py`. Avoid mixing `!sync` (per-server) with `!sync global` in the same server for the same reason — duplicate commands.
 
 ## Commands
 
@@ -183,9 +185,9 @@ Per-server subscriptions (**`BILLING_PRICE_USD`** a month, $1.99 by default) liv
   - Without `BILLING_LINK_SECRET` there is no card subscribe link at all (the bot no longer creates direct Polar checkouts); only the crypto page, if `BILLING_SUBSCRIBE_URL` is set.
   Either way the server ID, the person and the channel travel as metadata, and the bot finds the payment by itself.
 - **Crypto — NOWPayments, paid on your website** (prepaid 3/6/12 months). Optional; in bot mode the button shows when `BILLING_SUBSCRIBE_URL` is set.
-- **Trial:** a server's 7-day free trial starts the first time the bot sees it with billing on, and removing and re-adding the bot doesn't restart it. Subscribing by card during the trial saves the card and charges nothing until the trial ends (the bot sets each checkout's trial to the days left; the Polar product has no trial of its own). Cancel during the trial → never charged; after paying → the server stays active until the end of the paid month.
+- **Trial:** a **new** server's 7-day free trial starts when someone **activates it on the website** (Discord login → pick the server → confirm the Discord email, which becomes the server's contact). Until then every `/notify` command except `help` and `status` answers with the activation link, and the admin who added the bot gets one DM on joining and one follow-up a day later. Servers that existed before this feature keep their trial exactly as it was and never need to activate. Removing and re-adding the bot doesn't restart a trial. See [docs/trial-activation-and-email.md](docs/trial-activation-and-email.md). Subscribing by card during the trial saves the card and charges nothing until the trial ends (the bot sets each checkout's trial to the days left; the Polar product has no trial of its own). Cancel during the trial → never charged; after paying → the server stays active until the end of the paid month.
 - **Confirmation:** every 60s the bot lists Polar's subscriptions (and checks NOWPayments) itself — a payment only counts once the provider says so — then posts "✅ Payment received" in the channel `/notify subscribe` was used in. Known subscriptions are refreshed every 10 minutes (renewals, cancellations, refunds). No webhook endpoint is needed, so there's no inbound attack surface.
-- **Upgrade reminders:** when the trial or a subscription runs out, the bot DMs the **server owner** a reminder with subscribe buttons — right away, then every `BILLING_REMINDER_EVERY_DAYS` (7), at most `BILLING_REMINDER_MAX` (3) times. If DMs are closed it posts in the server's system channel. Paying resets the count. Whitelisted servers never get one. Any other command from an unpaid server answers "🔒 Subscription needed".
+- **Emails, not DMs:** billing and reminder messages are **emailed from @disconotify.com** (over SMTP — see "Email setup" below), never DMed: trial activated, subscription started, renewed, cancelled and ended, card payment failed, payment coming up (`EMAIL_RENEWAL_REMINDER_DAYS`, 3 days before), and the upgrade reminder after a trial ends or a subscription lapses — right away, then every `BILLING_REMINDER_EVERY_DAYS` (7), at most `BILLING_REMINDER_MAX` (3) times. Templates, schedule and manual sends are managed in the admin panel (spec: [docs/admin-panel-email.md](docs/admin-panel-email.md)). The only DMs the bot sends members are the two trial-activation ones above. Any command from an unpaid server answers "🔒 Subscription needed".
 - **Grace:** 3 days after paid time runs out, then monitoring pauses. Settings are never deleted; monitoring resumes the moment the server pays.
 - **Price:** `BILLING_PRICE_USD` is the price shown in Discord and used for crypto amounts — keep it equal to the Polar product's price (the startup log warns if they differ). Polar keeps existing subscribers on the price they signed up at.
 
@@ -201,13 +203,30 @@ Per-server subscriptions (**`BILLING_PRICE_USD`** a month, $1.99 by default) liv
 **1. Database:** run [0006_billing.sql](database/migrations/0006_billing.sql), [0008_website_billing.sql](database/migrations/0008_website_billing.sql) and [0009_polar_provider.sql](database/migrations/0009_polar_provider.sql) and [0010_bot_present.sql](database/migrations/0010_bot_present.sql) in the Supabase SQL editor.
    - [database/migrations/0011_dm_log.sql](database/migrations/0011_dm_log.sql) — DM delivery log
    - [database/migrations/0012_rename_to_disconotify.sql](database/migrations/0012_rename_to_disconotify.sql) — renames the schema to `disconotify` and tables to `notify_*`
+   - [database/migrations/0013_email_and_trial_activation.sql](database/migrations/0013_email_and_trial_activation.sql) — trial activation, email contacts / templates / outbox, and the `notify_activate_trial()` function the website calls (**run it before deploying this bot version**)
 
 **2. Polar (cards)**
 1. Create an organization at polar.sh and finish the **Account Review** (product, identity, payout account via Stripe Connect, website, support email).
 2. **Products → New product:** *Subscription*, **monthly**, fixed price equal to `BILLING_PRICE_USD`, **no free trial** on the product (the bot adds the trial per checkout), no benefits. Copy its ID → `POLAR_PRODUCT_ID`.
 3. **Settings → Developers → New access token** (an *organization* access token) → `POLAR_ACCESS_TOKEN`. Give it only: `checkouts:write`, `subscriptions:read`, `customer_sessions:write` (and optionally `products:read`, so the startup check can compare the price). Set an expiry and note it in your calendar. Put it **only** in Railway's variables.
 4. Optional: `POLAR_SUCCESS_URL` (where Polar sends people after paying; otherwise Polar's own page). `POLAR_SANDBOX=true` uses sandbox.polar.sh (a separate account and token).
-5. In Polar's settings turn on the customer email notifications (receipts, trial-ending reminders) — the bot doesn't send those.
+5. Keep Polar's **receipt** emails on (the bot doesn't send receipts). Turn off Polar's own *trial-ending* and *payment-failed* emails if you use the bot's, so customers don't get two.
+6. Email: see **Email setup** below.
+
+**Email setup** (billing and reminder emails from your own domain)
+
+The bot sends mail through the SMTP server of an ordinary mailbox on your domain — nothing is routed through a third-party sending service.
+
+1. Have a mailbox on `disconotify.com` with SMTP access, `no-reply@disconotify.com` (Google Workspace, Zoho Mail, Fastmail, Namecheap Private Email, or your web host's mail) — the one address every email is sent from. Use a **dedicated** mailbox, not a personal one, and give it an app password if the host offers them. If your host only lets a mailbox send as its own address, make `no-reply` the mailbox itself.
+2. In `.env` / Railway variables set `EMAIL_SMTP_HOST`, `EMAIL_SMTP_PORT` (587 with `EMAIL_SMTP_SECURITY=starttls`, or 465 with `ssl`), `EMAIL_SMTP_USERNAME`, `EMAIL_SMTP_PASSWORD`, `EMAIL_FROM` (`DiscoNotify <no-reply@disconotify.com>`) and `SUPPORT_EMAIL` (`support@disconotify.com`, shown in the emails as where to write for help). Nothing is sent until host, username, password and `EMAIL_FROM` are all set; emails wait in the queue.
+3. **DNS for disconotify.com — do this before sending, or the emails land in spam:**
+   - **SPF**: a TXT record that authorises your mail host (the host's setup page gives the exact value).
+   - **DKIM**: publish the key your mail host generates for the domain, and switch signing on.
+   - **DMARC**: a TXT record at `_dmarc.disconotify.com`, starting with `v=DMARC1; p=none; rua=mailto:you@disconotify.com`, tightening to `quarantine` once reports look clean.
+   Check it by sending a test email from the admin panel to a Gmail address and opening "Show original": SPF, DKIM and DMARC should all say **PASS**.
+4. Limits: a normal mailbox allows a few hundred to ~2,000 messages a day (Google Workspace ≈ 2,000). That is plenty for billing mail; a large manual bulk send should be split over days.
+5. **Check that your host allows outbound SMTP.** Some cloud platforms block outbound mail ports (25/465/587) on certain plans — if emails stay `queued`/`failed` with "Couldn't reach the mail server", that is the likely cause; ask the host, or use a mail provider that also offers an HTTPS API.
+6. **Customers can't reply**: emails carry no Reply-To, are marked as automatic, and say "replies aren't monitored — write to support@disconotify.com". People who want help email `support@disconotify.com` themselves; the bot never sends from that address, so it needs no SMTP login. Keep Polar's own receipt emails switched on — as merchant of record Polar issues the official receipt/invoice; the bot's "renewed" email is DiscoNotify's own friendly confirmation on top of it.
 
 **3. NOWPayments (crypto, optional)**
 1. Sign up at nowpayments.io and add your **payout wallet(s)**.

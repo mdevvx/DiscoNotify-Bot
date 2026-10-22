@@ -82,7 +82,8 @@ async def test_the_service_builds_the_signed_website_link_with_the_remaining_tri
         link_secret=_SECRET,
         clock=lambda: clock_now,
     )
-    await service.access(1)  # starts the 7-day trial
+    await service.access(1)
+    db.tables["notify_billing"].rows[0]["trial_ends_at"] = (clock_now + datetime.timedelta(days=7)).isoformat()  # activated
 
     url = await service.website_subscribe_url(1, user_id=9, channel_id=5, guild_name="Hub")
 

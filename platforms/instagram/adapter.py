@@ -64,6 +64,16 @@ _BUDGET_HEADROOM = 0.75
 _TOKEN_EXPIRY_WARNING = datetime.timedelta(days=14)
 _REQUIRED_SCOPES = frozenset({"instagram_basic", "instagram_manage_insights", "pages_read_engagement"})
 _CURSOR_SEPARATOR = "|"
+# Meta's usage figure is only refreshed by a call, so how much it can be
+# trusted depends on its age:
+# - the budget is brought in line with it only while it's this fresh;
+_USAGE_SYNC_MAX_AGE = 10 * 60.0
+# - at this usage the checks stop altogether (until the figure is older than
+#   _USAGE_STOP_MAX_AGE, when one check goes through to read it afresh);
+_USAGE_STOP_PERCENT = 95
+_USAGE_STOP_MAX_AGE = 15 * 60.0
+# - and the slow-down at 70% / 90% stops applying after an hour.
+_USAGE_SLOWDOWN_MAX_AGE = 60 * 60.0
 
 
 @dataclass
@@ -86,6 +96,9 @@ class InstagramAdapter(PlatformAdapter):
     platform: ClassVar[str] = "instagram"
     capabilities: ClassVar[FrozenSet[Capability]] = frozenset({Capability.POSTS})
     counts_own_requests: ClassVar[bool] = True
+    # Every retry is another real call against ~200 an hour for the whole app.
+    max_retry_attempts: ClassVar[Optional[int]] = 2
+    spread_polls: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -107,6 +120,41 @@ class InstagramAdapter(PlatformAdapter):
         # Two guilds monitoring the same account share one lookup per tick.
         self._snapshots: Dict[str, _Snapshot] = {}
         self._locks: Dict[str, asyncio.Lock] = {}
+        self._stopped_for_usage = False
+
+    def _usage(self, max_age: float) -> Optional[int]:
+        """Meta's last usage figure (percent of the hourly limit) if it isn't
+        older than `max_age` seconds."""
+        usage = self._client.app_usage_percent
+        if usage is None:
+            return None
+        age_of = getattr(self._client, "app_usage_age", None)
+        age = age_of() if callable(age_of) else None
+        if age is not None and age > max_age:
+            return None
+        return usage
+
+    def _sync_budget_with_meta(self) -> None:
+        """Meta's window outlives this process and counts calls this budget
+        never saw (before a restart, account-add lookups), so whenever Meta
+        reports more used than the budget has counted, the budget catches up."""
+        usage = self._usage(_USAGE_SYNC_MAX_AGE)
+        if usage is None:
+            return
+        reported_calls = round(self._hourly_call_limit * min(max(usage, 0), 100) / 100)
+        behind = reported_calls - self._budget.used()
+        if behind > 0:
+            self._budget.add_usage(behind)
+
+    def _usage_stop(self) -> bool:
+        """Whether Meta says the app is about to hit its limit (checked only
+        against a recent figure, so one stale reading can't stop polling for good)."""
+        usage = self._usage(_USAGE_STOP_MAX_AGE)
+        stopped = usage is not None and usage >= _USAGE_STOP_PERCENT
+        if stopped and not self._stopped_for_usage:
+            logger.warning("Instagram usage is at %s%% of the hourly limit — pausing checks until it drops.", usage)
+        self._stopped_for_usage = stopped
+        return stopped
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -163,7 +211,7 @@ class InstagramAdapter(PlatformAdapter):
         at ≥90%, so a busy hour slows down instead of hitting the wall."""
         accounts = max(distinct_account_count, 1)
         interval = max(self._min_poll_interval, 3600 * accounts / self._usable_calls_per_hour)
-        usage = self._client.app_usage_percent or 0
+        usage = self._usage(_USAGE_SLOWDOWN_MAX_AGE) or 0
         if usage >= 90:
             interval *= 4
         elif usage >= 70:
@@ -259,6 +307,9 @@ class InstagramAdapter(PlatformAdapter):
             if cached is not None and not self._due(cached):
                 return cached
 
+            if self._usage_stop():
+                return None
+            self._sync_budget_with_meta()
             if not await self._budget.try_acquire():
                 logger.warning("Skipping Instagram check for %s — hourly call budget used up.", account.username)
                 return None

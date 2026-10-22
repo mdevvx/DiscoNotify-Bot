@@ -48,9 +48,6 @@ DAYS_PER_MONTH = 30
 # other pending row — only legacy ones exist — is closed after a day).
 _STALE_PENDING_TTL = datetime.timedelta(hours=24)
 _CRYPTO_PAYMENT_TTL = datetime.timedelta(days=3)
-# A checkout still unpaid after this long gets one nudge DM, if it's no older than the window.
-_ABANDONED_AFTER = datetime.timedelta(hours=1)
-_ABANDONED_WINDOW = datetime.timedelta(hours=24)
 _CARD_REFRESH_EVERY = datetime.timedelta(minutes=10)
 _ACCESS_CACHE_TTL = datetime.timedelta(seconds=60)
 # After the first full scan, look this far back for new card subscriptions.
@@ -116,6 +113,7 @@ class BillingService:
         link_ttl_minutes: int = 30,
         reminder_every_days: int = 7,
         reminder_max: int = 3,
+        activate_url: Optional[str] = None,
         polar: Optional[PolarClient] = None,
         polar_product_id: Optional[str] = None,
         polar_success_url: Optional[str] = None,
@@ -125,9 +123,10 @@ class BillingService:
         self._repo = repo
         self.enabled = enabled
         self.price_usd = round(price_usd, 2)
-        self._trial = datetime.timedelta(days=trial_days)
+        self.trial_days = trial_days
         self._grace = datetime.timedelta(days=grace_days)
         self._subscribe_url = subscribe_url or None
+        self._activate_url = activate_url or None
         self._link_secret = link_secret or None
         self._link_ttl_seconds = link_ttl_minutes * 60
         self._reminder_every = datetime.timedelta(days=reminder_every_days)
@@ -204,6 +203,30 @@ class BillingService:
         query = "&".join(part for part in (parts.query, urlencode({"t": token})) if part)
         return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
 
+    def site_url(self, path: str) -> str:
+        """A page on the website (the same site as the subscribe page)."""
+        if self._subscribe_url:
+            parts = urlsplit(self._subscribe_url)
+            if parts.scheme and parts.netloc:
+                return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
+        return f"https://disconotify.com{path}"
+
+    @property
+    def activate_url(self) -> str:
+        """Where a new server's free trial is activated: BILLING_ACTIVATE_URL
+        if set, otherwise /activate on the website."""
+        return self._activate_url or self.site_url("/activate")
+
+    async def set_invited_by(self, guild_id: int, user_id: int) -> None:
+        await self._repo.get_or_create(guild_id)
+        await self._repo.update(guild_id, {"invited_by": user_id})
+
+    async def awaiting_activation(self) -> List[Dict[str, Any]]:
+        """Servers whose free trial hasn't been activated yet."""
+        if not self.enabled:
+            return []
+        return await self._repo.list_awaiting_activation()
+
     async def aclose(self) -> None:
         for client in (self._polar, self._nowpayments):
             if client is not None:
@@ -218,7 +241,7 @@ class BillingService:
         cached = self._cache.get(guild_id)
         if cached is not None and now - cached[0] < _ACCESS_CACHE_TTL:
             return cached[1]
-        row = await self._repo.get_or_create(guild_id, trial_ends_at=now + self._trial)
+        row = await self._repo.get_or_create(guild_id)
         result = evaluate(row, now=now, grace=self._grace)
         self._cache[guild_id] = (now, result)
         return result
@@ -233,7 +256,7 @@ class BillingService:
         rows = await self._repo.list_for_guilds(ids)
         allowed = set()
         for guild_id in ids:
-            row = rows.get(guild_id) or await self._repo.get_or_create(guild_id, trial_ends_at=now + self._trial)
+            row = rows.get(guild_id) or await self._repo.get_or_create(guild_id)
             result = evaluate(row, now=now, grace=self._grace)
             self._cache[guild_id] = (now, result)
             if result.allowed:
@@ -249,7 +272,7 @@ class BillingService:
     # ── whitelist (bot owner only — enforced by the commands) ───────────
 
     async def whitelist(self, guild_id: int, *, by: int, note: Optional[str]) -> None:
-        await self._repo.get_or_create(guild_id, trial_ends_at=self._clock() + self._trial)
+        await self._repo.get_or_create(guild_id)
         await self._repo.update(
             guild_id,
             {"whitelisted": True, "whitelisted_by": by, "whitelist_note": note, "whitelisted_at": self._clock()},
@@ -396,26 +419,38 @@ class BillingService:
                 expected,
             )
 
-    # ── upgrade reminders (DM to the server owner) ──────────────────────
+    # ── trial-ended reminders (sent by email, see mail/) ────────────────
 
-    async def reminders_due(self, guild_ids: Iterable[int]) -> List[Dict[str, Any]]:
-        """Billing rows of servers whose trial or subscription has run out
-        and whose owner should get an upgrade reminder now: right away,
-        then every `reminder_every_days`, at most `reminder_max` times.
-        Servers that have access again get their count reset, so the next
-        lapse is reminded about from the start."""
+    @property
+    def reminder_max(self) -> int:
+        return self._reminder_max
+
+    async def reminders_due(
+        self, guild_ids: Iterable[int], *, every_days: Optional[int] = None, maximum: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """Billing rows of servers whose free trial ended without a
+        subscription, or whose paid time (and grace) ran out, and that should
+        get a reminder now: right away, then every `reminder_every_days`, at
+        most `reminder_max` times. Servers that have access again get their
+        count reset, so the next lapse is reminded about from the start.
+        Servers that never activated their trial aren't reminded."""
         if not self.enabled:
             return []
         now = self._clock()
+        every = datetime.timedelta(days=every_days) if every_days is not None else self._reminder_every
+        most = maximum if maximum is not None else self._reminder_max
         due = []
         for guild_id, row in (await self._repo.list_for_guilds(guild_ids)).items():
             sent = int(row.get("reminders_sent") or 0)
-            if evaluate(row, now=now, grace=self._grace).allowed:
+            access = evaluate(row, now=now, grace=self._grace)
+            if access.allowed:
                 if sent:
                     await self._repo.update(guild_id, {"reminders_sent": 0, "last_reminder_at": None})
                 continue
+            if access.reason != AccessReason.EXPIRED:
+                continue
             last = parse_time(row.get("last_reminder_at"))
-            if sent == 0 or (sent < self._reminder_max and last is not None and now - last >= self._reminder_every):
+            if sent == 0 or (sent < most and last is not None and now - last >= every):
                 due.append(row)
         return due
 
@@ -425,20 +460,26 @@ class BillingService:
             {"reminders_sent": int(row.get("reminders_sent") or 0) + 1, "last_reminder_at": self._clock()},
         )
 
-    async def abandoned_checkouts(self) -> List[Dict[str, Any]]:
-        """Pending payments still unpaid `_ABANDONED_AFTER` after they started
-        (but not older than `_ABANDONED_WINDOW`, so a backlog is never DMed
-        in one go). The caller dedupes against the DM log."""
+    async def upcoming_card_charges(self, within: datetime.timedelta) -> List[Dict[str, Any]]:
+        """Card payments that will be taken within `within`: running
+        subscriptions (not cancelled) whose paid time ends, and trials that
+        convert to a first charge. [{"guild_id", "charge_at"}]"""
         if not self.enabled:
             return []
         now = self._clock()
         found = []
-        for payment in await self._repo.list_pending():
-            created = parse_time(payment.get("created_at"))
-            if created is None or not payment.get("requested_by"):
+        for row in await self._repo.list_card_subscriptions():
+            if row.get("card_cancels_at"):
                 continue
-            if _ABANDONED_AFTER <= now - created <= _ABANDONED_WINDOW:
-                found.append(payment)
+            status = row.get("card_status")
+            if status == "active":
+                charge_at = parse_time(row.get("paid_until"))
+            elif status == "trialing":
+                charge_at = parse_time(row.get("trial_ends_at"))
+            else:
+                continue
+            if charge_at is not None and now < charge_at <= now + within:
+                found.append({"guild_id": int(row["guild_id"]), "charge_at": charge_at})
         return found
 
     # ── poller ──────────────────────────────────────────────────────────
@@ -534,7 +575,7 @@ class BillingService:
         if subscription.get("cancel_at_period_end"):
             cancels_at = parse_time(subscription.get("ends_at")) or period_end
 
-        row = await self._repo.get_or_create(guild_id, trial_ends_at=self._clock() + self._trial)
+        row = await self._repo.get_or_create(guild_id)
         before = dict(row)
         changes: Dict[str, Any] = {
             "card_subscription_id": subscription.get("id"),
@@ -614,7 +655,7 @@ class BillingService:
                 await self._emit(BillingEvent("crypto_failed", int(payment["guild_id"]), payment=payment))
                 return
             guild_id = int(payment["guild_id"])
-            row = await self._repo.get_or_create(guild_id, trial_ends_at=self._clock() + self._trial)
+            row = await self._repo.get_or_create(guild_id)
             now = self._clock()
             start = max(now, parse_time(row.get("paid_until")) or now)
             await self._repo.update(

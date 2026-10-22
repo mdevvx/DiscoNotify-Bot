@@ -36,18 +36,17 @@ class BillingRepository:
         result = await self._db.client.table(_BILLING).select("*").in_("guild_id", ids).execute()
         return {int(row["guild_id"]): row for row in result.data}
 
-    async def get_or_create(self, guild_id: int, *, trial_ends_at: datetime.datetime) -> Dict[str, Any]:
-        """The server's row, starting its trial if this is the first time
-        it's been seen with billing on. The guild row must already exist
-        (notify_guilds is the foreign key)."""
+    async def get_or_create(self, guild_id: int) -> Dict[str, Any]:
+        """The server's row. A server seen for the first time gets one with
+        no trial yet: it starts when someone activates it on the website
+        (the `notify_activate_trial` database function). The guild row must
+        already exist (notify_guilds is the foreign key)."""
         existing = await self.get(guild_id)
         if existing is not None:
             return existing
         try:
             inserted = await (
-                self._db.client.table(_BILLING)
-                .insert({"guild_id": guild_id, "trial_ends_at": _iso(trial_ends_at)})
-                .execute()
+                self._db.client.table(_BILLING).insert({"guild_id": guild_id, "activation_required": True}).execute()
             )
             return inserted.data[0]
         except Exception as exc:
@@ -60,6 +59,11 @@ class BillingRepository:
     async def update(self, guild_id: int, changes: Dict[str, Any]) -> None:
         payload = {key: _iso(value) if isinstance(value, datetime.datetime) else value for key, value in changes.items()}
         await self._db.client.table(_BILLING).update(payload).eq("guild_id", guild_id).execute()
+
+    async def list_awaiting_activation(self) -> List[Dict[str, Any]]:
+        """Servers whose free trial hasn't been activated yet."""
+        result = await self._db.client.table(_BILLING).select("*").eq("activation_required", True).execute()
+        return [row for row in result.data if not row.get("trial_ends_at")]
 
     async def list_whitelisted(self) -> List[Dict[str, Any]]:
         result = await self._db.client.table(_BILLING).select("*").eq("whitelisted", True).execute()

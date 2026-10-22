@@ -17,7 +17,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from billing.access import Access, subscription_needed
+from billing.access import Access, AccessReason, activation_needed, parse_time, subscription_needed
 from bot.maintenance import Maintenance
 from billing.nowpayments import NowPaymentsClient
 from billing.polar import PolarClient
@@ -33,6 +33,9 @@ from database.repositories.bot_state import BotStateRepository
 from database.repositories.channels import NotificationChannelRepository
 from database.repositories.dm_log import DmLogRepository
 from database.repositories.guilds import GuildRepository
+from mail.repository import MailRepository
+from mail.service import EmailService
+from mail.smtp import SmtpClient
 from monitoring.manager import MonitoringManager
 from notifications.sender import NotificationSender
 from platforms.instagram.adapter import InstagramAdapter
@@ -77,19 +80,18 @@ _ALWAYS_ALLOWED = {
     "notify subscribe",
     "notify cancel",
 }
-# How often to look for servers whose owner is due an upgrade reminder.
+# How often the scheduled emails (trial-ended and payment-coming-up reminders)
+# are looked for, and the follow-up activation DMs.
 _REMINDER_CHECK_EVERY = datetime.timedelta(minutes=10)
+# A new server that still hasn't activated its trial this long after the bot
+# joined gets one follow-up DM (never more), but only while it's still recent.
+_ACTIVATION_FOLLOWUP_AFTER = datetime.timedelta(hours=24)
+_ACTIVATION_FOLLOWUP_WINDOW = datetime.timedelta(days=7)
 _OWNER_GROUP_PREFIX = "notify global "
+# Still answered for a server that hasn't activated its trial (they explain what to do).
+_ACTIVATION_EXEMPT = {"notify help", "notify status"}
 # Discord error "Cannot send messages to this user".
 _DM_CLOSED = 50007
-# How the DM log names each billing event's DM.
-_EVENT_DM_KINDS = {
-    "card_renewed": "payment_success",
-    "card_failed": "payment_failed",
-    "crypto_failed": "payment_failed",
-    "card_cancel_scheduled": "card_cancelling",
-    "card_ended": "card_ended",
-}
 # Old DM-log rows are purged after this many days (checked about once a day).
 _DM_LOG_RETENTION_DAYS = 90
 
@@ -116,7 +118,28 @@ class DiscoNotifyCommandTree(app_commands.CommandTree):
 
         command = interaction.command
         name = command.qualified_name if command is not None else ""
-        if name in _ALWAYS_ALLOWED or name.startswith(_OWNER_GROUP_PREFIX):
+        if name.startswith(_OWNER_GROUP_PREFIX):
+            return True
+
+        # A new server's free trial starts when it's activated on the website:
+        # until then every command (except help and status, which explain it)
+        # just points there.
+        if name not in _ACTIVATION_EXEMPT:
+            activation = await bot.billing.access(interaction.guild.id)
+            if activation.reason == AccessReason.NEEDS_ACTIVATION:
+                url = bot.billing.activate_url
+                button = discord.ui.Button(style=discord.ButtonStyle.link, label="Activate free trial", url=url, emoji="🎁")
+                await cards.reply(
+                    interaction,
+                    *activation_needed(url),
+                    title="🕐 Activate your free trial",
+                    tone=cards.INFO,
+                    ephemeral=True,
+                    extra=[discord.ui.ActionRow(button)],
+                )
+                return False
+
+        if name in _ALWAYS_ALLOWED:
             return True
 
         enabled = await bot.guilds_repo.is_enabled(interaction.guild.id)
@@ -180,6 +203,7 @@ class DiscoNotifyBot(commands.Bot):
             trial_days=settings.billing_trial_days,
             grace_days=settings.billing_grace_days,
             subscribe_url=settings.billing_subscribe_url,
+            activate_url=settings.billing_activate_url,
             link_secret=settings.billing_link_secret.get_secret_value() if settings.billing_link_secret else None,
             link_ttl_minutes=settings.billing_link_ttl_minutes,
             reminder_every_days=settings.billing_reminder_every_days,
@@ -196,6 +220,33 @@ class DiscoNotifyBot(commands.Bot):
                 if settings.nowpayments_api_key
                 else None
             ),
+        )
+        self.mail = EmailService(
+            MailRepository(self.database),
+            BotStateRepository(self.database),
+            client=(
+                SmtpClient(
+                    settings.email_smtp_host,  # type: ignore[arg-type]
+                    settings.email_smtp_port,
+                    settings.email_smtp_username,  # type: ignore[arg-type]
+                    settings.email_smtp_password.get_secret_value(),  # type: ignore[union-attr]
+                    sender=settings.email_from,  # type: ignore[arg-type]
+                    security=settings.email_smtp_security,
+                )
+                if settings.email_configured
+                else None
+            ),
+            link_secret=settings.billing_link_secret.get_secret_value() if settings.billing_link_secret else None,
+            unsubscribe_url=settings.email_unsubscribe_url or self.billing.site_url("/unsubscribe"),
+            subscribe_url=settings.billing_subscribe_url or self.billing.site_url("/subscribe"),
+            activate_url=self.billing.activate_url,
+            manage_url=self.billing.site_url("/manage"),
+            support_email=settings.support_email or "",
+            price_label=self.billing.price_label,
+            trial_days=settings.billing_trial_days,
+            reminder_every_days=settings.billing_reminder_every_days,
+            reminder_max=settings.billing_reminder_max,
+            renewal_days=settings.email_renewal_reminder_days,
         )
         self.billing.on_payment = self._announce_payment
         self.billing.on_event = self._announce_billing_event
@@ -267,6 +318,7 @@ class DiscoNotifyBot(commands.Bot):
                 client,
                 daily_quota_units=self.settings.youtube_daily_quota_units,
                 min_poll_interval_seconds=self.settings.youtube_min_poll_interval_seconds,
+                state_store=BotStateRepository(self.database),
             )
             self.monitoring.register_adapter(adapter)
         else:
@@ -364,19 +416,28 @@ class DiscoNotifyBot(commands.Bot):
                 await self.billing.poll_once()
             except Exception:
                 logger.exception("Billing poll failed.")
+            try:
+                await self.mail.process_outbox()
+            except Exception:
+                logger.exception("Sending queued emails failed.")
             now = datetime.datetime.now(datetime.timezone.utc)
             if not self.maintenance.active and (
                 last_reminder_check is None or now - last_reminder_check >= _REMINDER_CHECK_EVERY
             ):
                 last_reminder_check = now
+                names = {guild.id: guild.name for guild in self.guilds}
                 try:
-                    await self.send_upgrade_reminders()
+                    await self.mail.send_lapse_reminders(self.billing, names)
                 except Exception:
-                    logger.exception("Sending upgrade reminders failed.")
+                    logger.exception("Queueing lapse reminders failed.")
                 try:
-                    await self.send_abandoned_checkout_reminders()
+                    await self.mail.send_renewal_reminders(self.billing, names)
                 except Exception:
-                    logger.exception("Sending abandoned-checkout reminders failed.")
+                    logger.exception("Queueing payment-coming-up reminders failed.")
+                try:
+                    await self.send_activation_followups()
+                except Exception:
+                    logger.exception("Sending activation follow-ups failed.")
                 if last_dm_purge is None or now - last_dm_purge >= datetime.timedelta(days=1):
                     last_dm_purge = now
                     try:
@@ -385,69 +446,52 @@ class DiscoNotifyBot(commands.Bot):
                         logger.warning("Couldn't purge old DM log rows.", exc_info=True)
             await asyncio.sleep(self.settings.billing_poll_interval_seconds)
 
-    async def send_abandoned_checkout_reminders(self) -> None:
-        """One DM to whoever started a checkout that's still unpaid an hour
-        later. The DM log is the memory: a payment with a logged
-        checkout_abandoned row (sent or not) is never DMed again, and if the
-        log can't be read nothing is sent."""
-        for payment in await self.billing.abandoned_checkouts():
+    async def send_activation_dm(self, guild: discord.Guild, user_id: int, *, followup: bool = False) -> bool:
+        """The DM that tells whoever added the bot to activate the free trial
+        on the website — once on joining, and once more a day later if it
+        still hasn't been done. Nothing else is ever DMed to members."""
+        url = self.billing.activate_url
+        if followup:
+            lines = (
+                f"Your free trial for **{guild.name}** hasn't started yet — alerts won't run until you activate it.",
+                "It takes a minute: log in with Discord, pick your server, done. The trial begins the moment you do.",
+            )
+            title = "🎁 Your free trial is waiting"
+        else:
+            lines = (
+                f"Thanks for adding DiscoNotify to **{guild.name}**!",
+                "To start your free trial, activate it on our website — log in with Discord, pick your server, "
+                "and the trial begins right away.",
+            )
+            title = "🎁 Activate your free trial"
+        button = discord.ui.Button(style=discord.ButtonStyle.link, label="Activate free trial", url=url, emoji="🎁")
+        view = cards.card(*lines, title=title, tone=cards.INFO, extra=[discord.ui.ActionRow(button)])
+        return await self._dm_user(
+            user_id, view, guild_id=guild.id, kind="activation_reminder" if followup else "activation"
+        )
+
+    async def send_activation_followups(self) -> None:
+        """One follow-up DM, a day after the first, for new servers that still
+        haven't activated. Only to the person who added the bot, only if the
+        first DM was delivered, and never again."""
+        now = datetime.datetime.now(datetime.timezone.utc)
+        for row in await self.billing.awaiting_activation():
+            invited_by = row.get("invited_by")
+            created = parse_time(row.get("created_at"))
+            guild = self.get_guild(int(row["guild_id"]))
+            if not invited_by or created is None or guild is None:
+                continue
+            if not _ACTIVATION_FOLLOWUP_AFTER <= now - created <= _ACTIVATION_FOLLOWUP_WINDOW:
+                continue
             try:
-                if await self.dm_log.was_sent(payment["id"], "checkout_abandoned"):
+                if await self.dm_log.status_of(guild.id, "activation") != "sent":
+                    continue
+                if await self.dm_log.status_of(guild.id, "activation_reminder") is not None:
                     continue
             except Exception:
-                logger.warning("Couldn't read the DM log; skipping abandoned-checkout DMs.", exc_info=True)
+                logger.warning("Couldn't read the DM log; skipping activation follow-ups.", exc_info=True)
                 return
-            guild_id = int(payment["guild_id"])
-            guild = self.get_guild(guild_id)
-            if guild is None:
-                continue
-            # Imported here, not at the top: importing the module registers its
-            # slash commands, and the extension loader would then register them twice.
-            from commands.admin.billing import subscribe_buttons
-            buttons = await subscribe_buttons(self.billing, guild_id, guild.name)
-            view = cards.card(
-                f"You started subscribing **{guild.name}** to DiscoNotify but haven't finished paying.",
-                "Your checkout is still open — pick it up where you left off, or ignore this if you've changed your mind.",
-                title="🛒 Your checkout is waiting",
-                tone=cards.INFO,
-                extra=buttons,
-            )
-            await self._dm_user(
-                int(payment["requested_by"]), view, guild_id=guild_id, kind="checkout_abandoned", payment_id=payment["id"]
-            )
-
-    async def send_upgrade_reminders(self) -> None:
-        """DMs the owner of every server whose trial or subscription has run
-        out (schedule: BillingService.reminders_due). If the owner's DMs are
-        closed, the reminder is skipped — it's never posted in a channel."""
-        guilds = {guild.id: guild for guild in self.guilds}
-        for row in await self.billing.reminders_due(guilds):
-            guild = guilds.get(int(row["guild_id"]))
-            if guild is None:
-                continue
-            view = await self._reminder_card(guild, row)
-            if not await self._dm_owner(guild, view, kind="expiry_reminder"):
-                logger.info("Couldn't DM the owner of server %s the upgrade reminder (DMs closed?).", guild.id)
-            await self.billing.mark_reminded(row)
-
-    async def _reminder_card(self, guild: discord.Guild, row: Dict[str, Any]) -> discord.ui.LayoutView:
-        reminder = int(row.get("reminders_sent") or 0) + 1
-        title = "⏰ Your DiscoNotify trial has ended" if not row.get("paid_until") else "⏰ Your DiscoNotify subscription has ended"
-        lines = [f"Server: **{guild.name}**", *subscription_needed(row, price_label=self.billing.price_label)]
-        if reminder >= self.settings.billing_reminder_max:
-            lines.append("-# This is the last reminder — we won't message you about this again.")
-        # Imported here, not at the top: importing the module registers its
-        # slash commands, and the extension loader would then register them twice.
-        from commands.admin.billing import subscribe_buttons
-        buttons = await subscribe_buttons(self.billing, guild.id, guild.name)
-        return cards.card(*lines, title=title, tone=cards.WARNING, extra=buttons)
-
-    async def _dm_owner(
-        self, guild: discord.Guild, view: discord.ui.LayoutView, *, kind: str, payment_id: Optional[str] = None
-    ) -> bool:
-        if guild.owner_id is None:
-            return False
-        return await self._dm_user(guild.owner_id, view, guild_id=guild.id, kind=kind, payment_id=payment_id)
+            await self.send_activation_dm(guild, int(invited_by), followup=True)
 
     async def _dm_user(
         self, user_id: int, view: discord.ui.LayoutView, *, guild_id: int, kind: str, payment_id: Optional[str] = None
@@ -485,41 +529,43 @@ class DiscoNotifyBot(commands.Bot):
             return False
 
     async def _announce_payment(self, payment: Dict[str, Any], access: Access) -> None:
-        """Posts "payment received" in the channel the payment was started
-        from, or — for payments made on the website — DMs the server owner
-        (never posted in a channel)."""
+        """A payment or card subscription began: the customer gets an email
+        (never a DM), a payment made from a Discord channel is also confirmed
+        in that channel, and the bot owners are told."""
         guild_id = int(payment["guild_id"])
         row = await self.billing.billing_row(guild_id) or {}
-        thanks = f"Thanks <@{payment['requested_by']}>! " if payment.get("requested_by") else "Thank you! "
         guild = self.get_guild(guild_id)
-        where = f" in **{guild.name}**" if guild is not None else ""
-        if payment["provider"] == "polar" and row.get("card_status") == "trialing":
-            # Started during the free trial: card saved, nothing charged yet.
-            first_charge = f"<t:{int(access.until.timestamp())}:D>" if access.until else "the end of the trial"
-            view = cards.card(
-                f"{thanks}DiscoNotify's card subscription{where} is set up — the first "
-                f"{self.billing.price_label} charge is on {first_charge}, when the free trial ends.",
-                "Cancel before then with `/notify cancel` and you pay nothing.",
-                title="✅ Subscription set up",
-                tone=cards.SUCCESS,
-            )
-        else:
-            until = f" — active until <t:{int(access.until.timestamp())}:D>" if access.until else ""
-            method = "card" if payment["provider"] == "polar" else "crypto"
-            view = cards.card(
-                f"{thanks}DiscoNotify's subscription{where} is active{until}.",
-                f"Paid by {method} · {payment['months']} month(s)",
-                title="✅ Payment received",
-                tone=cards.SUCCESS,
-            )
+        try:
+            await self.mail.on_payment(payment, access, row, guild.name if guild is not None else f"server {guild_id}")
+        except Exception:
+            logger.warning("Couldn't queue the subscription email for server %s.", guild_id, exc_info=True)
 
         channel_id = payment.get("channel_id")
         try:
             if channel_id:
+                thanks = f"Thanks <@{payment['requested_by']}>! " if payment.get("requested_by") else "Thank you! "
+                where = f" in **{guild.name}**" if guild is not None else ""
+                if payment["provider"] == "polar" and row.get("card_status") == "trialing":
+                    # Started during the free trial: card saved, nothing charged yet.
+                    first_charge = f"<t:{int(access.until.timestamp())}:D>" if access.until else "the end of the trial"
+                    view = cards.card(
+                        f"{thanks}DiscoNotify's card subscription{where} is set up — the first "
+                        f"{self.billing.price_label} charge is on {first_charge}, when the free trial ends.",
+                        "Cancel before then with `/notify cancel` and you pay nothing.",
+                        title="✅ Subscription set up",
+                        tone=cards.SUCCESS,
+                    )
+                else:
+                    until = f" — active until <t:{int(access.until.timestamp())}:D>" if access.until else ""
+                    method = "card" if payment["provider"] == "polar" else "crypto"
+                    view = cards.card(
+                        f"{thanks}DiscoNotify's subscription{where} is active{until}.",
+                        f"Paid by {method} · {payment['months']} month(s)",
+                        title="✅ Payment received",
+                        tone=cards.SUCCESS,
+                    )
                 channel = self.get_channel(int(channel_id)) or await self.fetch_channel(int(channel_id))
                 await channel.send(view=view, allowed_mentions=discord.AllowedMentions.none())  # type: ignore[union-attr]
-            elif guild is not None:
-                await self._dm_owner(guild, view, kind="payment_success", payment_id=payment.get("id"))
         finally:
             method = "card" if payment["provider"] == "polar" else "crypto"
             await self._alert_bot_owners(
@@ -527,60 +573,24 @@ class DiscoNotifyBot(commands.Bot):
             )
 
     async def _announce_billing_event(self, event: BillingEvent) -> None:
-        """Tells the server's owner (by DM only) and the bot owners what
-        happened to a subscription after it began."""
+        """What happened to a subscription after it began: the customer is
+        emailed where it matters (a failed card payment, a cancellation) and
+        the bot owners are told about every event. Never a DM to members."""
         guild = self.get_guild(event.guild_id)
         name = guild.name if guild is not None else f"server {event.guild_id}"
-        until = f"<t:{int(event.until.timestamp())}:D>" if event.until else None
-        price = self.billing.price_label
-        mine: Optional[discord.ui.LayoutView] = None
-        summary, tone = event.kind, cards.INFO
-        if event.kind == "card_renewed":
-            summary, tone = f"card renewed · {price}", cards.SUCCESS
-            mine = cards.card(
-                f"DiscoNotify's card payment for **{name}** went through ({price})."
-                + (f" Active until {until}." if until else ""),
-                title="✅ Subscription renewed",
-                tone=cards.SUCCESS,
-            )
-        elif event.kind == "card_failed":
-            summary, tone = "card charge failed (retrying)", cards.WARNING
-            mine = cards.card(
-                f"The card payment for **{name}** didn't go through. It will be retried automatically — alerts keep running meanwhile.",
-                "To use a different card, run `/notify cancel` to open your billing page and update it.",
-                title="⚠️ Card payment failed",
-                tone=cards.WARNING,
-            )
-        elif event.kind == "card_cancel_scheduled":
-            summary, tone = "card cancelled, ends at period end", cards.WARNING
-            mine = cards.card(
-                f"The DiscoNotify subscription for **{name}** was cancelled. Alerts keep working until {until}, and you won't be charged again."
-                if until
-                else f"The DiscoNotify subscription for **{name}** was cancelled. You won't be charged again.",
-                "Changed your mind? Run `/notify subscribe` any time.",
-                title="ℹ️ Subscription cancelled",
-                tone=cards.WARNING,
-            )
-        elif event.kind == "card_ended":
-            summary, tone = "card subscription ended", cards.ERROR
-            mine = cards.card(
-                f"The DiscoNotify card subscription for **{name}** has ended, so alerts are paused. Every setting is kept.",
-                "Switch it back on with `/notify subscribe`.",
-                title="⏸️ Subscription ended",
-                tone=cards.ERROR,
-            )
-        elif event.kind == "crypto_failed":
-            summary, tone = "crypto payment failed/underpaid", cards.ERROR
-            mine = cards.card(
-                f"A crypto payment for **{name}** didn't go through, so nothing was added. If you sent funds, contact support with the server name and the time you paid.",
-                title="⚠️ Crypto payment not completed",
-                tone=cards.ERROR,
-            )
-        elif event.kind == "crypto_expired":
-            summary, tone = "crypto payment expired unpaid", cards.INFO  # bot owners only
-        if mine is not None and guild is not None:
-            payment_id = (event.payment or {}).get("id")
-            await self._dm_owner(guild, mine, kind=_EVENT_DM_KINDS[event.kind], payment_id=payment_id)
+        try:
+            await self.mail.on_billing_event(event, name)
+        except Exception:
+            logger.warning("Couldn't queue the %s email for server %s.", event.kind, event.guild_id, exc_info=True)
+        summaries = {
+            "card_renewed": (f"card renewed · {self.billing.price_label}", cards.SUCCESS),
+            "card_failed": ("card charge failed (retrying)", cards.WARNING),
+            "card_cancel_scheduled": ("card cancelled, ends at period end", cards.WARNING),
+            "card_ended": ("card subscription ended", cards.ERROR),
+            "crypto_failed": ("crypto payment failed/underpaid", cards.ERROR),
+            "crypto_expired": ("crypto payment expired unpaid", cards.INFO),
+        }
+        summary, tone = summaries.get(event.kind, (event.kind, cards.INFO))
         await self._alert_bot_owners(f"Billing: {event.kind.replace('_', ' ')}", summary, event.guild_id, event.payment, tone)
 
     async def _alert_bot_owners(
@@ -607,6 +617,7 @@ class DiscoNotifyBot(commands.Bot):
             with contextlib.suppress(asyncio.CancelledError):
                 await self._billing_task
         await self.billing.aclose()
+        await self.mail.aclose()
         await self.monitoring.stop()
         await self.notification_sender.aclose()
         await self.database.close()

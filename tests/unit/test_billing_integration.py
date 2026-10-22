@@ -4,6 +4,7 @@ actually pausing anything), the command gate, and the billing commands."""
 
 from __future__ import annotations
 
+import datetime
 from typing import Any, Dict, List, Optional, Set
 
 import pytest
@@ -102,6 +103,7 @@ class FakeBilling:
         self.portal_for: List[int] = []
         self.payer: Optional[int] = 5
         self.checkout_error: Optional[Exception] = None
+        self.activate_url = "https://disconotify.com/activate"
         self.website: Optional[str] = None  # set to simulate "subscribing happens on the website"
 
     def plain_subscribe_url(self) -> Any:
@@ -621,69 +623,111 @@ async def test_a_dm_still_goes_out_when_the_log_cant_be_written() -> None:
     assert len(recipient.sent) == 1
 
 
-async def test_an_abandoned_checkout_is_dmed_once_and_never_again() -> None:
+async def test_a_server_that_has_not_activated_its_trial_is_pointed_to_the_website() -> None:
+    bot = FakeBot(allowed=False)
+    bot.billing.reason = AccessReason.NEEDS_ACTIVATION
+    bot.billing.activate_url = "https://disconotify.com/activate"
+
+    allowed, interaction = await _check(bot, "notify account-add")
+
+    reply = interaction.response.messages[0]
+    assert allowed is False and reply["ephemeral"] is True
+    assert "Activate your free trial" in reply["content"] and "https://disconotify.com/activate" in reply["content"]
+    assert _link_urls(reply["view"]) == ["https://disconotify.com/activate"]
+
+
+async def test_every_command_except_help_and_status_waits_for_activation() -> None:
+    for command, expected in (("notify help", True), ("notify status", True), ("notify subscribe", False), ("notify toggle", False)):
+        bot = FakeBot(allowed=False)
+        bot.billing.reason = AccessReason.NEEDS_ACTIVATION
+        bot.billing.activate_url = "https://disconotify.com/activate"
+
+        allowed, _ = await _check(bot, command)
+
+        assert allowed is expected, command
+
+
+class _GuildStub:
+    id = 1
+    name = "Gaming Hub"
+
+
+def _activation_bot(log: Any, recipient: Any, rows: Any) -> Any:
     from bot.client import DiscoNotifyBot
-
-    payments = [
-        {"id": "p-new", "guild_id": 1, "requested_by": 5},
-        {"id": "p-done", "guild_id": 1, "requested_by": 6},
-    ]
-
-    class Billing(FakeBilling):
-        async def abandoned_checkouts(self) -> List[Any]:
-            return payments
-
-    buyer = _Recipient()
-    log = _DmLog(already={("p-done", "checkout_abandoned")})
-    bot = _dm_bot(buyer, log)
-    bot.billing = Billing(allowed=False)
-    bot.billing.website = None
-    bot.get_guild = lambda guild_id: type("G", (), {"id": guild_id, "name": "Gaming Hub"})()
-    bot.send_abandoned_checkout_reminders = DiscoNotifyBot.send_abandoned_checkout_reminders.__get__(bot)
-
-    await bot.send_abandoned_checkout_reminders()
-
-    assert len(buyer.sent) == 1
-    assert [(row["user_id"], row["kind"], row["payment_id"]) for row in log.rows] == [(5, "checkout_abandoned", "p-new")]
-
-
-async def test_the_server_owner_is_dmed_an_upgrade_reminder_with_the_link() -> None:
-    from bot.client import DiscoNotifyBot
-    from ui.cards import plain_text
-
-    owner = _Recipient()
-    guild = type("G", (), {"id": 1, "name": "Gaming Hub", "owner_id": 9, "owner": owner})()
-    marked: List[Any] = []
-    row = {"guild_id": 1, "trial_ends_at": "2026-10-08T00:00:00+00:00", "reminders_sent": 0}
-
-    class Billing(FakeBilling):
-        async def reminders_due(self, guild_ids: Any) -> List[Any]:
-            assert set(guild_ids) == {1}
-            return [row]
-
-        async def mark_reminded(self, due: Any) -> None:
-            marked.append(due["guild_id"])
 
     bot = type("B", (), {})()
-    bot.guilds = [guild]
-    bot.billing = Billing(allowed=False)
-    bot.settings = type("S", (), {"billing_reminder_max": 3})()
-    bot.billing.website = None
-    bot.get_user = lambda user_id: owner
-    bot.dm_log = _DmLog()
-    for name in ("send_upgrade_reminders", "_reminder_card", "_dm_owner", "_dm_user"):
+    bot.get_user = lambda user_id: recipient
+    bot.get_guild = lambda guild_id: _GuildStub()
+    bot.dm_log = log
+    bot.billing = FakeBilling(allowed=False)
+    bot.billing.activate_url = "https://disconotify.com/activate"
+
+    async def awaiting() -> Any:
+        return rows
+
+    bot.billing.awaiting_activation = awaiting
+    for name in ("_dm_user", "send_activation_dm", "send_activation_followups"):
         setattr(bot, name, getattr(DiscoNotifyBot, name).__get__(bot))
+    return bot
 
-    await bot.send_upgrade_reminders()
 
-    assert bot.dm_log.rows == [
-        {"guild_id": 1, "user_id": 9, "kind": "expiry_reminder", "status": "sent", "error": None, "payment_id": None}
-    ]
-    text = plain_text(owner.sent[0])
-    assert "trial has ended" in text and "Gaming Hub" in text
-    assert _link_urls(owner.sent[0]) == ["https://disconotify.com/crypto?guild_id=1"]
-    assert bot.billing.checkouts == []
-    assert marked == [1]
+class _ActivationLog(_DmLog):
+    def __init__(self, statuses: Any = None) -> None:
+        super().__init__()
+        self.statuses = dict(statuses or {})
+
+    async def add(self, **row: Any) -> None:
+        self.rows.append(row)
+        self.statuses[(row["guild_id"], row["kind"])] = row["status"]
+
+    async def status_of(self, guild_id: int, kind: str) -> Any:
+        return self.statuses.get((guild_id, kind))
+
+
+async def test_the_activation_dm_links_to_the_website_and_is_logged() -> None:
+    from ui.cards import plain_text
+
+    recipient = _Recipient()
+    log = _ActivationLog()
+    bot = _activation_bot(log, recipient, [])
+
+    assert await bot.send_activation_dm(_GuildStub(), 9) is True
+
+    assert _link_urls(recipient.sent[0]) == ["https://disconotify.com/activate"]
+    assert "Gaming Hub" in plain_text(recipient.sent[0])
+    assert [(row["user_id"], row["kind"], row["status"]) for row in log.rows] == [(9, "activation", "sent")]
+
+
+def _unactivated(hours_old: float, invited_by: Any = 9) -> dict:
+    created = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=hours_old)
+    return {"guild_id": 1, "invited_by": invited_by, "created_at": created.isoformat()}
+
+
+async def test_one_follow_up_goes_to_the_inviter_a_day_later_and_never_again() -> None:
+    recipient = _Recipient()
+    log = _ActivationLog({(1, "activation"): "sent"})
+    bot = _activation_bot(log, recipient, [_unactivated(25)])
+
+    await bot.send_activation_followups()
+    await bot.send_activation_followups()
+
+    assert len(recipient.sent) == 1
+    assert [row["kind"] for row in log.rows] == ["activation_reminder"]
+
+
+async def test_no_follow_up_when_too_early_unknown_inviter_or_first_dm_never_arrived() -> None:
+    for rows, statuses in (
+        ([_unactivated(5)], {(1, "activation"): "sent"}),  # too early
+        ([_unactivated(25, invited_by=None)], {(1, "activation"): "sent"}),  # nobody to DM
+        ([_unactivated(25)], {(1, "activation"): "dm_closed"}),  # DMs closed
+        ([_unactivated(24 * 9)], {(1, "activation"): "sent"}),  # too old
+    ):
+        recipient = _Recipient()
+        bot = _activation_bot(_ActivationLog(statuses), recipient, rows)
+
+        await bot.send_activation_followups()
+
+        assert recipient.sent == []
 
 
 # ── !whitelist (owner-only text command) ────────────────────────────────

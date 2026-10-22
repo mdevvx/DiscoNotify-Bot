@@ -61,6 +61,18 @@ class RateLimiter:
             self._entries.append((time.monotonic(), cost))
             return True
 
+    def used(self) -> int:
+        """Units spent in the current window (read-only, never waits)."""
+        self._evict_expired()
+        return self._used()
+
+    def add_usage(self, units: int) -> None:
+        """Records `units` spent elsewhere (by the platform's own count, or
+        before a restart) so this window agrees with it. They age out like
+        any other call."""
+        if units > 0:
+            self._entries.append((time.monotonic(), units))
+
     def remaining(self) -> int:
         """Budget left in the current window (read-only, never waits)."""
         self._evict_expired()

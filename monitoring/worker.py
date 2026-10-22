@@ -19,7 +19,7 @@ from monitoring.health import PlatformHealthTracker
 from monitoring.rate_limiter import RateLimiter
 from monitoring.retry import RetryPolicy
 from platforms.base import CONTENT_CAPABILITIES, AccountRef, Capability, PlatformAdapter
-from utils.errors import PermanentPlatformError, RateLimitedError
+from utils.errors import PermanentPlatformError, PlatformPaused, RateLimitedError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -99,6 +99,10 @@ class AccountWorker:
                 await self._poll_content()
             if self._adapter.supports(Capability.LIVE_STATUS):
                 await self._poll_live_status()
+        except PlatformPaused:
+            # The platform is paused after a rate limit and nothing was
+            # called — no success to record, and no failure either.
+            return
         except Exception as exc:
             await self._handle_failure(exc)
             return
@@ -107,7 +111,7 @@ class AccountWorker:
         await self._health_tracker.record_success()
 
     async def _poll_content(self) -> None:
-        result = await self._retry_policy.run(self._fetch_updates)
+        result = await self._retry_policy.run(self._fetch_updates, max_attempts=self._adapter.max_retry_attempts)
         if result.next_cursor != self._cursor:
             self._cursor = result.next_cursor
             await self._account_repo.set_content_cursor(self._account_id, self._cursor)
@@ -124,14 +128,23 @@ class AccountWorker:
                 continue
             await self._submit_event(event)
 
+    def _raise_if_paused(self) -> None:
+        """Checked right before every API call (not just once per cycle):
+        when one worker hits the platform's limit, the others that are
+        already waiting must not each make a call that will be refused."""
+        if self._health_tracker.is_rate_limited():
+            raise PlatformPaused(self._account_ref.platform)
+
     async def _fetch_updates(self):
+        self._raise_if_paused()
         await self._rate_limiter.acquire()
+        self._raise_if_paused()  # the limiter can hold a worker for a while
         if not self._adapter.counts_own_requests:
             self._health_tracker.record_request()
         return await self._adapter.fetch_updates(self._account_ref, self._cursor)
 
     async def _poll_live_status(self) -> None:
-        status = await self._retry_policy.run(self._get_live_status)
+        status = await self._retry_policy.run(self._get_live_status, max_attempts=self._adapter.max_retry_attempts)
         if status is None:
             return
 
@@ -195,7 +208,9 @@ class AccountWorker:
             await self._live_state_repo.touch_checked(guild_id=self._guild_id, account_id=self._account_id)
 
     async def _get_live_status(self):
+        self._raise_if_paused()
         await self._rate_limiter.acquire()
+        self._raise_if_paused()
         if not self._adapter.counts_own_requests:
             self._health_tracker.record_request()
         return await self._adapter.get_live_status(self._account_ref)

@@ -10,10 +10,12 @@ user authorization for.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+import datetime
+from typing import Any, Callable, Dict, List, Optional
 
 import httpx
 
+from monitoring.daily_quota import seconds_until_pacific_midnight
 from utils.errors import PermanentPlatformError, RateLimitedError, TransientPlatformError
 from utils.logger import get_logger
 
@@ -27,11 +29,14 @@ _BASE_URL = "https://www.googleapis.com/youtube/v3"
 _EMBED_MAX_HEIGHT = 1000
 
 # A quota-exhaustion response doesn't carry a Retry-After header (it isn't
-# a per-request rate limit), and the daily reset is at midnight Pacific —
-# rather than do timezone arithmetic, just back off for a fixed, generous
-# window and let the next few scheduler cycles' is_rate_limited() checks
-# keep skipping until it's actually available again.
-_QUOTA_EXCEEDED_RETRY_AFTER_SECONDS = 6 * 60 * 60
+# a per-request rate limit), but the daily quota resets at midnight Pacific,
+# so the wait is until then (plus a minute of margin).
+_QUOTA_RESET_MARGIN_SECONDS = 60.0
+
+
+class QuotaExceededError(RateLimitedError):
+    """Google says today's quota is gone (not a momentary rate limit): the
+    adapter stops spending until the reset."""
 
 
 class YouTubeClient:
@@ -41,11 +46,13 @@ class YouTubeClient:
         *,
         timeout_seconds: float = 15.0,
         transport: Optional[httpx.AsyncBaseTransport] = None,
+        clock: Callable[[], datetime.datetime] = lambda: datetime.datetime.now(datetime.timezone.utc),
     ) -> None:
         """`transport` is exposed purely for tests (httpx.MockTransport) to
         drive this client's error-classification logic without a real
         network call — production code never passes it."""
         self._api_key = api_key
+        self._clock = clock
         self._http = httpx.AsyncClient(base_url=_BASE_URL, timeout=timeout_seconds, transport=transport)
 
     async def aclose(self) -> None:
@@ -125,8 +132,9 @@ class YouTubeClient:
             )
 
         if reason == "quotaExceeded":
-            raise RateLimitedError(
-                f"YouTube API daily quota exceeded: {message}", retry_after=_QUOTA_EXCEEDED_RETRY_AFTER_SECONDS
+            raise QuotaExceededError(
+                f"YouTube API daily quota exceeded: {message}",
+                retry_after=seconds_until_pacific_midnight(self._clock()) + _QUOTA_RESET_MARGIN_SECONDS,
             )
 
         if response.status_code == 404 or reason in {"channelNotFound", "videoNotFound", "playlistItemsNotAccessible"}:

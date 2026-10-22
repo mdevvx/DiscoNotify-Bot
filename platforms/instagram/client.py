@@ -15,11 +15,15 @@ account invalid the moment the operator's token expires.
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any, Callable, Dict, List, Optional
 
 import httpx
 
 from utils.errors import PermanentPlatformError, RateLimitedError, TransientPlatformError
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 _BASE_URL = "https://graph.facebook.com/v26.0"
 # The most recent media items fetched per call. Meta's usage counts
@@ -32,7 +36,14 @@ _MEDIA_FIELDS = "id,caption,timestamp,media_type,media_product_type,media_url,th
 # (custom), 80002 (Instagram business use case). None carries a
 # Retry-After; app-level usage is a rolling one-hour window.
 _RATE_LIMIT_CODES = {4, 17, 32, 613, 80002}
+# How long to pause after a rate limit when Meta doesn't say: 15 minutes the
+# first time, doubling while it keeps happening (30, then 60), reset by the
+# next successful call. When Meta does say (the business-use-case header's
+# estimated_time_to_regain_access, in minutes) that wins.
 _RATE_LIMIT_WAIT_SECONDS = 15 * 60.0
+_MAX_ESCALATED_WAIT_SECONDS = 60 * 60.0
+_MAX_ADVISED_WAIT_SECONDS = 6 * 60 * 60.0
+_ADVISED_WAIT_PADDING_SECONDS = 60.0
 _INVALID_TOKEN_CODE = 190
 # 10/200-299: the token lacks a permission the call needs.
 _PERMISSION_CODES = {10, *range(200, 300)}
@@ -49,6 +60,7 @@ class InstagramClient:
         *,
         timeout_seconds: float = 15.0,
         transport: Optional[httpx.AsyncBaseTransport] = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         """`transport` is exposed purely for tests (httpx.MockTransport) to
         drive this client's error-classification logic without a real
@@ -62,6 +74,16 @@ class InstagramClient:
         # Meta's x-app-usage header: the highest of call count / CPU time /
         # total time, as a percentage of the app's hourly limit.
         self.app_usage_percent: Optional[int] = None
+        self._clock = clock
+        self._usage_read_at: Optional[float] = None
+        # Rate limits in a row without a successful call between them.
+        self._consecutive_rate_limits = 0
+
+    def app_usage_age(self) -> Optional[float]:
+        """Seconds since Meta last reported `app_usage_percent` (None if it
+        never has). The figure only changes when a call is made, so an old
+        one says little about the window's state now."""
+        return None if self._usage_read_at is None else max(self._clock() - self._usage_read_at, 0.0)
 
     async def aclose(self) -> None:
         await self._http.aclose()
@@ -100,6 +122,7 @@ class InstagramClient:
 
         self._record_usage(response)
         if response.status_code == 200:
+            self._consecutive_rate_limits = 0
             return response.json()
 
         self._raise_for_error(response)
@@ -112,8 +135,28 @@ class InstagramClient:
         try:
             usage = json.loads(header)
             self.app_usage_percent = max(int(value) for value in usage.values())
+            self._usage_read_at = self._clock()
         except (ValueError, TypeError, AttributeError):
             pass
+
+    def _rate_limit_wait(self, response: httpx.Response) -> float:
+        """How long to stay away after a rate limit: what Meta says, else an
+        escalating wait."""
+        buc_header = response.headers.get("x-business-use-case-usage")
+        advised = _advised_wait_seconds(buc_header)
+        escalated = min(_RATE_LIMIT_WAIT_SECONDS * (2**self._consecutive_rate_limits), _MAX_ESCALATED_WAIT_SECONDS)
+        if self._consecutive_rate_limits == 0:
+            # Which headers Meta really sends with a rate limit isn't documented
+            # for Business Discovery — keep a sample in the log.
+            logger.warning(
+                "Instagram rate limit — x-app-usage=%s x-business-use-case-usage=%s",
+                response.headers.get("x-app-usage"),
+                (buc_header or "")[:300] or None,
+            )
+        self._consecutive_rate_limits += 1
+        if advised is not None:
+            return min(advised + _ADVISED_WAIT_PADDING_SECONDS, _MAX_ADVISED_WAIT_SECONDS)
+        return escalated
 
     def _raise_for_error(self, response: httpx.Response) -> None:
         error: Dict[str, Any] = {}
@@ -126,7 +169,7 @@ class InstagramClient:
         message = error.get("error_user_msg") or error.get("message") or response.text
 
         if response.status_code == 429 or code in _RATE_LIMIT_CODES:
-            raise RateLimitedError(f"Instagram API rate limited: {message}", retry_after=_RATE_LIMIT_WAIT_SECONDS)
+            raise RateLimitedError(f"Instagram API rate limited: {message}", retry_after=self._rate_limit_wait(response))
 
         if code == _INVALID_TOKEN_CODE:
             # The operator's credential, not the monitored account — never
@@ -165,3 +208,22 @@ class InstagramClient:
         # fault rather than the account's — retry/record as a failure, but
         # don't mark the account invalid on a guess.
         raise TransientPlatformError(f"Instagram API error {response.status_code} (code {code}): {message}")
+
+
+def _advised_wait_seconds(header: Optional[str]) -> Optional[float]:
+    """The longest `estimated_time_to_regain_access` (minutes) in Meta's
+    x-business-use-case-usage header, as seconds; None if it's absent or 0."""
+    if not header:
+        return None
+    try:
+        data = json.loads(header)
+        minutes = [
+            float(entry.get("estimated_time_to_regain_access") or 0)
+            for entries in data.values()
+            for entry in entries
+            if isinstance(entry, dict)
+        ]
+    except (ValueError, TypeError, AttributeError):
+        return None
+    longest = max(minutes, default=0.0)
+    return longest * 60.0 if longest > 0 else None

@@ -131,10 +131,35 @@ class Settings(BaseSettings):
     # (e.g. `python -c "import secrets; print(secrets.token_urlsafe(48))"`).
     billing_link_secret: Optional[SecretStr] = Field(default=None, alias="BILLING_LINK_SECRET")
     billing_link_ttl_minutes: int = Field(default=30, ge=1, le=1440, alias="BILLING_LINK_TTL_MINUTES")
-    # Upgrade reminders DM'd to the server owner once the trial or
-    # subscription has run out: right away, then every N days, at most M.
+    # Where a new server's free trial is activated (default: /activate on the
+    # same site as BILLING_SUBSCRIBE_URL). The trial starts when someone does
+    # this on the website, which also collects their email address.
+    billing_activate_url: Optional[str] = Field(default=None, alias="BILLING_ACTIVATE_URL")
+    # Upgrade reminders emailed once a free trial has ended without a
+    # subscription: right away, then every N days, at most M. (Editable in the
+    # admin panel too: the `email_schedule` setting there wins.)
     billing_reminder_every_days: int = Field(default=7, alias="BILLING_REMINDER_EVERY_DAYS")
     billing_reminder_max: int = Field(default=3, alias="BILLING_REMINDER_MAX")
+
+    # Email, sent through the SMTP server of a mailbox on your own domain, so it
+    # comes from @disconotify.com (see README, "Email setup"). Emails are queued
+    # in the database either way; unless host, username, password and
+    # EMAIL_FROM are all set nothing is sent and they stay queued.
+    email_smtp_host: Optional[str] = Field(default=None, alias="EMAIL_SMTP_HOST")
+    # 587 with STARTTLS (the default) or 465 with SSL.
+    email_smtp_port: int = Field(default=587, ge=1, le=65535, alias="EMAIL_SMTP_PORT")
+    email_smtp_security: str = Field(default="starttls", alias="EMAIL_SMTP_SECURITY")
+    email_smtp_username: Optional[str] = Field(default=None, alias="EMAIL_SMTP_USERNAME")
+    email_smtp_password: Optional[SecretStr] = Field(default=None, alias="EMAIL_SMTP_PASSWORD")
+    # Every email is sent from this one address — "DiscoNotify <no-reply@disconotify.com>" — and cannot be
+    # replied to. It must be the mailbox's own address (or one it may send as).
+    email_from: Optional[str] = Field(default=None, alias="EMAIL_FROM")
+    # Shown in the emails as where to write for help (customers email it themselves; nothing is ever sent from it).
+    support_email: Optional[str] = Field(default=None, alias="SUPPORT_EMAIL")
+    # The website's unsubscribe page; the bot adds ?t=<signed token> (signed with BILLING_LINK_SECRET).
+    email_unsubscribe_url: Optional[str] = Field(default=None, alias="EMAIL_UNSUBSCRIBE_URL")
+    # Days before a card payment is taken that the "payment coming up" email goes out.
+    email_renewal_reminder_days: int = Field(default=3, ge=1, le=30, alias="EMAIL_RENEWAL_REMINDER_DAYS")
     # DM every bot owner (DISCORD_OWNER_IDS) about each payment, renewal,
     # failed charge, cancellation and failed crypto payment, with the server.
     billing_owner_alerts: bool = Field(default=True, alias="BILLING_OWNER_ALERTS")
@@ -186,6 +211,20 @@ class Settings(BaseSettings):
         if token.lower().startswith("bot "):
             token = token[4:].strip()
         return token
+
+    @field_validator("email_smtp_security")
+    @classmethod
+    def _validate_smtp_security(cls, value: str) -> str:
+        lowered = value.strip().lower()
+        if lowered not in ("starttls", "ssl"):
+            raise ValueError("EMAIL_SMTP_SECURITY must be 'starttls' or 'ssl'")
+        return lowered
+
+    @property
+    def email_configured(self) -> bool:
+        return bool(
+            self.email_smtp_host and self.email_smtp_username and self.email_smtp_password and self.email_from
+        )
 
     @field_validator("log_level")
     @classmethod

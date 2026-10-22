@@ -143,6 +143,14 @@ def _row(db: FakeDatabase) -> Dict[str, Any]:
     return db.tables["notify_billing"].rows[0]
 
 
+async def _activated(service: BillingService, db: FakeDatabase, clock: Clock, days: int = 7) -> None:
+    """What the website's notify_activate_trial() does: the trial starts now."""
+    await service.access(_GUILD)
+    _row(db)["trial_ends_at"] = (clock.now + datetime.timedelta(days=days)).isoformat()
+    _row(db)["trial_activated_at"] = clock.now.isoformat()
+    service._invalidate(_GUILD)
+
+
 def _website_row(
     db: FakeDatabase, provider: str, external_id: str, *, months: int, amount_usd: float, created_at: datetime.datetime = _START
 ) -> None:
@@ -195,8 +203,20 @@ async def test_billing_off_gives_everyone_access_and_writes_nothing(db: FakeData
     assert db.tables["notify_billing"].rows == []
 
 
-async def test_a_server_gets_a_7_day_trial_then_loses_access(db: FakeDatabase, clock: Clock) -> None:
+async def test_a_new_server_has_no_trial_until_it_is_activated(db: FakeDatabase, clock: Clock) -> None:
     service = _service(db, clock)
+
+    first = await service.access(_GUILD)
+
+    assert first.allowed is False and first.reason == AccessReason.NEEDS_ACTIVATION
+    assert _row(db)["activation_required"] is True and _row(db).get("trial_ends_at") is None
+    assert await service.allowed_guild_ids({_GUILD}) == set()
+    assert await service.remaining_trial_days(_GUILD) == 0
+
+
+async def test_an_activated_server_gets_the_trial_then_loses_access(db: FakeDatabase, clock: Clock) -> None:
+    service = _service(db, clock)
+    await _activated(service, db, clock)
 
     first = await service.access(_GUILD)
     clock.advance(days=8)
@@ -204,6 +224,63 @@ async def test_a_server_gets_a_7_day_trial_then_loses_access(db: FakeDatabase, c
 
     assert first.reason == AccessReason.TRIAL and first.until == _START + datetime.timedelta(days=7)
     assert later == set()
+
+
+async def test_an_existing_server_keeps_its_trial_without_activating(db: FakeDatabase, clock: Clock) -> None:
+    """Rows from before activation existed have a trial and activation_required false."""
+    db.tables["notify_billing"].rows.append(
+        {"guild_id": _GUILD, "trial_ends_at": (_START + datetime.timedelta(days=3)).isoformat(), "activation_required": False}
+    )
+
+    access = await _service(db, clock).access(_GUILD)
+
+    assert access.allowed and access.reason == AccessReason.TRIAL
+
+
+async def test_paying_works_without_activating_the_trial(db: FakeDatabase, clock: Clock) -> None:
+    service = _service(db, clock)
+    await service.access(_GUILD)
+    _row(db)["paid_until"] = (_START + datetime.timedelta(days=30)).isoformat()
+    service._invalidate(_GUILD)
+
+    assert (await service.access(_GUILD)).reason == AccessReason.PAID
+
+
+async def test_the_inviter_is_remembered_and_unactivated_servers_listed(db: FakeDatabase, clock: Clock) -> None:
+    service = _service(db, clock)
+    await service.access(_GUILD)
+
+    await service.set_invited_by(_GUILD, 77)
+
+    assert _row(db)["invited_by"] == 77
+    assert [row["guild_id"] for row in await service.awaiting_activation()] == [_GUILD]
+    await _activated(service, db, clock)
+    assert await service.awaiting_activation() == []
+
+
+def test_the_activation_link_defaults_to_the_websites_activate_page(db: FakeDatabase, clock: Clock) -> None:
+    assert _service(db, clock, subscribe_url="https://disconotify.com/subscribe").activate_url == "https://disconotify.com/activate"
+    assert _service(db, clock).activate_url == "https://disconotify.com/activate"
+    assert _service(db, clock, activate_url="https://x.test/go").activate_url == "https://x.test/go"
+    assert _service(db, clock, subscribe_url="https://disconotify.com/subscribe?ref=bot").site_url("/manage") == "https://disconotify.com/manage"
+
+
+async def test_upcoming_card_charges_cover_renewals_and_trial_conversions_but_not_cancelled_ones(db: FakeDatabase, clock: Clock) -> None:
+    service = _service(db, clock)
+    await service.access(_GUILD)
+    soon = _START + datetime.timedelta(days=2)
+    row = _row(db)
+    row.update({"card_subscription_id": "sub_1", "card_status": "active", "paid_until": soon.isoformat()})
+
+    window = datetime.timedelta(days=3)
+    assert await service.upcoming_card_charges(window) == [{"guild_id": _GUILD, "charge_at": soon}]
+    assert await service.upcoming_card_charges(datetime.timedelta(days=1)) == []
+
+    row.update({"card_status": "trialing", "trial_ends_at": soon.isoformat()})
+    assert [c["charge_at"] for c in await service.upcoming_card_charges(window)] == [soon]
+
+    row["card_cancels_at"] = soon.isoformat()
+    assert await service.upcoming_card_charges(window) == []
 
 
 async def test_whitelisted_server_never_needs_to_pay(db: FakeDatabase, clock: Clock) -> None:
@@ -420,7 +497,7 @@ async def test_a_polar_outage_doesnt_stop_crypto_payments_being_credited(db: Fak
 async def test_the_checkout_carries_the_server_the_requester_and_the_remaining_trial(db: FakeDatabase, clock: Clock) -> None:
     polar = FakePolar()
     service = _service(db, clock, polar=polar, polar_success_url="https://disconotify.com/thanks")
-    await service.access(_GUILD)
+    await _activated(service, db, clock)
     clock.advance(days=2, hours=1)  # 4 days 23 hours of trial left
 
     url = await service.start_card_checkout(_GUILD, user_id=7, channel_id=555)
@@ -617,7 +694,7 @@ def test_website_links_carry_the_server_id(db: FakeDatabase, clock: Clock) -> No
 
 async def test_reminders_start_when_the_trial_ends_then_repeat_weekly_up_to_three(db: FakeDatabase, clock: Clock) -> None:
     service = _service(db, clock)
-    await service.access(_GUILD)
+    await _activated(service, db, clock)
 
     async def remind() -> bool:
         due = await service.reminders_due({_GUILD})
@@ -641,7 +718,7 @@ async def test_reminders_start_when_the_trial_ends_then_repeat_weekly_up_to_thre
 
 async def test_paying_resets_the_reminders_for_the_next_lapse(db: FakeDatabase, clock: Clock) -> None:
     service = _service(db, clock)
-    await service.access(_GUILD)
+    await _activated(service, db, clock)
     clock.advance(days=8)
     for row in await service.reminders_due({_GUILD}):
         await service.mark_reminded(row)
@@ -650,8 +727,33 @@ async def test_paying_resets_the_reminders_for_the_next_lapse(db: FakeDatabase, 
     assert await service.reminders_due({_GUILD}) == []
     assert _row(db)["reminders_sent"] == 0
 
-    clock.advance(days=34)  # paid time + grace over
+    # Once the paid time (and grace) ran out, the lapsed subscription is reminded about from the start.
+    clock.advance(days=34)
     assert [row["guild_id"] for row in await service.reminders_due({_GUILD})] == [_GUILD]
+
+
+async def test_a_server_that_never_activated_gets_no_trial_reminders(db: FakeDatabase, clock: Clock) -> None:
+    service = _service(db, clock)
+    await service.access(_GUILD)
+    clock.advance(days=30)
+
+    assert await service.reminders_due({_GUILD}) == []
+
+
+async def test_the_reminder_schedule_can_be_overridden(db: FakeDatabase, clock: Clock) -> None:
+    service = _service(db, clock)
+    await _activated(service, db, clock)
+    clock.advance(days=8)
+    for row in await service.reminders_due({_GUILD}, every_days=2, maximum=2):
+        await service.mark_reminded(row)
+
+    clock.advance(days=1)
+    assert await service.reminders_due({_GUILD}, every_days=2, maximum=2) == []
+    clock.advance(days=1)
+    for row in await service.reminders_due({_GUILD}, every_days=2, maximum=2):
+        await service.mark_reminded(row)
+    clock.advance(days=10)
+    assert await service.reminders_due({_GUILD}, every_days=2, maximum=2) == []
 
 
 async def test_whitelisted_servers_and_billing_off_get_no_reminders(db: FakeDatabase, clock: Clock) -> None:

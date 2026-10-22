@@ -53,6 +53,10 @@ class TikTokAdapter(PlatformAdapter):
     platform: ClassVar[str] = "tiktok"
     capabilities: ClassVar[FrozenSet[Capability]] = frozenset({Capability.VIDEOS})
     counts_own_requests: ClassVar[bool] = True
+    # An unofficial endpoint that blocks on request volume: don't hammer it
+    # with retries, and don't hit it with every account at the same instant.
+    max_retry_attempts: ClassVar[Optional[int]] = 2
+    spread_polls: ClassVar[bool] = True
 
     def __init__(
         self,

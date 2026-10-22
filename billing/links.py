@@ -77,12 +77,59 @@ def verify_link(secret: str, token: str, *, now: Optional[float] = None) -> Opti
         payload = json.loads(_unb64(encoded))
     except (ValueError, binascii.Error, UnicodeDecodeError):
         return None
-    if not isinstance(payload, dict) or payload.get("v") != _VERSION:
+    if not isinstance(payload, dict) or payload.get("v") != _VERSION or "k" in payload:
+        return None  # not a subscribe link (an unsubscribe token, say)
+    try:
+        expires = int(payload.get("e", 0))
+    except (TypeError, ValueError):
         return None
-    if int(payload.get("e", 0)) < (time.time() if now is None else now):
+    if expires < (time.time() if now is None else now):
         return None
     return payload
 
 
 def _sign(secret: str, encoded_payload: str) -> str:
     return _b64(hmac.new(secret.encode("utf-8"), encoded_payload.encode("ascii"), hashlib.sha256).digest())
+
+
+# ── Unsubscribe links (in emails) ──────────────────────────────────────
+#
+#   payload = {"v": 1, "k": "unsub", "e": <email>, "g": <server ID as a string>, "x": <expiry>}
+#   token   = base64url(compact JSON) "." base64url(HMAC-SHA256(secret, payload))
+#
+# Same secret and format as the subscribe links; the website verifies it and
+# sets `marketing_unsubscribed_at` on that email's contact rows.
+
+_UNSUBSCRIBE_KIND = "unsub"
+UNSUBSCRIBE_TTL_SECONDS = 365 * 24 * 3600
+
+
+def sign_unsubscribe(
+    secret: str, *, email: str, guild_id: Optional[int] = None, now: Optional[float] = None
+) -> str:
+    payload: Dict[str, Any] = {
+        "v": _VERSION,
+        "k": _UNSUBSCRIBE_KIND,
+        "e": email.strip().lower(),
+        "x": int((time.time() if now is None else now) + UNSUBSCRIBE_TTL_SECONDS),
+    }
+    if guild_id:
+        payload["g"] = str(guild_id)
+    encoded = _b64(json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+    return f"{encoded}.{_sign(secret, encoded)}"
+
+
+def verify_unsubscribe(secret: str, token: str, *, now: Optional[float] = None) -> Optional[Dict[str, Any]]:
+    """The payload if the token is a genuine, unexpired unsubscribe token."""
+    try:
+        encoded, signature = token.split(".")
+        if not hmac.compare_digest(signature, _sign(secret, encoded)):
+            return None
+        payload = json.loads(_unb64(encoded))
+    except (ValueError, binascii.Error, UnicodeDecodeError):
+        return None
+    if not isinstance(payload, dict) or payload.get("v") != _VERSION or payload.get("k") != _UNSUBSCRIBE_KIND:
+        return None
+    if int(payload.get("x", 0)) < (time.time() if now is None else now):
+        return None
+    return payload

@@ -4,6 +4,7 @@ network call is ever made."""
 
 from __future__ import annotations
 
+import datetime
 import json
 
 import httpx
@@ -14,7 +15,9 @@ from utils.errors import PermanentPlatformError, RateLimitedError, TransientPlat
 
 
 def _client_with(handler) -> YouTubeClient:
-    return YouTubeClient("fake-api-key", transport=httpx.MockTransport(handler))
+    # 14:00 UTC is 07:00 Pacific, so the daily quota resets 17 hours from "now".
+    fixed_now = datetime.datetime(2026, 10, 23, 14, 0, tzinfo=datetime.timezone.utc)
+    return YouTubeClient("fake-api-key", transport=httpx.MockTransport(handler), clock=lambda: fixed_now)
 
 
 def _json_response(status: int, body: dict) -> httpx.Response:
@@ -66,8 +69,7 @@ async def test_quota_exceeded_raises_rate_limited_error_with_a_long_default_wait
     with pytest.raises(RateLimitedError) as exc_info:
         await client.get_channel(channel_id="UCabc")
 
-    assert exc_info.value.retry_after is not None
-    assert exc_info.value.retry_after > 3600  # several hours, not a short retry
+    assert exc_info.value.retry_after == 17 * 3600 + 60  # until the Pacific-midnight reset, plus a minute
 
 
 async def test_video_not_found_raises_permanent_error() -> None:

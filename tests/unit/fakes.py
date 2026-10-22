@@ -138,6 +138,8 @@ class FakeTable:
     def find_conflict(self, candidate: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         for cols in self._unique_on:
             key = tuple(candidate.get(c) for c in cols)
+            if all(value is None for value in key):
+                continue  # like SQL: NULLs never collide
             for row in self.rows:
                 if tuple(row.get(c) for c in cols) == key:
                     return row
@@ -190,6 +192,24 @@ class FakeDatabase:
                 has_generated_id=True,
             ),
             "notify_dm_log": FakeTable(unique_on=[], defaults={"created_at": _now_iso, "error": None, "payment_id": None}),
+            "notify_email_contacts": FakeTable(
+                unique_on=[("guild_id", "email")],
+                defaults={"marketing_unsubscribed_at": None, "created_at": _now_iso},
+                has_generated_id=True,
+            ),
+            "notify_email_templates": FakeTable(unique_on=[("key",)], defaults={"enabled": True}),
+            "notify_email_outbox": FakeTable(
+                unique_on=[("id",), ("dedupe_key",)],
+                defaults={
+                    "status": "queued",
+                    "kind": "auto",
+                    "attempts": 0,
+                    "variables": dict,
+                    "created_at": _now_iso,
+                    "dedupe_key": None,
+                },
+                has_generated_id=True,
+            ),
             "notify_platform_health": FakeTable(
                 unique_on=[("platform",)],
                 defaults={
