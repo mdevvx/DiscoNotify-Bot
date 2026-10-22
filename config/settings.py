@@ -148,7 +148,8 @@ class Settings(BaseSettings):
     email_smtp_host: Optional[str] = Field(default=None, alias="EMAIL_SMTP_HOST")
     # 587 with STARTTLS (the default) or 465 with SSL.
     email_smtp_port: int = Field(default=587, ge=1, le=65535, alias="EMAIL_SMTP_PORT")
-    email_smtp_security: str = Field(default="starttls", alias="EMAIL_SMTP_SECURITY")
+    # "starttls" or "ssl"; left empty it follows the port: 465 means ssl, anything else starttls.
+    email_smtp_security: Optional[str] = Field(default=None, alias="EMAIL_SMTP_SECURITY")
     email_smtp_username: Optional[str] = Field(default=None, alias="EMAIL_SMTP_USERNAME")
     email_smtp_password: Optional[SecretStr] = Field(default=None, alias="EMAIL_SMTP_PASSWORD")
     # Every email is sent from this one address — "DiscoNotify <no-reply@disconotify.com>" — and cannot be
@@ -214,11 +215,19 @@ class Settings(BaseSettings):
 
     @field_validator("email_smtp_security")
     @classmethod
-    def _validate_smtp_security(cls, value: str) -> str:
-        lowered = value.strip().lower()
+    def _validate_smtp_security(cls, value: Optional[str]) -> Optional[str]:
+        lowered = (value or "").strip().lower()
+        if not lowered:
+            return None
         if lowered not in ("starttls", "ssl"):
             raise ValueError("EMAIL_SMTP_SECURITY must be 'starttls' or 'ssl'")
         return lowered
+
+    @property
+    def email_smtp_mode(self) -> str:
+        """How the SMTP connection is encrypted: what EMAIL_SMTP_SECURITY says,
+        else by port (465 is SSL from the first byte, the rest use STARTTLS)."""
+        return self.email_smtp_security or ("ssl" if self.email_smtp_port == 465 else "starttls")
 
     @property
     def email_configured(self) -> bool:

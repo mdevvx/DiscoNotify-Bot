@@ -8,6 +8,12 @@ bot's event loop never waits on the mail server. One connection per message:
 the volume here is a handful of emails an hour, and it keeps a dropped
 connection from ever affecting the next email.
 
+Every address the mail host's DNS lists is tried in turn, IPv4 first, each with
+its whole connection and encryption handshake, and the next one is tried when
+one fails. Some hosts (Railway among them) can't route IPv6 and fail with
+"Network is unreachable"; some home networks can open an IPv4 connection but
+never finish the TLS handshake over it. Either way a working address is found.
+
 Security: `ssl` (implicit TLS, usually port 465) or `starttls` (usually port
 587) — never plain text. The login is only sent over the encrypted connection.
 """
@@ -16,15 +22,59 @@ from __future__ import annotations
 
 import asyncio
 import smtplib
+import socket
 import ssl
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid, parseaddr
-from typing import Optional
+from typing import Any, List, Optional, Tuple
 
 from mail.errors import PermanentMailError, TransientMailError
 
 _TIMEOUT_SECONDS = 20.0
 SECURITY_MODES = ("ssl", "starttls")
+
+
+Target = Tuple[int, Any]  # (address family, socket address)
+
+# Each address gets this long to connect and finish its encryption handshake
+# (the last one gets _TIMEOUT_SECONDS), so a dead address doesn't hold up the next.
+_ATTEMPT_TIMEOUT_SECONDS = 8.0
+
+
+def resolve_targets(host: str, port: int) -> List[Target]:
+    """The mail host's addresses, IPv4 first (DNS order otherwise)."""
+    entries = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    entries.sort(key=lambda entry: 0 if entry[0] == socket.AF_INET else 1)
+    return [(family, sockaddr) for family, _kind, _proto, _canonical, sockaddr in entries]
+
+
+def _open_socket(target: Target, timeout: float) -> socket.socket:
+    family, sockaddr = target
+    sock = socket.socket(family, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        sock.connect(sockaddr)
+    except OSError:
+        sock.close()
+        raise
+    return sock
+
+
+class _Smtp(smtplib.SMTP):
+    """Connects to one chosen address (`_target`) rather than letting smtplib pick."""
+
+    _target: Target
+
+    def _get_socket(self, host: str, port: int, timeout: float) -> socket.socket:
+        return _open_socket(self._target, timeout)
+
+
+class _SmtpSsl(smtplib.SMTP_SSL):
+    _target: Target
+
+    def _get_socket(self, host: str, port: int, timeout: float) -> socket.socket:
+        # Wrapped with the host name, so the certificate is still checked against it.
+        return self.context.wrap_socket(_open_socket(self._target, timeout), server_hostname=self._host)
 
 
 class SmtpClient:
@@ -110,15 +160,35 @@ class SmtpClient:
             raise TransientMailError(f"Couldn't reach the mail server: {type(exc).__name__}: {exc}") from exc
 
     def _connect(self) -> smtplib.SMTP:
+        """An open, encrypted connection to the first address that works."""
+        targets = resolve_targets(self._host, self._port)
+        last_error: Exception = OSError(f"No address found for {self._host}")
+        for index, target in enumerate(targets):
+            last = index == len(targets) - 1
+            try:
+                return self._connect_to(target, _TIMEOUT_SECONDS if last else _ATTEMPT_TIMEOUT_SECONDS)
+            except (OSError, ssl.SSLError, smtplib.SMTPServerDisconnected, smtplib.SMTPConnectError, TimeoutError) as exc:
+                last_error = exc  # try the next address
+        raise last_error
+
+    def _connect_to(self, target: Target, timeout: float) -> smtplib.SMTP:
         context = ssl.create_default_context()
+        server: smtplib.SMTP
         if self._security == "ssl":
-            return smtplib.SMTP_SSL(self._host, self._port, timeout=_TIMEOUT_SECONDS, context=context)
-        server = smtplib.SMTP(self._host, self._port, timeout=_TIMEOUT_SECONDS)
+            server = _SmtpSsl(timeout=timeout, context=context)
+        else:
+            server = _Smtp(timeout=timeout)
+        server._target = target  # type: ignore[attr-defined]
+        server._host = self._host  # the name the certificate is checked against
         try:
-            server.starttls(context=context)  # the login below only ever travels encrypted
+            server.connect(self._host, self._port)
+            if self._security != "ssl":
+                server.starttls(context=context)  # the login below only ever travels encrypted
         except Exception:
             server.close()
             raise
+        if server.sock is not None:
+            server.sock.settimeout(_TIMEOUT_SECONDS)
         return server
 
 

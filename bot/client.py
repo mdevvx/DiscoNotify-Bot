@@ -231,7 +231,7 @@ class DiscoNotifyBot(commands.Bot):
                     settings.email_smtp_username,  # type: ignore[arg-type]
                     settings.email_smtp_password.get_secret_value(),  # type: ignore[union-attr]
                     sender=settings.email_from,  # type: ignore[arg-type]
-                    security=settings.email_smtp_security,
+                    security=settings.email_smtp_mode,
                 )
                 if settings.email_configured
                 else None
