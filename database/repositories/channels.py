@@ -76,6 +76,11 @@ class NotificationChannelRepository:
             self._db.client.table(_CHANNELS_TABLE).update({"webhook_url": webhook_url}).eq("id", channel_row_id).execute()
         )
 
+    async def list_with_webhooks(self, guild_id: int) -> List[NotificationChannelRow]:
+        """Every channel of this server that has a stored webhook."""
+        result = await self._db.client.table(_CHANNELS_TABLE).select("*").eq("guild_id", guild_id).execute()
+        return [row for row in result.data if row.get("webhook_url")]
+
     async def link_account(self, guild_id: int, account_id: str, channel_row_id: str) -> None:
         try:
             await (

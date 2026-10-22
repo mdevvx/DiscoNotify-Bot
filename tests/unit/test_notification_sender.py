@@ -76,6 +76,12 @@ class FakeWebhook:
         self._channel.sent.append(_record(view, allowed_mentions, username=username))
         return FakeSentMessage(self._channel, len(self._channel.sent) - 1)
 
+    async def delete(self):
+        if self.url in self._channel.deleted_webhook_urls:
+            raise _fake_http_exception(discord.NotFound, status=404)
+        self._channel.deleted_webhook_urls.add(self.url)
+        self._channel.webhook_delete_calls += 1
+
     async def fetch(self):
         self._channel.webhook_fetch_calls += 1
         if self.url in self._channel.deleted_webhook_urls:
@@ -104,6 +110,7 @@ class FakeDiscordChannel:
         self.create_webhook_calls = 0
         self.webhook_fetch_calls = 0
         self.webhook_send_calls = 0
+        self.webhook_delete_calls = 0
         self.edits = 0
         self.deleted_webhook_urls: set = set()
         self._created_webhook_urls: List[str] = []
@@ -686,3 +693,54 @@ async def test_no_image_check_when_embeds_are_off(harness: Harness) -> None:
 
     assert harness.image_checks == []
     assert len(channel.sent) == 1
+
+
+async def test_ensure_webhook_reports_only_a_newly_created_webhook(harness: Harness) -> None:
+    channel = await harness.add_channel(1, "acc-1", 555)
+
+    row = await harness.channel_repo.get_by_discord_channel(1, 555)
+    assert await harness.sender.ensure_webhook(row, channel) is True
+
+    row = await harness.channel_repo.get_by_discord_channel(1, 555)
+    assert await harness.sender.ensure_webhook(row, channel) is False  # kept, not recreated
+    assert channel.create_webhook_calls == 1
+
+
+async def test_ensure_webhook_is_false_when_the_bot_cannot_manage_webhooks(harness: Harness) -> None:
+    channel = await harness.add_channel(
+        1, "acc-1", 555, raise_on_create_webhook=_fake_http_exception(discord.Forbidden, status=403)
+    )
+    row = await harness.channel_repo.get_by_discord_channel(1, 555)
+
+    assert await harness.sender.ensure_webhook(row, channel) is False
+
+
+async def test_leaving_a_server_deletes_its_webhooks_and_forgets_them(harness: Harness) -> None:
+    first = await harness.add_channel(1, "acc-1", 555)
+    second = await harness.add_channel(1, "acc-2", 556)
+    other = await harness.add_channel(2, "acc-3", 557)
+    for guild_id, channel in ((1, first), (1, second), (2, other)):
+        row = await harness.channel_repo.get_by_discord_channel(guild_id, channel.id)
+        await harness.sender.ensure_webhook(row, channel)
+
+    assert await harness.sender.delete_guild_webhooks(1) == 2
+
+    assert first.webhook_delete_calls == 1 and second.webhook_delete_calls == 1
+    assert other.webhook_delete_calls == 0  # another server's webhook is untouched
+    for channel_id in (555, 556):
+        row = await harness.channel_repo.get_by_discord_channel(1, channel_id)
+        assert row is not None and row["webhook_url"] is None
+    kept = await harness.channel_repo.get_by_discord_channel(2, 557)
+    assert kept is not None and kept["webhook_url"]
+
+
+async def test_a_webhook_already_gone_is_still_forgotten(harness: Harness) -> None:
+    channel = await harness.add_channel(1, "acc-1", 555)
+    row = await harness.channel_repo.get_by_discord_channel(1, 555)
+    await harness.sender.ensure_webhook(row, channel)
+    channel.delete_webhooks()
+
+    assert await harness.sender.delete_guild_webhooks(1) == 0
+
+    updated = await harness.channel_repo.get_by_discord_channel(1, 555)
+    assert updated is not None and updated["webhook_url"] is None

@@ -1,14 +1,11 @@
-"""Joining a new server: commands synced there (unless already global),
-trial started, and an intro card posted in a channel the bot can use."""
+"""Joining a new server: commands synced there (unless already global) and the
+trial started, with nothing posted in the server."""
 
 from __future__ import annotations
 
-import datetime
 from typing import Any, List, Optional
 
-from billing.access import Access, AccessReason
 from bot import onboarding
-from ui.cards import plain_text
 
 
 class FakePermissions:
@@ -131,31 +128,10 @@ def test_no_intro_channel_when_the_bot_cannot_post_anywhere() -> None:
     assert onboarding.pick_intro_channel(FakeGuild([FakeChannel("rules", 0, can_post=False)])) is None
 
 
-# ── intro card ──────────────────────────────────────────────────────────
-
-
-def test_intro_lists_the_setup_commands() -> None:
-    text = plain_text(onboarding.intro_card(FakeBot(), None))
-
-    assert "Thanks for adding DiscoNotify" in text
-    for command in ("/notify account-add", "/notify alerts", "/notify status", "/notify help"):
-        assert command in text
-    assert "Free trial" not in text  # billing off
-
-
-def test_intro_mentions_the_trial_and_price_when_billing_is_on() -> None:
-    access = Access(True, AccessReason.TRIAL, datetime.datetime(2026, 10, 20, tzinfo=datetime.timezone.utc))
-
-    text = plain_text(onboarding.intro_card(FakeBot(billing=True), access))
-
-    assert "7-day free trial has started" in text
-    assert "/notify subscribe" in text and "$2.99/month" in text
-
-
 # ── the whole join ──────────────────────────────────────────────────────
 
 
-async def test_joining_syncs_starts_the_trial_and_posts_the_intro() -> None:
+async def test_joining_syncs_and_starts_the_trial_without_posting_anything() -> None:
     bot = FakeBot(billing=True)
     general = FakeChannel("general", 0)
     guild = FakeGuild([general])
@@ -164,13 +140,12 @@ async def test_joining_syncs_starts_the_trial_and_posts_the_intro() -> None:
 
     assert bot.tree.synced_to == [guild]
     assert bot.billing.started == [42]
-    assert "Free trial" in plain_text(general.sent[0])
+    assert general.sent == []
 
 
-async def test_a_failed_sync_does_not_stop_the_intro() -> None:
-    bot = FakeBot(sync_fails=True)
-    general = FakeChannel("general", 0)
+async def test_a_failed_sync_does_not_stop_the_trial() -> None:
+    bot = FakeBot(billing=True, sync_fails=True)
 
-    await onboarding.on_join(bot, FakeGuild([general]))  # type: ignore[arg-type]
+    await onboarding.on_join(bot, FakeGuild([FakeChannel("general", 0)]))  # type: ignore[arg-type]
 
-    assert len(general.sent) == 1
+    assert bot.billing.started == [42]

@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Sequence, Set
 import discord
 
 from events.models import EventType, NormalizedEvent
+from notifications.sender import webhook_notice
 from notifications.templates import MAX_TEMPLATE_LENGTH, PLACEHOLDERS, format_role_mention, render_custom_message
 from platforms.base import event_types_for_capabilities
 from ui import cards
@@ -358,7 +359,7 @@ class AddAccountModal(_Form):
         # Created here rather than waiting for the first notification, so the
         # admin can rename it / give it a custom avatar in Discord's own
         # channel-integrations UI before any alert ever goes out through it.
-        await bot.notification_sender.get_or_create_webhook(channel_row, channel)  # type: ignore[attr-defined]
+        webhook_created = await bot.notification_sender.ensure_webhook(channel_row, channel)  # type: ignore[attr-defined]
 
         event_types = event_types_for_capabilities(adapter.capabilities)
         await bot.alert_configs_repo.seed_defaults(  # type: ignore[attr-defined]
@@ -378,10 +379,15 @@ class AddAccountModal(_Form):
             channel.name,
         )
         await _drop_placeholder(interaction)
+        lines = [
+            f"Now monitoring **{account_ref.username}** on {form.name} — alerts will post in "
+            f"{channel.mention}{mention_text}."
+        ]
+        if webhook_created:
+            lines.append(webhook_notice(channel))
         await cards.reply(
             interaction,
-            f"Now monitoring **{account_ref.username}** on {form.name} — alerts will post in "
-            f"{channel.mention}{mention_text}.",
+            *lines,
             title="Account added",
             tone=cards.SUCCESS,
         )

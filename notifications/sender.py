@@ -73,6 +73,13 @@ _IMAGE_RETRY_MAX_WAIT_SECONDS = 30 * 60.0
 _IMAGE_CHECK_TIMEOUT_SECONDS = 5.0
 
 
+def webhook_notice(channel: Any) -> str:
+    return (
+        f"🪝 I created a webhook in {channel.mention}. Open **Channel settings → Integrations → Webhooks** "
+        f"and change its name and logo to match your server's branding — alerts there will use them."
+    )
+
+
 class NotificationSender:
     def __init__(
         self,
@@ -345,6 +352,31 @@ class NotificationSender:
 
         await self._channel_repo.set_webhook_url(channel_row["id"], webhook.url)
         return webhook
+
+    async def ensure_webhook(self, channel_row: Dict[str, Any], discord_channel: Any) -> bool:
+        """Makes sure the channel has its webhook (so an admin can brand it
+        before the first alert). True only when one was newly created here —
+        the caller then tells the admin to go and customize it."""
+        before = channel_row.get("webhook_url")
+        webhook = await self.get_or_create_webhook(channel_row, discord_channel)
+        return webhook is not None and webhook.url != before
+
+    async def delete_guild_webhooks(self, guild_id: int) -> int:
+        """Deletes every webhook the bot made in a server it has left and
+        forgets them. Works without being in the server: a webhook's own
+        URL is enough to delete it. Returns how many were deleted."""
+        deleted = 0
+        for row in await self._channel_repo.list_with_webhooks(guild_id):
+            try:
+                await self._webhook_from_url(row["webhook_url"], client=self._bot).delete()
+                deleted += 1
+            except (discord.NotFound, discord.Forbidden):
+                pass  # already gone
+            except discord.HTTPException:
+                logger.warning("Couldn't delete the webhook for channel %s.", row["channel_id"], exc_info=True)
+                continue  # keep the URL so a later cleanup can retry
+            await self._channel_repo.set_webhook_url(row["id"], None)
+        return deleted
 
     async def _webhook_still_exists(self, webhook: discord.Webhook) -> bool:
         try:

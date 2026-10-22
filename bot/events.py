@@ -59,11 +59,15 @@ def register_events(bot: "DiscoNotifyBot") -> None:
     @bot.event
     async def on_guild_join(guild: discord.Guild) -> None:
         logger.info("Joined guild: %s (%s)", guild.name, guild.id)
-        # Ensures a row (and warm cache entry) exists for this guild immediately.
-        await bot.guilds_repo.is_enabled(guild.id)
-        await bot.guilds_repo.set_present(guild.id, True)
-        # Commands available right away, trial started, intro posted.
+        # Commands available right away and trial started — first, so a database
+        # hiccup below can't leave the new server without its slash commands.
         await onboarding.on_join(bot, guild)
+        try:
+            # Ensures a row (and warm cache entry) exists for this guild immediately.
+            await bot.guilds_repo.is_enabled(guild.id)
+            await bot.guilds_repo.set_present(guild.id, True)
+        except Exception:
+            logger.warning("Couldn't record the new server %s.", guild.id, exc_info=True)
 
     @bot.event
     async def on_guild_remove(guild: discord.Guild) -> None:
@@ -74,6 +78,12 @@ def register_events(bot: "DiscoNotifyBot") -> None:
             await bot.guilds_repo.set_present(guild.id, False)
         except Exception:
             logger.warning("Couldn't mark server %s as removed.", guild.id, exc_info=True)
+        # The bot's webhooks are kept only while it is in the server.
+        try:
+            removed = await bot.notification_sender.delete_guild_webhooks(guild.id)
+            logger.info("Deleted %d webhook(s) of server %s.", removed, guild.id)
+        except Exception:
+            logger.warning("Couldn't delete the webhooks of server %s.", guild.id, exc_info=True)
 
     @bot.event
     async def on_command_error(ctx: commands.Context, error: commands.CommandError) -> None:

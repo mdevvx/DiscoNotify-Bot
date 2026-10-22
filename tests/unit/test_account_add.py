@@ -68,8 +68,9 @@ class FakeSender:
     def __init__(self) -> None:
         self.webhook_requests: List[int] = []
 
-    async def get_or_create_webhook(self, channel_row: Dict[str, Any], channel: Any) -> None:
+    async def ensure_webhook(self, channel_row: Dict[str, Any], channel: Any) -> bool:
         self.webhook_requests.append(channel.id)
+        return True
 
 
 class FakeGuild:
